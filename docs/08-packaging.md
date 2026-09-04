@@ -1,0 +1,128 @@
+# 08 — Packaging and desktop shell
+
+The desktop package is a **delivery mechanism around the daemon + web app**. It is built
+last, and it contains no session logic.
+
+## What Tauri is allowed to do
+
+```text
+✓ open the UI (a WebView pointed at http://127.0.0.1:7337)
+✓ install or locate the teleportd binary
+✓ start teleportd if /health does not answer
+✓ poll /health and show daemon status
+✓ tray icon, menu, window management
+✓ OS notifications (agent finished, agent needs input)
+✓ application updates
+✓ edit config.toml via the daemon or directly
+```
+
+## What Tauri must never do
+
+```text
+✗ own a PTY
+✗ own a session
+✗ define a Tauri-specific RPC protocol
+✗ hold state the daemon does not have
+✗ be required for a session to keep running
+```
+
+The desktop client speaks **the same HTTP + WebSocket API as the phone**. If a feature
+needs a Tauri `#[command]` to work, it is in the wrong process.
+
+## Daemon lifecycle — the important part
+
+**Do not make the Tauri process the conceptual owner of `teleportd`.**
+
+Bundling the daemon as a Tauri sidecar (`externalBin`, with target-triple-specific
+artifacts) is a *distribution* convenience. Session survival must not depend on a
+WebView window staying alive.
+
+Startup logic in the shell:
+
+```text
+app launches
+    ↓
+GET http://127.0.0.1:7337/api/v1/health
+    ↓
+├── 200 OK  → attach to the existing daemon, open the UI
+│
+└── refused → start teleportd detached
+                 (not as a child that dies with the GUI)
+                 ↓
+              poll /health for up to 10 s
+                 ↓
+              ├── ok    → open the UI
+              └── fail  → show the daemon log, offer a retry
+```
+
+On quit, the shell closes its window. **It does not stop the daemon.** Stopping the
+daemon is an explicit user action in the tray menu, with a confirmation naming how many
+sessions will be lost.
+
+### Autostart at login
+
+The daemon should already be running before the GUI opens.
+
+| OS | Mechanism |
+|---|---|
+| Linux | systemd **user** unit (`~/.config/systemd/user/teleportd.service`), `WantedBy=default.target`; enable lingering if it should survive logout |
+| macOS | `launchd` LaunchAgent in `~/Library/LaunchAgents/`, `RunAtLoad=true`, `KeepAlive` on crash |
+| Windows | Task Scheduler task with a **logon trigger**, which exists specifically for starting an executable when a user logs in |
+
+Autostart is user-scoped in every case. Never install a system-level service — that
+would mean running as a different, more privileged user
+([06-security.md](06-security.md#privilege)).
+
+## Build pipeline
+
+```text
+web/         →  vite build          →  web/dist/
+daemon/      →  cargo build --release  →  teleportd[.exe]
+desktop/     →  tauri build         →  .dmg / .msi / .AppImage / .deb
+```
+
+The daemon serves `web/dist` (via `ServeDir` in v1; consider embedding the assets in the
+binary later so `teleportd` is a single self-contained file). SPA fallback: unknown
+non-`/api` paths return `index.html`.
+
+Tauri's `externalBin` picks up the target-triple-suffixed daemon binary
+(`teleportd-x86_64-apple-darwin`, etc.). Build the daemon for each target before
+`tauri build`.
+
+## Signing
+
+Signing is part of the release pipeline, **not** a last-minute step. Both Tauri and
+Electron's distribution documentation treat platform signing as part of practical
+macOS/Windows distribution, and unsigned applications hit increasingly restrictive OS
+behavior.
+
+| OS | Needed |
+|---|---|
+| macOS | Developer ID certificate, codesign, **notarization + stapling**; a hardened-runtime app that spawns a sidecar needs the right entitlements |
+| Windows | Authenticode certificate; unsigned installers trip SmartScreen |
+| Linux | No mandatory signing; sign the repo/AppImage if distributing one |
+
+Set up signing infrastructure at M8, not at release. It routinely takes longer than the
+feature work it gates.
+
+## Electron, if the stack ever changes
+
+Recorded for completeness — not the plan. Electron is the credible alternative *when
+using Node*: official packaging is Electron Forge. Its downsides here are a larger
+privileged renderer surface (Chromium plus desktop APIs, requiring careful isolation,
+sandboxing, no Node integration for remote content, restrictive CSP, validated IPC),
+plus the same independent-daemon lifecycle problem *and* native `node-pty` packaging.
+Choosing Electron does not remove the daemon; it just adds a runtime.
+
+## Browser-only mode is a first-class deployment
+
+Some users will never install the desktop app. `teleportd` + a browser is a complete,
+supported product:
+
+```bash
+teleportd
+# open http://127.0.0.1:7337
+```
+
+Every feature must work in that mode. If something only works inside Tauri, it is a
+regression — the desktop shell adds polish, never capability.

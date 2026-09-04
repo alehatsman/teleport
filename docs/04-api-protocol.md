@@ -1,0 +1,440 @@
+# 04 — API and wire protocol
+
+**HTTP for resource lifecycle. One WebSocket per attached terminal session for live I/O.**
+
+No gRPC, no protobuf, no WebRTC, no Socket.IO, no MCP transport, no Tauri command
+protocol, no separate local IPC protocol. Axum provides routing and WebSocket upgrades;
+that is the whole transport story for v1.
+
+**Treat `/api/v1` as a public contract, not an internal one.** Web, desktop shell, and
+future native apps all speak it, and native apps cannot be force-updated. Breaking
+changes go to `/api/v2`; additive changes announce themselves through `capabilities` on
+`/health`. Nothing in the protocol may assume the client is a browser
+([13-native-clients.md](13-native-clients.md#the-protocol-is-already-native-ready)).
+
+## HTTP surface
+
+```text
+GET    /api/v1/health
+
+GET    /api/v1/sessions
+POST   /api/v1/sessions
+GET    /api/v1/sessions/{id}
+DELETE /api/v1/sessions/{id}
+
+GET    /api/v1/sessions/{id}/log
+GET    /api/v1/sessions/{id}/stream   # WebSocket upgrade
+
+GET    /api/v1/presets
+```
+
+Everything else is the SPA, served from the same origin at `/`.
+
+**There is no `/agents` execution path.** An agent launch is a session creation
+request. Adding `/agents` would create a second execution path and violate the
+one-execution-path rule in [01-architecture.md](01-architecture.md#sessions-and-agents-are-the-same-thing).
+
+### `GET /api/v1/health`
+
+Two response shapes, by principal. **Unauthenticated** — the Tauri shell polls this to
+decide whether to spawn a daemon, so it must answer before any credential exists:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "api_versions": ["v1"],
+  "capabilities": ["sessions", "presets", "tail_attach"]
+}
+```
+
+**Authenticated** (any `Principal`) adds device and load information:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "api_versions": ["v1"],
+  "capabilities": ["sessions", "presets", "tail_attach"],
+  "device_id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
+  "device_name": "aleh-macbook",
+  "platform": "macos-aarch64",
+  "pid": 41003,
+  "uptime_ms": 913402,
+  "sessions_running": 3
+}
+```
+
+The hostname is mildly identifying, so it sits behind the principal. Nothing else in the
+unauthenticated shape is sensitive — **do not add fields that are**.
+
+`api_versions` and `capabilities` exist for **version skew**, which is unavoidable once
+native apps ship: an App Store build can be months behind a daemon the user updated this
+morning, and neither side can be forced to match. Clients must feature-detect from
+`capabilities` rather than infer from `version`. Add a capability string whenever a new
+optional behavior lands; never repurpose an existing one.
+
+`device_id` / `device_name` come from `<data_dir>/device.json`, generated on first run
+([12-identity-and-connectivity.md](12-identity-and-connectivity.md#device-identity)).
+In the MVP nothing consumes them; they exist so that multi-device clients do not reshape
+every payload later.
+
+### `POST /api/v1/sessions`
+
+```json
+{
+  "kind": "agent",
+  "preset": "codex",
+  "command": "codex",
+  "args": [],
+  "cwd": "/home/me/src/project",
+  "cols": 120,
+  "rows": 36,
+  "env": { "RUST_LOG": "debug" }
+}
+```
+
+| Field | Required | Rules |
+|---|---|---|
+| `kind` | yes | `"shell"` \| `"agent"` \| `"command"` |
+| `preset` | no | preset id; when present, supplies defaults for `command`/`args`/`env` that explicit fields override |
+| `command` | yes unless a preset supplies it | resolved via `PATH`; must resolve to an existing executable |
+| `args` | no | **array of strings**, never a shell string |
+| `cwd` | yes | must exist and be a directory |
+| `cols`, `rows` | yes | `1..=1000` |
+| `env` | no | explicit overrides only; **never persisted verbatim**, redacted in responses |
+
+Response `201`:
+
+```json
+{
+  "id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
+  "state": "running",
+  "pid": 42117,
+  "output_offset": 0
+}
+```
+
+Errors: `400` validation, `404` executable/cwd not found, `500` spawn failure.
+Spawn failure still records a row (`state=exited`, `lost_reason="spawn_failed"`) so the
+UI can show why.
+
+### `GET /api/v1/sessions`
+
+```json
+{
+  "sessions": [
+    {
+      "id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
+      "kind": "agent",
+      "preset": "codex",
+      "command": "codex",
+      "args": [],
+      "cwd": "/home/me/src/project",
+      "state": "running",
+      "pid": 42117,
+      "cols": 120,
+      "rows": 36,
+      "output_bytes": 184221,
+      "created_at_ms": 1756982400000,
+      "started_at_ms": 1756982400112,
+      "exited_at_ms": null,
+      "exit_code": null,
+      "lost_reason": null,
+      "controller": "desktop-a1b2",
+      "subscribers": 2
+    }
+  ]
+}
+```
+
+Sort newest-first. `env` never appears.
+
+### `DELETE /api/v1/sessions/{id}`
+
+Runs the termination state machine from
+[03-pty-layer.md](03-pty-layer.md#termination). Returns `202` immediately with the
+session in `closing`; clients watch the WebSocket `exit` frame or poll `GET`.
+
+`?purge=true` additionally deletes `data/sessions/{id}/` after the session reaches
+`exited`. Without it, logs are retained.
+
+### `GET /api/v1/sessions/{id}/log`
+
+Raw bytes, `Content-Type: application/octet-stream`. Supports `?from=&to=` byte offsets
+and HTTP `Range`. Authorization is **identical to live attach** — terminal output
+contains source code, paths, command output, and tokens accidentally printed by
+commands. See [06-security.md](06-security.md).
+
+### `GET /api/v1/presets`
+
+```json
+{
+  "presets": [
+    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex" },
+    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude" },
+    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal" }
+  ]
+}
+```
+
+Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
+and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
+needed to spawn the first Claude/Codex CLI.**
+
+## WebSocket protocol
+
+```text
+GET /api/v1/sessions/{id}/stream?after=<u64>|tail=<bytes>&mode=control|observe
+```
+
+| Param | Default | Meaning |
+|---|---|---|
+| `after` | — | byte offset the client has already consumed; replay starts here |
+| `tail` | `1048576` | replay only the last N bytes; used when the client has no cursor |
+| `mode` | `observe` | `control` requests the input/resize lease |
+
+`after` and `tail` are mutually exclusive. Supplying neither means `tail=1 MiB`.
+See [Bounded attach](#bounded-attach) — an unbounded default here is a bug, not a
+convenience.
+
+### Framing
+
+```text
+Text WebSocket frames     = control messages (JSON)
+Binary client → server    = raw PTY input bytes
+Binary server → client    = [8-byte big-endian u64 output offset][raw PTY output]
+```
+
+Terminal bytes are **never** JSON-encoded. The 8-byte prefix is the offset of the
+*first* byte of the payload.
+
+Client→server binary frames carry no header — they are raw input, forwarded verbatim to
+the PTY writer.
+
+### Control messages
+
+Client → server:
+
+```json
+{"type":"resize","cols":120,"rows":36}
+```
+```json
+{"type":"claim_control"}
+```
+```json
+{"type":"release_control"}
+```
+
+Server → client:
+
+```json
+{
+  "type":"ready",
+  "session_id":"01K4N4ZP6C5GJ17G6X47K0VJX3",
+  "replay_from":183296,
+  "next_offset":184221,
+  "truncated":false,
+  "control":true
+}
+```
+```json
+{"type":"control_granted"}
+```
+```json
+{"type":"control_revoked","to":"phone-9f3c"}
+```
+```json
+{"type":"resized","cols":120,"rows":36}
+```
+```json
+{"type":"exit","code":0,"final_offset":201908}
+```
+```json
+{"type":"error","code":"not_controller","message":"input rejected: observer mode"}
+```
+
+`ready` is always the first frame after upgrade. `next_offset` tells the client where
+the live stream begins, so it can detect that replay is complete. `replay_from` is where
+replay actually started and `truncated` says whether the daemon clamped it — see
+[Bounded attach](#bounded-attach).
+
+## Offsets are the replay index
+
+Using byte offsets instead of a separately persisted sequence table means **the
+append-only output file itself is the index**. No database row per PTY chunk, and
+duplicate detection is trivial.
+
+A client that has consumed byte `184221` reconnects with:
+
+```text
+GET /api/v1/sessions/{id}/stream?after=184221&mode=control
+```
+
+The daemon seeks directly to that byte offset, replays what was missed, and switches
+the connection to live output.
+
+Client rule: track `next_offset` locally, advance it by payload length on every binary
+frame, and send it as `after` on reconnect. Never assume the stream restarts at 0.
+
+## Bounded attach
+
+A long-running agent produces a large log. `after=0` on a 500 MB session would replay
+500 MB — slow on a desktop, ruinous on cellular, and a trivial way for one reconnect to
+saturate the daemon. **Replay is always bounded.**
+
+```text
+tail=N          → replay starts at max(0, next_offset - N)
+after=N         → replay starts at N, clamped forward by max_replay_bytes
+neither given   → tail = 1 MiB
+```
+
+`max_replay_bytes` (config, default 8 MiB) caps every replay regardless of parameters.
+When a replay is clamped, `ready` says so:
+
+```json
+{
+  "type":"ready",
+  "session_id":"01K4N4ZP6C5GJ17G6X47K0VJX3",
+  "replay_from":198320,
+  "next_offset":201908,
+  "truncated":true,
+  "control":true
+}
+```
+
+Clients render `truncated: true` as a "scrollback truncated" marker and offer
+`GET /log` for the full history. Never silently pretend the stream started there.
+
+### The VT-state caveat — read this before implementing
+
+Replay that starts anywhere other than byte 0 drops the client into the **middle of a VT
+stream**. Two things are then unknown:
+
+1. The first bytes may be the tail of a split escape sequence, which renders as garbage.
+2. Terminal *state* — colors, cursor mode, alt-screen, scroll region — was established
+   by escape sequences that were never replayed.
+
+**Interim mitigation (MVP):** the client resets the emulator (`term.reset()`) before
+writing the first tailed chunk. That fixes state and leaves at most one corrupted line.
+Acceptable, and honest.
+
+**Proper fix (post-MVP):** the daemon maintains a VT parser per session and serves a
+*state snapshot* — screen contents plus attributes — as the replay prefix. That is the
+"terminal-state snapshots" item currently listed out of scope
+([11-mvp-plan.md](11-mvp-plan.md#out-of-scope)), and native mobile clients are what will
+pull it in. It is the single most likely v2 addition; do not design anything that
+forecloses it. Specifically: keep replay a server-side decision, so a snapshot can later
+be substituted for a byte range without a protocol change.
+
+## Attach race
+
+The race between "read the old log" and "subscribe to new output" must be handled
+deliberately. Bytes produced between reading the file and registering the subscriber
+would otherwise vanish.
+
+**Correct order:**
+
+```text
+register subscriber / establish replay boundary
+             ↓
+capture current output offset N
+             ↓
+replay [requested_offset, N)
+             ↓
+deliver buffered events >= N
+             ↓
+live stream
+```
+
+Registration and the read of `N` happen under **one** mutex — the same mutex the reader
+loop takes when it advances `next_offset` and fans out
+([03-pty-layer.md](03-pty-layer.md#reader-loop)). This guarantees every queued chunk
+starts at or after `N`, so replay and live output meet exactly once with no gap and no
+overlap.
+
+If `after > N`, the client is ahead of the daemon (log was purged, or a stale client
+after a `lost` session): reply `error` with code `offset_ahead` and `next_offset`, and
+let the client restart from `0`.
+
+## Control lease
+
+- Exactly one controller per session, or none.
+- `mode=control` on attach requests the lease; `claim_control` requests it later.
+- **Claims are preemptive** — the newest claimant wins. The previous controller receives
+  `control_revoked` and silently becomes an observer. This keeps "Take control" on a
+  phone a one-tap action with no negotiation round trip.
+- Input or resize from a non-controller is dropped with an `error` frame. It is never
+  buffered and never applied later.
+- When the controller disconnects, the lease is released. It is **not** auto-granted to
+  another observer; the next attach with `mode=control` or an explicit `claim_control`
+  takes it.
+
+## Full lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Desktop client
+    participant D as teleportd
+    participant DB as SQLite
+    participant P as PTY + child
+    participant L as Output log
+    participant M as Phone
+
+    C->>D: POST /api/v1/sessions
+    D->>P: create PTY + spawn child
+    D->>DB: insert session(state=running)
+    D-->>C: session id
+
+    C->>D: WS attach after=0, mode=control
+    D->>L: read replay range
+    L-->>D: previous output
+    D-->>C: replay + live output
+
+    P-->>D: PTY output
+    D->>L: append bytes
+    D-->>C: output(offset, bytes)
+
+    C-xD: Wi-Fi/UI/client disconnect
+    Note over D,P: PTY and child continue running
+    P-->>D: more output
+    D->>L: append bytes
+
+    M->>D: WS attach after=known_offset
+    D->>L: seek to known_offset
+    L-->>D: missed output
+    D-->>M: replay then live stream
+
+    D-xP: daemon crashes
+    Note over D,P: live PTY recovery is not guaranteed in MVP
+    Note over DB,L: metadata and persisted output remain
+
+    D->>DB: restart and inspect stale running rows
+    D->>DB: mark stale sessions lost
+    D-->>M: historical log remains available
+```
+
+## Keepalive and reconnection
+
+Long-lived WebSockets get terminated by network software in the middle. Cloudflare
+documents proxied WebSocket support but explicitly notes that deployments can drop
+connections and recommends heartbeats. Design for it rather than treating a drop as an
+error.
+
+- Server sends a WebSocket `Ping` every **20 s**.
+- Server closes a connection with no `Pong` within **60 s**.
+- Client reconnects with exponential backoff (250 ms → 8 s, jittered), always passing
+  its tracked `after` offset.
+- A reconnect is a **normal event**, not an error state. The UI shows a subtle
+  "reconnecting" indicator, never a modal, and never clears the terminal buffer.
+
+## Error codes
+
+| `code` | Meaning | Client action |
+|---|---|---|
+| `not_controller` | input/resize from an observer | show "Take control" affordance |
+| `offset_ahead` | `after` exceeds daemon's `next_offset` | restart from `0` |
+| `session_gone` | id unknown or purged | return to session list |
+| `session_closing` | input during termination | disable input |
+| `slow_consumer` | queue overflow (WS close 1013) | reconnect with backoff from last offset |
+| `bad_origin` | Origin/Host rejected | hard failure, do not retry |
