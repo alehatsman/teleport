@@ -693,6 +693,83 @@ ship without — write it into 15.
 **Gate:** quit the desktop app with agents running; they keep running; reopening
 reattaches. Browser-only mode remains fully functional.
 
+> **Implementation spec drafted 2026-09-05.** Validated against current code
+> (`daemon/src/main.rs`, `device.rs`, `api.rs::health`) — no conflicts:
+> `/health`, `device.json`, `<data_dir>/token`, `<data_dir>/port` already exist exactly
+> as [08-packaging.md](08-packaging.md) assumes, so no daemon change is needed for M10.
+> Two open questions resolved with you first: certs aren't in hand, so signed artifacts
+> are **not** a target of this milestone (pipeline structure only, gated behind secrets
+> that don't exist yet); dev/iteration happens Linux-first, mac/Windows validated via a
+> CI matrix rather than local hardware.
+>
+> **Scope.** In: Tauri **v2** shell, detached daemon spawn/attach, tray (quit-daemon
+> with confirmation, open UI, show logs), OS notifications
+> (`tauri-plugin-notification`, wired to the existing `bell`/`idle` session events),
+> hand-written per-OS autostart (systemd user unit / LaunchAgent plist / Task Scheduler
+> XML — not a generic autostart plugin, since those don't reliably hit the specific
+> mechanisms 08 calls for), updater staging (`tauri-plugin-updater`, never restarts
+> while a session is `running`), signing/notarization CI structure with placeholder
+> secrets, Linux `.AppImage`/`.deb` built and run locally.
+> Out (deferred, not dropped): real signing certs/notarization credentials (external,
+> not a repo change), hosted update-feed delivery ([16](16-release-pipeline.md)'s
+> concern once signing exists), any new config-editing UI beyond what 08 already
+> allows.
+>
+> **Interfaces.**
+> ```text
+> desktop/src-tauri/
+>   Cargo.toml         # tauri, tauri-plugin-notification, tauri-plugin-updater,
+>                       # tauri-plugin-single-instance
+>   tauri.conf.json     # bundle.externalBin -> teleportd-<triple>
+>   capabilities/default.json
+>   src/
+>     main.rs            # health-check/spawn/attach flow, tray, window setup
+>     daemon.rs          # spawn_detached(), read_port_file(), read_token(), health()
+>     autostart/{linux,macos,windows}.rs
+>     updater.rs         # stage-and-check-before-restart
+> ```
+> No custom `#[command]` touches session state (08's rule, unchanged) — the WebView
+> speaks the same HTTP/WS API as the phone. The only commands are shell-scoped:
+> `install_autostart`, `uninstall_autostart`, `quit_daemon`, `daemon_status`.
+> `daemon.rs` spawns via plain `std::process::Command`, **not**
+> `tauri-plugin-shell`'s sidecar helper — see edge cases. The window's URL is resolved
+> at runtime from the port file (`WebviewWindowBuilder::url(...)` after the health
+> check), not a build-time `frontendDist` — confirm that shape against Tauri v2 before
+> writing `main.rs`, since the framework more commonly expects the reverse.
+>
+> **Edge cases.**
+> - **Windows: sidecar dies with the GUI.** `tauri-plugin-shell`'s sidecar helper has a
+>   known history of tying the child to the parent via a Job Object on Windows — which
+>   would silently break the one requirement M10 cannot get wrong. Spawn instead with
+>   `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` (and `CREATE_BREAKAWAY_FROM_JOB` if
+>   needed). **Spike this first, on a packaged Windows build** (not `cargo run`) —
+>   it can look fine in dev and fail only once bundled.
+> - Daemon already running (autostart got there first): health check succeeds before
+>   any spawn fires — no dedup needed.
+>   Two GUI instances launched: `tauri-plugin-single-instance` focuses the existing
+>   window instead of racing the spawn-detached path.
+> - `/health` answers but wrong shape (someone else's daemon on the port): do not
+>   attach; surface it, per 08.
+> - Token file unreadable: treat like "refused" — let the daemon start attempt fail
+>   loudly rather than looping on a bad health check.
+> - Update requested with sessions running: reuse the tray-quit confirmation verbatim.
+> - Autostart install fails (no systemd user session, e.g. a minimal container): log
+>   and surface in-app; autostart is a convenience, not a launch dependency.
+>
+> **Validation.**
+> 1. Local Linux gate check: launch → daemon starts detached → create a session → quit
+>    the app (not tray-quit) → `ps`/`curl /health` from outside show the daemon and
+>    session both still alive → reopen → reattaches.
+> 2. Tray "quit daemon" confirms the session count, then actually stops everything.
+> 3. Extend `release.yml`'s target matrix (or a sibling `desktop-release.yml`) to run
+>    `tauri build` on `macos-latest` (both arches) and `windows-latest`, unsigned,
+>    artifact-uploaded — proves the build on those OSes; hand-verifying the gate there
+>    waits for real hardware or a VM.
+> 4. Windows detached-spawn spike re-verified against that packaged CI build.
+> 5. `cargo test` unaffected — no daemon code changes in this milestone.
+> 6. Browser-only regression: `teleportd` + a plain browser tab, no desktop app
+>    installed, still does everything it did pre-M10.
+
 ---
 
 ## Small additions this plan makes beyond the original research
