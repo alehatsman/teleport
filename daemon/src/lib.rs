@@ -8,6 +8,8 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod device;
+#[cfg(feature = "embedded-web")]
+pub mod embedded_web;
 pub mod log;
 pub mod persistence;
 pub mod presets;

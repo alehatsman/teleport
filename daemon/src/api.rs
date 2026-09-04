@@ -211,12 +211,26 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// `/sessions/<id>`) still boots the app. An unmatched `/api/*` path is
 /// checked explicitly and kept a `404` -- a typo'd API path must never
 /// silently come back as an HTML document.
+///
+/// Disk-backed `--web-dist` is checked first and, when present, always wins
+/// -- even in an `embedded-web` build -- so pointing `--web-dist` at a fresh
+/// `npm run build` output overrides the baked-in bundle without a daemon
+/// rebuild. Only when no disk path is configured does an `embedded-web`
+/// build serve its embedded bundle instead of falling through to `404`
+/// (docs/16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature).
 async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Response {
     if req.uri().path().starts_with("/api/") {
         return route_not_found();
     }
     let Some(dist) = &state.web_dist else {
-        return route_not_found();
+        #[cfg(feature = "embedded-web")]
+        {
+            return crate::embedded_web::serve(req.uri().path());
+        }
+        #[cfg(not(feature = "embedded-web"))]
+        {
+            return route_not_found();
+        }
     };
     // `.fallback()`, not `.not_found_service()` -- the latter pins the
     // response to `404` even when the shell serves fine, and a client
