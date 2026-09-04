@@ -30,7 +30,7 @@
 use std::io::{Read, Result as IoResult, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,15 @@ const READ_BUFFER_SIZE: usize = 64 * 1024;
 /// wedge `resize`/`terminate` through it (docs/03-pty-layer.md#thread-model,
 /// [S3](../../docs/15-open-questions.md#s3--a-blocking-write-wedges-terminate)).
 const WRITE_CHANNEL_CAPACITY: usize = 32;
+/// Capacity of the control channel (`resize`/`terminate`). Bounded (rather
+/// than `mpsc::channel`'s unbounded `Sender`) so `control_tx` is `Sync` and a
+/// caller can hold `PtySession` behind a shared reference instead of a
+/// `Mutex` -- see the `TerminalSession` trait doc below. Control traffic is
+/// rare and short (a handful of resizes, one terminate), so this can't
+/// realistically fill; even if it did, `send` would just block the caller
+/// briefly, not deadlock -- the control thread only ever blocks waiting on
+/// this same channel or a bounded `recv_timeout`, never on this send.
+const CONTROL_CHANNEL_CAPACITY: usize = 8;
 
 /// Bounded wait for the graceful signal before a hard kill
 /// (docs/03-pty-layer.md#concrete-policy).
@@ -74,17 +83,21 @@ pub trait TerminalSession {
     /// ([S3](../../docs/15-open-questions.md#s3--a-blocking-write-wedges-terminate))
     /// and the channel is already full, this call blocks the caller until it
     /// drains or the session exits -- unlike `terminate()`, that bound is not
-    /// enforced here. A caller sharing a `PtySession` behind a `Mutex` (M1
-    /// scope note above) must not call this while holding that lock on an
-    /// async runtime's own thread; wrap it in `spawn_blocking`, same rule as
-    /// the reader loop (docs/03-pty-layer.md#the-rule).
-    fn write(&mut self, bytes: &[u8]) -> Result<()>;
-    fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
+    /// enforced here. Takes `&self`, not `&mut self`: every method here only
+    /// ever sends on a channel or touches an atomic, both already safe to
+    /// call from a shared reference, and a caller wrapping `PtySession` in a
+    /// `Mutex` just for this would recreate S3 one layer up -- a write stuck
+    /// behind a full channel would hold that lock and wedge `resize`/
+    /// `terminate` behind it too. A caller running this on an async runtime's
+    /// own thread must still not call it inline; wrap it in `spawn_blocking`,
+    /// same rule as the reader loop (docs/03-pty-layer.md#the-rule).
+    fn write(&self, bytes: &[u8]) -> Result<()>;
+    fn resize(&self, cols: u16, rows: u16) -> Result<()>;
     /// Blocks for up to `GRACEFUL_WAIT + KILL_WAIT` (~7s): the bounded wait
     /// is intrinsic to termination, not a detail the caller schedules
     /// separately (docs/03-pty-layer.md#concrete-policy). Idempotent -- a
     /// second call while already closing/exited is a no-op.
-    fn terminate(&mut self) -> Result<()>;
+    fn terminate(&self) -> Result<()>;
 }
 
 /// Why a session ended up without a clean exit status.
@@ -174,7 +187,7 @@ pub fn spawn(
     let writer = pair.master.take_writer().context("take pty writer")?;
 
     let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_CHANNEL_CAPACITY);
-    let (control_tx, control_rx) = mpsc::channel::<ControlEvent>();
+    let (control_tx, control_rx) = mpsc::sync_channel::<ControlEvent>(CONTROL_CHANNEL_CAPACITY);
     let (exit_tx, exit_rx) = mpsc::sync_channel::<PtyExit>(1);
     let (eof_tx, eof_rx) = mpsc::sync_channel::<()>(1);
     let state = Arc::new(AtomicU8::new(STATE_RUNNING));
@@ -213,16 +226,18 @@ pub fn spawn(
 }
 
 /// The caller-facing handle. Not `Clone` -- one owner drives the session's
-/// lifecycle; sharing it is `session.rs`'s job (M2), e.g. behind a `Mutex`
-/// alongside the subscriber registry.
+/// lifecycle; sharing it is `session.rs`'s job (M2). `TerminalSession`'s
+/// `&self` methods mean that owner does not need a `Mutex` to do it -- the
+/// session directory (`SessionManager`) just holds this behind its own
+/// `Arc<Session>`.
 pub struct PtySession {
     write_tx: SyncSender<Vec<u8>>,
-    control_tx: Sender<ControlEvent>,
+    control_tx: SyncSender<ControlEvent>,
     state: Arc<AtomicU8>,
 }
 
 impl TerminalSession for PtySession {
-    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    fn write(&self, bytes: &[u8]) -> Result<()> {
         if self.state.load(Ordering::SeqCst) != STATE_RUNNING {
             bail!("session is closing or has exited; input rejected");
         }
@@ -231,14 +246,14 @@ impl TerminalSession for PtySession {
             .context("pty writer thread is gone")
     }
 
-    fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let (cols, rows) = (cols.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()), rows.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()));
         self.control_tx
             .send(ControlEvent::Resize { cols, rows })
             .context("pty control thread is gone")
     }
 
-    fn terminate(&mut self) -> Result<()> {
+    fn terminate(&self) -> Result<()> {
         if self
             .state
             .compare_exchange(STATE_RUNNING, STATE_CLOSING, Ordering::SeqCst, Ordering::SeqCst)
@@ -303,7 +318,7 @@ fn writer_thread_main(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<
     }
 }
 
-fn reaper_thread_main(mut child: Box<dyn Child + Send + Sync>, control_tx: Sender<ControlEvent>) {
+fn reaper_thread_main(mut child: Box<dyn Child + Send + Sync>, control_tx: SyncSender<ControlEvent>) {
     let result = child.wait();
     // Ignored if the control thread already finished (e.g. gave up on a
     // hard-kill timeout) and dropped its receiver -- its result stands.

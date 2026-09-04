@@ -289,11 +289,21 @@ graceful stop — that is why step 2 exists.
 
 ```rust
 trait TerminalSession {
-    fn write(&mut self, bytes: &[u8]) -> Result<()>;
-    fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
-    fn terminate(&mut self) -> Result<()>;
+    fn write(&self, bytes: &[u8]) -> Result<()>;
+    fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    fn terminate(&self) -> Result<()>;
 }
 ```
+
+`&self`, not `&mut self`: every method only ever sends on a channel or touches an
+atomic, both already safe from a shared reference. This matters beyond style --
+`&mut self` would force `session.rs` (M2) to put `PtySession` behind a `Mutex` to share
+it across the async handlers that call `write`/`resize`/`terminate` concurrently, and a
+write stuck behind a full channel ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate))
+would then hold that lock and wedge `resize`/`terminate` behind it -- the exact hazard
+the four-thread split above exists to prevent, reintroduced one layer up. `&self` lets
+`session.rs` hold `PtySession` directly, no lock, so those calls stay as independent as
+the threads behind them.
 
 Do not scatter ConPTY special cases through HTTP handlers. If a handler needs to know
 the platform, the abstraction has leaked and the fix belongs in `pty.rs`.

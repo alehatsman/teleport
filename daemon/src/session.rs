@@ -19,11 +19,10 @@
 //! them is M4/M7 API-surface work, not backpressure.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use ulid::Ulid;
 
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
@@ -64,11 +63,17 @@ struct SubscriberId(u64);
 struct SubscriberSlot {
     id: SubscriberId,
     tx: mpsc::Sender<Chunk>,
-    /// Bytes currently sitting in `tx`'s queue, shared with the matching
-    /// `Subscription` so the receive side can decrement it. This is the
-    /// byte half of the bound; the channel's own capacity
-    /// (`MAX_QUEUE_CHUNKS`) is the count half -- see the module doc.
-    queued_bytes: Arc<AtomicUsize>,
+    /// Byte budget for this subscriber's queue, shared with the matching
+    /// `Subscription` so the receive side can return bytes as it drains
+    /// them. Starts at `MAX_QUEUE_BYTES` permits; `publish` acquires a
+    /// chunk's length in permits *before* the chunk is made visible via
+    /// `try_send`, so a chunk can never reach `Subscription::recv` before
+    /// its bytes are already accounted for -- a plain counter bumped
+    /// *after* `try_send` can't promise that (the receiver can drain and
+    /// give bytes back first). This is the byte half of the bound; the
+    /// channel's own capacity (`MAX_QUEUE_CHUNKS`) is the count half -- see
+    /// the module doc.
+    budget: Arc<Semaphore>,
 }
 
 /// The `{next_offset, subscribers}` pair, guarded by one short-held mutex
@@ -81,10 +86,15 @@ struct Fanout {
 }
 
 impl Fanout {
+    fn new() -> Self {
+        Self { next_offset: 0, subscribers: Vec::new(), next_subscriber_id: 0 }
+    }
+
     /// Runs on the PTY reader thread via the `on_output` closure passed to
-    /// `pty::spawn`. Must never block: every send is `try_send`, and a
-    /// subscriber that would exceed either bound is dropped instead of
-    /// waited on (docs/03-pty-layer.md#the-rule).
+    /// `pty::spawn`. Must never block: every send is `try_send`, budget
+    /// acquisition is `try_acquire`, and a subscriber that would exceed
+    /// either bound is dropped instead of waited on
+    /// (docs/03-pty-layer.md#the-rule).
     fn publish(&mut self, bytes: &[u8]) {
         let start = self.next_offset;
         self.next_offset += bytes.len() as u64;
@@ -95,17 +105,22 @@ impl Fanout {
 
         let payload: Arc<[u8]> = Arc::from(bytes);
         self.subscribers.retain(|sub| {
-            let len = payload.len();
-            if sub.queued_bytes.load(Ordering::Relaxed) + len > MAX_QUEUE_BYTES {
-                return false; // byte bound tripped -- disconnect, don't wait.
-            }
+            // Chunks are bounded by pty.rs's READ_BUFFER_SIZE (64 KiB), so
+            // this always fits u32; MAX_QUEUE_BYTES itself fits comfortably
+            // under Semaphore's permit ceiling.
+            let len = payload.len() as u32;
+            let permit = match sub.budget.try_acquire_many(len) {
+                Ok(permit) => permit,
+                Err(_) => return false, // byte bound tripped -- disconnect, don't wait.
+            };
             let chunk = Chunk { offset: start, bytes: Arc::clone(&payload) };
             match sub.tx.try_send(chunk) {
                 Ok(()) => {
-                    sub.queued_bytes.fetch_add(len, Ordering::Relaxed);
+                    permit.forget(); // returned by Subscription::recv once this chunk is drained
                     true
                 }
                 // Full (count bound tripped) or the Subscription was dropped.
+                // `permit` drops here too, returning the budget it reserved.
                 Err(_) => false,
             }
         });
@@ -118,7 +133,7 @@ impl Fanout {
 pub struct Subscription {
     id: SubscriberId,
     rx: mpsc::Receiver<Chunk>,
-    queued_bytes: Arc<AtomicUsize>,
+    budget: Arc<Semaphore>,
     fanout: Arc<Mutex<Fanout>>,
 }
 
@@ -127,7 +142,7 @@ impl Subscription {
     /// (and therefore the reader thread's handle to it) is gone.
     pub async fn recv(&mut self) -> Option<Chunk> {
         let chunk = self.rx.recv().await?;
-        self.queued_bytes.fetch_sub(chunk.bytes.len(), Ordering::Relaxed);
+        self.budget.add_permits(chunk.bytes.len());
         Some(chunk)
     }
 }
@@ -139,11 +154,25 @@ impl Drop for Subscription {
     }
 }
 
+type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
+
 /// One session: a PTY primitive plus the fan-out state layered on top of it.
+/// No lock around `pty` -- `TerminalSession`'s `&self` methods (see
+/// docs/03-pty-layer.md#the-terminalsession-trait) already let `write`,
+/// `resize` and `terminate` run independently of each other, each blocking
+/// (if at all) only as long as its own dedicated pty.rs thread does. Wrapping
+/// them in a shared `Mutex` here would serialize them again and reintroduce
+/// S3 one layer up: a write stuck behind a full channel would hold the lock
+/// and wedge `terminate` behind it.
 pub struct Session {
     pub id: SessionId,
-    pty: Mutex<PtySession>,
+    pty: PtySession,
     fanout: Arc<Mutex<Fanout>>,
+    /// Back-link so `terminate()` can remove this session from the directory
+    /// itself, rather than relying on every caller to remember to. `Weak` so
+    /// this isn't a reference cycle -- the directory's `Arc<Session>` is the
+    /// only strong owner.
+    directory: Weak<SessionDirectory>,
 }
 
 impl Session {
@@ -154,40 +183,48 @@ impl Session {
     /// reader.
     pub fn subscribe(&self) -> Subscription {
         let (tx, rx) = mpsc::channel(MAX_QUEUE_CHUNKS);
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let budget = Arc::new(Semaphore::new(MAX_QUEUE_BYTES));
 
         let mut fanout = self.fanout.lock().unwrap();
         let id = SubscriberId(fanout.next_subscriber_id);
         fanout.next_subscriber_id += 1;
-        fanout.subscribers.push(SubscriberSlot {
-            id,
-            tx,
-            queued_bytes: Arc::clone(&queued_bytes),
-        });
+        fanout.subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
         drop(fanout);
 
-        Subscription { id, rx, queued_bytes, fanout: Arc::clone(&self.fanout) }
+        Subscription { id, rx, budget, fanout: Arc::clone(&self.fanout) }
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        self.pty.lock().unwrap().write(bytes)
+        self.pty.write(bytes)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.pty.lock().unwrap().resize(cols, rows)
+        self.pty.resize(cols, rows)
     }
 
+    /// Terminates the child and removes this session from its
+    /// `SessionManager`'s directory. Removal is what lets the session (and
+    /// its pty.rs writer thread, parked on `write_tx` until every clone of it
+    /// drops) actually go away once the last `Arc<Session>` clone is; without
+    /// it a terminated session's threads and channels leak for the life of
+    /// the daemon. Idempotent, same as the underlying `pty.terminate()`.
     pub fn terminate(&self) -> Result<()> {
-        self.pty.lock().unwrap().terminate()
+        let result = self.pty.terminate();
+        if let Some(directory) = self.directory.upgrade() {
+            directory.lock().unwrap().remove(&self.id);
+        }
+        result
     }
 }
 
 /// Owns every live session. One lock for the session directory itself,
 /// separate from each `Session`'s own `fanout` lock -- creating or looking up
-/// a session never contends with another session's hot output path.
+/// a session never contends with another session's hot output path. Held
+/// behind an `Arc` (rather than plain `Mutex<..>`) so a `Session` can keep a
+/// `Weak` back-reference to it and self-remove on `terminate()`.
 #[derive(Default)]
 pub struct SessionManager {
-    sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
+    sessions: Arc<SessionDirectory>,
 }
 
 impl SessionManager {
@@ -201,18 +238,19 @@ impl SessionManager {
     /// module doc on `pty.rs` both point at.
     pub fn create(&self, spec: SpawnSpec) -> Result<Arc<Session>> {
         let id = SessionId::new();
-        let fanout = Arc::new(Mutex::new(Fanout {
-            next_offset: 0,
-            subscribers: Vec::new(),
-            next_subscriber_id: 0,
-        }));
+        let fanout = Arc::new(Mutex::new(Fanout::new()));
 
         let publish_fanout = Arc::clone(&fanout);
         let spawned = pty::spawn(spec, move |bytes| {
             publish_fanout.lock().unwrap().publish(bytes);
         })?;
 
-        let session = Arc::new(Session { id, pty: Mutex::new(spawned.session), fanout });
+        let session = Arc::new(Session {
+            id,
+            pty: spawned.session,
+            fanout,
+            directory: Arc::downgrade(&self.sessions),
+        });
         self.sessions.lock().unwrap().insert(id, Arc::clone(&session));
         Ok(session)
     }
@@ -232,17 +270,13 @@ mod tests {
     /// in `daemon/tests/`.
     #[tokio::test]
     async fn dropped_subscription_is_unregistered_immediately() {
-        let fanout = Arc::new(Mutex::new(Fanout {
-            next_offset: 0,
-            subscribers: Vec::new(),
-            next_subscriber_id: 0,
-        }));
+        let fanout = Arc::new(Mutex::new(Fanout::new()));
 
         let (tx, rx) = mpsc::channel(MAX_QUEUE_CHUNKS);
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let budget = Arc::new(Semaphore::new(MAX_QUEUE_BYTES));
         let id = SubscriberId(0);
-        fanout.lock().unwrap().subscribers.push(SubscriberSlot { id, tx, queued_bytes: Arc::clone(&queued_bytes) });
-        let sub = Subscription { id, rx, queued_bytes, fanout: Arc::clone(&fanout) };
+        fanout.lock().unwrap().subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
+        let sub = Subscription { id, rx, budget, fanout: Arc::clone(&fanout) };
         assert_eq!(fanout.lock().unwrap().subscribers.len(), 1);
 
         drop(sub);

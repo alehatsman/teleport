@@ -109,15 +109,26 @@ by W1) and the grandchild-tree-close case, are expected to pass on Windows once 
 > private `Fanout` state; 17/17 total daemon tests green on Linux, `cargo clippy
 > --all-targets -- -D warnings` clean). Built on `pty.rs`'s `on_output` closure hook, as
 > that module's M1 note anticipated. `next_offset` and the subscriber registry share one
-> `Fanout`, guarded by one `Mutex` separate from `Session`'s own PTY-control mutex, so
-> creating/listing sessions never contends with another session's hot output path. The
-> byte half of the 256-chunk/8-MiB bound is enforced by a shared `AtomicUsize` the
-> `Subscription`'s receive side decrements — `tokio::sync::mpsc`'s own bound is
+> `Fanout`, guarded by one `Mutex` separate from `Session`'s own PTY handle -- creating/
+> listing sessions never contends with another session's hot output path. The byte half
+> of the 256-chunk/8-MiB bound is a `tokio::sync::Semaphore` per subscriber: `publish`
+> acquires a chunk's length in permits *before* the chunk is visible via `try_send`, and
+> `Subscription::recv` returns them once drained, so the count that gates admission and
+> the count a subscriber can observe never diverge -- `tokio::sync::mpsc`'s own bound is
 > chunk-count-only. Overflow and channel-closed both collapse to the same immediate
 > `retain`-based removal (no separate "mark slow" state) since there's no WS close code to
-> emit yet — that distinction is M4's. `exit_rx`/`eof_rx` from `pty::spawn` are left
-> unconsumed; wiring session state to them is M4/M7, not backpressure. No persistence:
-> `output.vt` and the log are M3.
+> emit yet — that distinction is M4's. `Session` holds `PtySession` directly, no `Mutex`:
+> `TerminalSession`'s methods take `&self` (docs/03-pty-layer.md#the-terminalsession-trait),
+> so `write`/`resize`/`terminate` run independently rather than serialized behind one lock
+> — a write stuck on a full channel no longer wedges `terminate`. `terminate()` removes
+> the session from `SessionManager`'s directory (a `Weak` back-reference lets it do so
+> without every caller remembering to), so a terminated session's pty.rs threads and
+> channels can actually be dropped instead of leaking for the daemon's lifetime; a
+> session whose child exits on its own, with nobody calling `terminate()`, is not yet
+> reclaimed -- that needs `exit_rx` wired to session state, which is M4/M7 as noted below,
+> not this pass. `exit_rx`/`eof_rx` from `pty::spawn` are otherwise left unconsumed; wiring
+> session state to them is M4/M7, not backpressure. No persistence: `output.vt` and the
+> log are M3.
 
 **Deliver:** `session.rs` — `SessionManager`, `Session`, subscriber registry.
 
