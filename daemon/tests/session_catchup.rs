@@ -78,7 +78,7 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // it exists to guard against, and the assertions below prove nothing.
     let registered_first = session.subscribe();
 
-    let mut replay = session.attach(0).expect("attach at 0");
+    let replay = session.attach(0).expect("attach at 0");
     assert_eq!(replay.replay_from, 0);
     let ready_next_offset = replay.next_offset;
     assert!(ready_next_offset >= BACKLOG);
@@ -87,15 +87,17 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // before asking for the next.
     let mut acc: Vec<u8> = Vec::new();
     let mut rounds = 0u32;
+    assert!(rounds < 64, "catch-up did not terminate");
+    let mut step = replay.next_round().expect("first catch-up round");
     let attach = loop {
-        assert!(rounds < 64, "catch-up did not terminate");
-        match replay.next_round().expect("catch-up round") {
+        match step {
             ReplayStep::History { offset, bytes, replay: rest } => {
                 assert_eq!(offset, acc.len() as u64, "catch-up rounds must be contiguous");
                 acc.extend_from_slice(&bytes);
                 rounds += 1;
-                replay = rest;
                 tokio::time::sleep(ROUND_LATENCY).await; // the "network"
+                assert!(rounds < 64, "catch-up did not terminate");
+                step = rest.written(bytes).expect("catch-up round");
             }
             ReplayStep::Live(attach) => break attach,
         }

@@ -164,13 +164,14 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     // the backpressure failure this test is trying to detect. `attach` counts
     // the replay too and closes that race
     // (docs/04-api-protocol.md#attach-race).
-    let mut replay = session.attach(0).expect("attach at 0");
+    let replay = session.attach(0).expect("attach at 0");
     let mut received = 0usize;
+    let mut step = replay.next_round().expect("first catch-up round");
     let mut fast = loop {
-        match replay.next_round().expect("catch-up round") {
+        match step {
             ReplayStep::History { bytes, replay: rest, .. } => {
                 received += bytes.len();
-                replay = rest;
+                step = rest.written(bytes).expect("catch-up round");
             }
             ReplayStep::Live(attach) => {
                 received += attach.replay.len();

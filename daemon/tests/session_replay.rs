@@ -84,7 +84,7 @@ fn catch_up(replay: Replay) -> (Vec<u8>, Attach) {
                 assert_eq!(offset, next, "catch-up rounds must be contiguous");
                 next = offset + bytes.len() as u64;
                 acc.extend_from_slice(&bytes);
-                step = replay.next_round().expect("catch-up round");
+                step = replay.written(bytes).expect("catch-up round");
             }
             ReplayStep::Live(attach) => {
                 assert!(attach.caught_up, "a Vec of a client must never fail to catch up");
