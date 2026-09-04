@@ -26,18 +26,34 @@ PTY read
 
 ```text
                      ┌── dedicated output reader thread
-Unix PTY / ConPTY ───┤       │
                      │       ├── append to output.vt
                      │       ├── advance next_offset
                      │       └── non-blocking fanout to bounded queues
                      │
-                     └── dedicated input/control thread
-                             ├── write()
-                             ├── resize()
-                             └── terminate()
+                     ├── dedicated writer thread
+Unix PTY / ConPTY ───┤       └── write()  (can block indefinitely; see S3)
+                     │
+                     ├── dedicated control thread
+                     │       ├── resize()
+                     │       └── terminate()
+                     │
+                     └── dedicated reaper thread
+                             └── child.wait()  (blocks until exit; see S1)
 ```
 
-Two dedicated `std::thread`s per session. **Not** `tokio::task::spawn_blocking`.
+Four dedicated `std::thread`s per session, not two. **Not** `tokio::task::spawn_blocking`.
+
+The original two-thread split (reader; input+control combined) does not actually cover
+the design's three independently-blocking concerns — `read()`, `write()`, and waiting on
+the child — and the M1 spike ([15-open-questions.md#the-m1-spike](15-open-questions.md#the-m1-spike))
+confirmed both failure modes it predicted: a write on an unread pty can block
+indefinitely and, on the original model, wedges `terminate` behind it ([S1](15-open-questions.md#s1--who-reaps-the-child),
+[S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)); nothing in the
+two-thread model calls `wait()`, so the exit code has no path into the session row.
+`write` and `wait()` each need their own thread so neither can be stuck behind, or
+block, `resize`/`terminate`. `resize` and `terminate` stay together on the control
+thread — both are short and bounded, and that's where `terminate`'s own bounded wait
+lives (see Termination, below).
 
 `spawn_blocking` is documented for bounded blocking work that eventually finishes. A
 permanently-blocking PTY loop occupies a blocking-pool slot indefinitely; enough
@@ -48,8 +64,11 @@ channels separately.
 Threads talk to the async world through:
 
 - **reader → subscribers**: `tokio::sync::mpsc::Sender::try_send` (never `blocking_send`)
-- **async → control thread**: `std::sync::mpsc` or a `Mutex<PtyControl>`; commands are
-  short and non-blocking except `terminate`, which is bounded (see below)
+- **async → writer thread**: a dedicated channel/queue for `write()`, separate from control
+- **async → control thread**: `std::sync::mpsc` or a `Mutex<PtyControl>`; `resize` and
+  `terminate` are short and non-blocking except `terminate`'s own bounded wait (see below)
+- **async → reaper thread**: nothing sends it commands; it exists only to block on
+  `child.wait()` and publish the exit code + status transition when it returns
 
 ## Spawn
 
@@ -189,6 +208,15 @@ Resize handling:
 
 ## Termination
 
+> **Unresolved blocker (2026-09-04):** a ConPTY child that exits gracefully — not
+> killed — has not been observed to actually signal exited via `wait()`/`try_wait()`
+> in testing on Windows 11 build 26200, on real hardware, from a real interactive
+> session. Externally-killed children work correctly through the same code path.
+> This affects the reap/exit-status half of everything below on Windows; the Unix
+> side is unaffected. Do not implement the Windows exit-status path against this
+> doc until [15-open-questions.md#w1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+> is resolved.
+
 `ClosePseudoConsole` sends `CTRL_CLOSE_EVENT` to connected clients, and applications
 may still emit output during shutdown. Microsoft advises either closing the output pipe
 first or continuing to drain output around closure. Ending the pseudoconsole terminates
@@ -217,14 +245,33 @@ CLOSING
 EXITED
 ```
 
+This is the *user-initiated* path. The child can also exit on its own, and the reaper
+thread's `wait()` can return well before the reader thread sees EOF — a descendant
+that inherited the pty (e.g. a backgrounded process the child left behind) can hold
+the master open indefinitely after `wait()` already has the exit code
+([15-open-questions.md#s2](15-open-questions.md#s2--eof-is-not-exit)). In that case:
+`RUNNING → EXITED` fires directly off the reaper thread's `wait()` result — do not
+wait for reader EOF to mark the session `exited`, that's the whole point of keeping
+exit code and EOF as separate signals. The reader thread keeps appending to
+`output.vt` in the background, independent of session state, until it gets its own
+EOF or the session is garbage-collected.
+
 ### Concrete policy
 
 1. Set state `closing`. Input writes now return an error to the controller.
 2. **Graceful signal.**
-   - Unix: `libc::killpg(pgid, SIGHUP)`, then `SIGTERM` to the child. Falling back to
-     dropping the master (which raises `SIGHUP` on the foreground process group) is
-     acceptable but less precise.
+   - Unix: `libc::killpg(pgid, SIGHUP)`, then `SIGTERM` to the child. **Do not** fall
+     back to dropping the master as a termination mechanism: the reader thread holds
+     its own cloned fd for the session's entire life (`try_clone_reader()`), and the
+     writer holds another (`take_writer()`) — both are `dup()`s of the same open file
+     description, so dropping only the `MasterPty` handle while those live closes
+     nothing and raises no signal (verified empirically,
+     [15-open-questions.md#s4](15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole)).
+     `killpg`/`SIGTERM` is the only mechanism relied on; dropping every remaining
+     handle happens only as post-reap cleanup, after `wait()` has returned.
    - Windows: `ClosePseudoConsole` via dropping the `portable-pty` master handle.
+     Unverified on real Windows as of this writing — see the Windows note in
+     [15-open-questions.md#s4](15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole).
 3. Wait up to **5 s** for child exit, **while the reader thread keeps draining**.
 4. If still alive: `child.kill()` (hard kill — `SIGKILL` on Unix).
 5. Wait up to a further **2 s**, then give up and mark the session `exited` with

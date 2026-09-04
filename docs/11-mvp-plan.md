@@ -48,12 +48,24 @@ three platforms.
 
 > **Build the PTY daemon before the desktop app.**
 
-> **Run the spike first.** [15-open-questions.md](15-open-questions.md#the-m1-spike)
-> lists four things this milestone's design asserts but has not proven — who reaps the
-> child, whether EOF means exit, whether a blocking write can wedge `terminate`, and
-> whether dropping the master closes the pseudoconsole on Windows. S1–S3 together
-> decide the per-session thread count, which is the first line of `pty.rs`. Budget one
-> day; do not start the deliverable until they are answered.
+> **Spike run 2026-09-04.** S1–S4 closed on Linux; S3 also closed on Windows. Decided
+> the thread model below (4 threads, not 2–3 as originally estimated here — see
+> [03-pty-layer.md#thread-model](03-pty-layer.md#thread-model)). Found a new, harder
+> blocker along the way: **[W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)**
+> — a ConPTY child that exits **on its own** (not killed) is never observed as exited
+> by `wait()`/`try_wait()`, and the pty master never sees EOF either. Confirmed general
+> to ConPTY (any process, not just a particular shell), and the process is genuinely
+> still OS-resident while stuck — not a lost wakeup. Root cause needs WinDbg/ETW-level
+> tracing this spike didn't have budget for; time-boxed rather than pursued further.
+> **Decision: proceed with the deliverable below for Unix now. The Windows leg of exit
+> detection for a self-exiting child is a known, open gap — see the amended Gate.**
+
+> **Delivered for Unix, 2026-09-04** — `daemon/src/pty.rs` +
+> `daemon/tests/pty_primitive.rs` (10/10 fixtures green on Linux, `cargo clippy`
+> clean, cross-compile-checked for `x86_64-pc-windows-gnu`). Not run on real
+> Windows or macOS yet. `pty.rs` does not own `output.vt`/offsets/subscriber
+> fanout -- the reader thread calls a caller-supplied, must-not-block closure
+> per chunk instead; that's where `session.rs` (M2) plugs in.
 
 **Deliver:** `pty.rs` — spawn, read, write, resize, exit detection, termination, behind
 the `TerminalSession` trait. Dedicated reader + control threads. No HTTP yet; drive it
@@ -61,18 +73,32 @@ from integration tests.
 
 - `native_pty_system()` / `openpty` / `CommandBuilder` / `spawn_command`
 - dedicated `std::thread` per direction — **not** `spawn_blocking`
-  ([03-pty-layer.md](03-pty-layer.md#thread-model)). Expect **three or four** threads per
-  session, not two: `read`, `write`, and the child wait are independently blocking
+  ([03-pty-layer.md](03-pty-layer.md#thread-model)). **Four** threads per session —
+  `read`, `write`, `control` (`resize`/`terminate`), `reaper` (`child.wait()`) — each
+  independently blocking and confirmed as such by the spike
   ([S1](15-open-questions.md#s1--who-reaps-the-child),
   [S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate))
 - full termination state machine: `RUNNING → CLOSING → EXITED`, graceful signal,
   bounded waits, hard kill fallback, keep draining output throughout
-- resize with clamping and 100 ms coalescing
+- resize with clamping. `pty.rs` clamps to `1..=1000` as a correctness backstop;
+  the 100 ms coalescing this line originally asked for turned out to belong one
+  layer up (`session.rs`, M2) -- coalescing is about merging *N observers'*
+  competing resize requests into the one effective size the control lease
+  implies, which is a session-level concept, not something the raw primitive
+  should reach upward to decide
 
 **Gate:** the PTY integration fixture list in
 [10-testing.md](10-testing.md#1-pty-integration-fixtures-daemontestspty_rs) passes on
-Linux, macOS, **and Windows** — including close-under-output-load and the grandchild
-process-tree case. Windows is not deferred.
+Linux — **met, 10/10** (see "Delivered for Unix" above). The fixtures are themselves
+Unix-shell fixtures (`/bin/sh` scripts, `libc::kill`/`killpg` process-tree checks) and
+`daemon/tests/pty_primitive.rs` is `cfg(unix)`-gated accordingly; porting them to run on
+Windows (a `cmd.exe`-based equivalent suite, not just lifting the `cfg` gate) is tracked
+as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted), not silently
+implied by this Gate. Two of the ten — `child exits normally`, `child exits nonzero` —
+are additionally blocked on
+[W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+even once ported; the rest, including user-initiated `terminate` (hard-kills, unaffected
+by W1) and the grandchild-tree-close case, are expected to pass on Windows once W2 lands.
 
 ---
 
