@@ -478,6 +478,83 @@ async fn binary_frames_carry_correct_contiguous_offsets() {
     }
 }
 
+/// Regression for the exit/output race (session.rs's module doc, "`eof_rx`
+/// is consumed too, as of the M4 review's exit-race fix"): the reaper
+/// thread's `wait()` can return before the reader thread's next `read()`
+/// does, so a fast-exiting process's last chunk could still be unread when
+/// `next_offset()` was captured for `final_offset` and the socket closed
+/// right behind it -- a real, if narrow, transcript gap for the live
+/// viewer. Caught originally on a loaded `ubuntu-latest` CI runner with a
+/// single `printf`; a single session under normal test-machine scheduling
+/// reproduces it far less reliably, so this drives many sessions
+/// concurrently to generate genuine OS scheduling pressure on the
+/// reader/reaper thread pair, the same way real contention did.
+#[tokio::test]
+async fn concurrent_fast_exits_never_lose_output_before_the_exit_frame() {
+    let daemon = std::sync::Arc::new(support::spawn(support::default_config()).await);
+
+    let mut tasks = Vec::new();
+    for i in 0..32 {
+        let daemon = std::sync::Arc::clone(&daemon);
+        tasks.push(tokio::spawn(async move {
+            let payload = format!("hello-{i}");
+            let id = support::create_shell_session(
+                &daemon,
+                vec!["-c".to_string(), format!("printf '{payload}'")],
+            );
+            let mut ws = connect(
+                &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c{i}")),
+                Some(support::TOKEN),
+                None,
+            )
+            .await
+            .expect("connect");
+            let ready = next_json(&mut ws).await;
+            let mut expected_offset = ready["replay_from"].as_u64().unwrap();
+
+            let mut acc = Vec::new();
+            let final_offset = loop {
+                match tokio::time::timeout(TIMEOUT, ws.next())
+                    .await
+                    .unwrap_or_else(|_| panic!("session {i} timed out waiting for a frame"))
+                {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        assert!(bytes.len() >= 8, "session {i}: short binary frame");
+                        let offset = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+                        assert_eq!(
+                            offset, expected_offset,
+                            "session {i}: offsets must be contiguous"
+                        );
+                        expected_offset += (bytes.len() - 8) as u64;
+                        acc.extend_from_slice(&bytes[8..]);
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        let v: Value = serde_json::from_str(&text)
+                            .unwrap_or_else(|e| panic!("session {i}: bad JSON frame: {e}"));
+                        assert_eq!(v["type"], "exit", "session {i}: unexpected control frame");
+                        break v["final_offset"].as_u64().unwrap();
+                    }
+                    other => panic!("session {i}: unexpected frame: {other:?}"),
+                }
+            };
+
+            assert_eq!(
+                acc,
+                payload.as_bytes(),
+                "session {i} lost or reordered output ahead of its exit frame"
+            );
+            assert_eq!(
+                final_offset, expected_offset,
+                "session {i}'s final_offset does not cover everything actually delivered"
+            );
+        }));
+    }
+
+    for task in tasks {
+        task.await.expect("session task panicked");
+    }
+}
+
 /// The `exit` frame carries the final offset, matching `next_offset`
 /// (docs/10-testing.md#3-protocol-tests).
 #[tokio::test]

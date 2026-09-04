@@ -353,6 +353,38 @@ or the session is GC'd. Needs a decision recorded in
 is exactly what [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)
 says never gets observed. Re-run once W1 has an answer.
 
+**The open corollary above, answered for real (2026-09-05).** A CI run on
+`ubuntu-latest` (not this spike's own machine — that never reproduced it, see
+below) caught the case the corollary asked about directly: a WS test's
+`binary_frames_carry_correct_contiguous_offsets` got the `exit` frame with
+`final_offset: 0` instead of ever seeing `"hello"`. Root cause: `exited`
+firing off `wait()` alone (correctly, per this section's own recommendation)
+does not mean the reader thread has actually drained the last chunk yet — the
+reaper thread's `wait()` can return before the reader's next `read()` does,
+and nothing synchronized the two. `output.vt` was never wrong (S2's design
+holds there — the reader keeps appending regardless of session state), but
+`ws.rs`'s live `exit` frame captured `next_offset()` and closed the socket
+the instant `exited` fired, so a fast process's trailing bytes could miss the
+live connection entirely, recoverable only by reconnecting to read the log.
+Fixed by finally consuming `eof_rx` (session.rs's module doc, "`eof_rx` is
+consumed too"): `ws.rs` now finalizes the `exit` frame immediately when EOF
+was already observed (the overwhelmingly common case — zero added latency),
+and otherwise waits up to a 200ms bounded grace for it, still delivering any
+output that arrives meanwhile, before finalizing regardless
+(`EXIT_DRAIN_GRACE` in `ws.rs`). Bounded, not unbounded, for exactly the
+reason this section gives: a live grandchild can hold EOF off indefinitely.
+Regression test: `ws_protocol.rs`'s
+`concurrent_fast_exits_never_lose_output_before_the_exit_frame`, run under
+real thread contention (many sessions concurrently) since a single fast
+`printf` did not reproduce this reliably even under deliberate CPU stress on
+a 32-core dev machine (`taskset`-pinned to 2 cores, competing `yes` loops) —
+the failure needed whatever scheduling latency `ubuntu-latest` had under load
+that day, not something this repo could force to order on a well-provisioned
+box. Recorded here rather than left as a false "verified" claim: the fix is
+correct by construction (immediate finalize when already safe, a bounded
+wait otherwise, a final non-blocking drain closing the remaining TOCTOU
+window), not proven against the exact original interleaving.
+
 ## S3 — A blocking write wedges `terminate`
 
 **Claimed:** [Thread model](03-pty-layer.md#thread-model) puts `write`, `resize` and
