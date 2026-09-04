@@ -24,28 +24,50 @@
 //! the round that finds the remaining gap small enough registers
 //! (docs/04-api-protocol.md#catch-up--register-late-not-early).
 //!
-//! **Still out of scope:** bounded attach (`tail`, `max_replay_bytes`,
-//! `truncated`) and the WS close code that distinguishes a slow consumer
-//! from a dropped one are M4; SQLite metadata, `session_events` and restart
-//! recovery are M7 -- the [`LogEvent`]s the log hands back here are traced,
-//! not stored.
+//! **M4 update:** bounded attach (`tail`, `max_replay_bytes`, `truncated`)
+//! stays one layer up in `ws.rs` -- it narrows `from` before it ever reaches
+//! [`Session::attach`], exactly as the M3 doc above promised. What lands here
+//! is everything else M4 needs from this module: session metadata
+//! (`kind`/`preset`/`command`/`args`/`cwd`), the `running`/`closing`/`exited`
+//! state machine wired to `exit_rx` (docs/03-pty-layer.md#state-machine), and
+//! the control lease (docs/04-api-protocol.md#control-lease). SQLite
+//! metadata, `session_events` and restart recovery (the `lost` state) remain
+//! M7 -- everything below lives in memory only.
 //!
-//! `exit_rx`/`eof_rx` from `pty::spawn` are intentionally left unconsumed --
-//! dropping them is safe (the sender threads see a closed channel and move
-//! on, they never block on it) and wiring session state / exit events to
-//! them is M4/M7 API-surface work, not backpressure.
+//! **`exit_rx` is now consumed** by a dedicated thread per session
+//! (`spawn_exit_listener`), the same shape as `pty.rs`'s own reader/writer/
+//! reaper/control threads: block on a channel, never poll. `eof_rx` is still
+//! unconsumed -- nothing needs "the reader thread saw EOF" as a distinct
+//! signal from "the child exited" ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)),
+//! and the reader thread already keeps draining into `output.vt` on its own.
+//!
+//! **A conflict this milestone surfaced and resolved (see the M4 commit):**
+//! the M2-era `terminate()` removed its session from the `SessionManager`
+//! directory immediately, and a M2 test asserted exactly that. M4's own spec
+//! (docs/04-api-protocol.md#delete-apiv1sessionsid) requires the opposite --
+//! a terminated session stays listed as `exited` until an explicit
+//! `?purge=true`. `terminate()` no longer self-removes; [`SessionManager::purge`]
+//! does the removal now, and the old test was rewritten to match.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc, watch, Semaphore};
 use tracing::warn;
 use ulid::Ulid;
 
 use crate::log::{LogEvent, LogLimits, LogReader, LogSyncer, OutputLog, SyncHandle};
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
+
+/// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field
+/// here and, from M7 on, of the matching SQLite columns
+/// (docs/05-persistence.md#schema).
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+}
 
 /// Queue bound per subscriber: whichever trips first
 /// (docs/03-pty-layer.md#backpressure).
@@ -85,6 +107,19 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Parses a `{id}` path segment back into a `SessionId` -- `api.rs`'s job for
+/// every `/api/v1/sessions/{id}*` route. An id that isn't a valid ULID is
+/// `404`, same as one that is well-formed but unknown
+/// (docs/04-api-protocol.md#delete-apiv1sessionsid: "Reserve 404 for an
+/// unknown session id" -- a malformed one is just as unknown).
+impl std::str::FromStr for SessionId {
+    type Err = ulid::DecodeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Ulid::from_string(s)?))
+    }
+}
+
 /// One chunk of output, tagged with the offset of its first byte -- the
 /// contract a subscriber needs to reconnect without a gap or duplicate later
 /// (M3/M4). `bytes` is `Arc<[u8]>` so fanning out to N subscribers is N
@@ -94,6 +129,129 @@ pub struct Chunk {
     pub offset: u64,
     pub bytes: Arc<[u8]>,
 }
+
+/// `running | closing | exited` -- the MVP subset of
+/// docs/05-persistence.md#schema's `state` column. `lost` is M7's: it needs a
+/// restart to detect a stale row, and nothing persists across a restart yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    Running,
+    Closing,
+    Exited,
+}
+
+impl SessionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionState::Running => "running",
+            SessionState::Closing => "closing",
+            SessionState::Exited => "exited",
+        }
+    }
+}
+
+/// Why a session ended up `exited` without a clean exit code. The MVP subset
+/// of docs/05-persistence.md#schema's `lost_reason` column that a session can
+/// reach without SQLite: `daemon_restart` needs a restart to detect (M7);
+/// `io_error` is a *running*-session reason, not a terminal one, and is not
+/// wired here (M7's `session_events`, per the log.rs module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLostReason {
+    /// `POST /api/v1/sessions` resolved to an executable that could not
+    /// actually be spawned -- validated up front where possible
+    /// ([`SessionManager::create`]'s own checks catch the common case as a
+    /// clean `422` before this ever applies), this is the residual case
+    /// where `pty::spawn` itself fails (docs/04-api-protocol.md#post-apiv1sessions).
+    SpawnFailed,
+    /// `terminate()`'s hard-kill step didn't produce an observed exit within
+    /// `KILL_WAIT` (docs/03-pty-layer.md#concrete-policy step 5).
+    KillTimeout,
+    /// `child.wait()` itself returned an OS error rather than a status.
+    WaitError,
+}
+
+impl SessionLostReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionLostReason::SpawnFailed => "spawn_failed",
+            SessionLostReason::KillTimeout => "kill_timeout",
+            SessionLostReason::WaitError => "wait_error",
+        }
+    }
+}
+
+/// Everything about a session that is fixed at creation and never changes --
+/// the `kind`/`preset`/`command`/`args`/`cwd` columns of
+/// docs/05-persistence.md#schema. Deliberately excludes `env`: overrides are
+/// held only in the `SpawnSpec` passed to `pty::spawn` and never copied here
+/// (docs/06-security.md#secrets-and-environment).
+#[derive(Debug, Clone)]
+pub struct SessionMeta {
+    pub kind: String,
+    pub preset: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+}
+
+/// The mutable half of a session's API-visible state -- one lock, because
+/// every field here changes together at exactly two moments (creation and
+/// exit) or independently but rarely (resize). Not `fanout`'s job: that lock
+/// is on the PTY output hot path and must stay tiny
+/// (docs/03-pty-layer.md#reader-loop); this one is touched once per
+/// resize/exit, never per byte.
+struct Runtime {
+    state: SessionState,
+    pid: Option<u32>,
+    cols: u16,
+    rows: u16,
+    created_at_ms: i64,
+    started_at_ms: Option<i64>,
+    exited_at_ms: Option<i64>,
+    exit_code: Option<i32>,
+    lost_reason: Option<SessionLostReason>,
+}
+
+/// One controller, or none. `holder`/`holder_name` name who; `grace`
+/// distinguishes an actively-connected holder from one within its disconnect
+/// grace window -- both are still "the holder" for `is_controller` and
+/// `claim_control` purposes, only `attach_control`'s passive-resume check
+/// treats them differently (docs/04-api-protocol.md#disconnect-grace).
+#[derive(Debug, Clone, Default)]
+struct ControlLease {
+    holder: Option<String>,
+    holder_name: Option<String>,
+    grace: bool,
+}
+
+/// Asynchronous, out-of-band notifications a WS connection needs beyond raw
+/// output bytes: another client resized the PTY, or this client's control
+/// was just taken by someone else. Delivered over a `broadcast` channel
+/// rather than threaded through `Subscription` because they are rare,
+/// session-wide, and not part of the offset-indexed byte stream
+/// (docs/04-api-protocol.md#control-messages).
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    Resized { cols: u16, rows: u16 },
+    /// `lost_by` addresses the notification -- only the connection whose
+    /// `client_id` matches acts on it. `new_controller_id`/`_name` are the
+    /// wire message's content: who control was given *to*
+    /// (docs/04-api-protocol.md#control-messages:
+    /// `{"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}`
+    /// -- both fields describe the new holder, not the one losing it).
+    ControlRevoked { lost_by: String, new_controller_id: String, new_controller_name: String },
+}
+
+/// Capacity for the [`SessionEvent`] broadcast channel. Resize and
+/// control-lease changes are both rare and human-paced (a resize on window
+/// change, a control claim on a tap) -- nothing here is a hot path, so a
+/// small bound is a correctness backstop against a wedged receiver, not a
+/// throughput concern. A lagged receiver just means a WS task missed a
+/// `resized`/`control_revoked` notification; the next control message it
+/// sends is re-checked against the authoritative lease/size regardless (see
+/// [`Session::is_controller`], [`Session::size`]), so a miss here is not a
+/// correctness bug, only a delayed UI update.
+const EVENT_CHANNEL_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SubscriberId(u64);
@@ -394,13 +552,20 @@ type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
 /// and wedge `terminate` behind it.
 pub struct Session {
     pub id: SessionId,
+    pub meta: SessionMeta,
     pty: PtySession,
     fanout: Arc<Mutex<Fanout>>,
-    /// Back-link so `terminate()` can remove this session from the directory
-    /// itself, rather than relying on every caller to remember to. `Weak` so
-    /// this isn't a reference cycle -- the directory's `Arc<Session>` is the
-    /// only strong owner.
-    directory: Weak<SessionDirectory>,
+    runtime: Mutex<Runtime>,
+    control: Mutex<ControlLease>,
+    events: broadcast::Sender<SessionEvent>,
+    /// `true` once the exit listener thread has recorded a final state.
+    /// `watch` rather than `broadcast` -- unlike [`SessionEvent`], "has this
+    /// session exited yet" is a level, not an edge: a WS task that attaches
+    /// after the exit must still see it, which `changed()` alone would miss.
+    exited: watch::Receiver<bool>,
+    /// Kept only so [`SessionManager::create`] can hand the matching
+    /// `Sender` to the exit listener thread; no other code sends on it.
+    exited_tx: watch::Sender<bool>,
     /// Flushes the log without touching `fanout`. Deliberately *not* reached
     /// through the lock: an `fsync` held under the mutex the reader thread
     /// takes would stall the PTY behind disk latency, which is the whole
@@ -489,6 +654,15 @@ impl Session {
         self.fanout.lock().unwrap().log.path().to_path_buf()
     }
 
+    /// A fresh read handle for a one-shot range read -- `GET
+    /// /api/v1/sessions/{id}/log`'s job (docs/04-api-protocol.md#get-apiv1sessionsidlog).
+    /// Opening under the lock, same as [`attach`](Self::attach), saves the
+    /// caller from reasoning about the file moving; reading the bytes does
+    /// not need the lock at all.
+    pub fn log_reader(&self) -> std::io::Result<LogReader> {
+        self.fanout.lock().unwrap().log.reader()
+    }
+
     /// Flushes the log to disk. This is the close case; the periodic one is
     /// `LogSyncer`'s (docs/05-persistence.md#output-log). `terminate()` calls
     /// it for the user-initiated path; wiring it to a child that exits on its
@@ -499,26 +673,217 @@ impl Session {
         }
     }
 
+    /// `pty.write()` already rejects input once the session is `closing` or
+    /// `exited` (docs/03-pty-layer.md#concrete-policy step 1) -- callers
+    /// (`ws.rs`) map that `Err` to the `session_closing` error frame
+    /// (docs/04-api-protocol.md#error-codes). No separate state check is
+    /// needed here.
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         self.pty.write(bytes)
     }
 
+    /// Resizes the PTY and records the new size for `ready`/`GET` to report,
+    /// then tells every other attached client via `resized`
+    /// (docs/04-api-protocol.md#control-messages). Controller-only
+    /// enforcement is `ws.rs`'s job ([`Session::is_controller`]) -- this
+    /// method does not check who is calling.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.pty.resize(cols, rows)
+        self.pty.resize(cols, rows)?;
+        {
+            let mut runtime = self.runtime.lock().unwrap();
+            runtime.cols = cols;
+            runtime.rows = rows;
+        }
+        let _ = self.events.send(SessionEvent::Resized { cols, rows });
+        Ok(())
     }
 
-    /// Terminates the child and removes this session from its
-    /// `SessionManager`'s directory. Removal is what lets the session (and
-    /// its pty.rs writer thread, parked on `write_tx` until every clone of it
-    /// drops) actually go away once the last `Arc<Session>` clone is; without
-    /// it a terminated session's threads and channels leak for the life of
-    /// the daemon. Idempotent, same as the underlying `pty.terminate()`.
+    /// The PTY's current size -- `ready.cols`/`ready.rows` and every `GET`
+    /// response's `cols`/`rows` read this, not the size the session was
+    /// created with (docs/04-api-protocol.md#control-messages: "there is
+    /// exactly one PTY geometry per session").
+    pub fn size(&self) -> (u16, u16) {
+        let r = self.runtime.lock().unwrap();
+        (r.cols, r.rows)
+    }
+
+    pub fn state(&self) -> SessionState {
+        self.runtime.lock().unwrap().state
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.runtime.lock().unwrap().pid
+    }
+
+    pub fn created_at_ms(&self) -> i64 {
+        self.runtime.lock().unwrap().created_at_ms
+    }
+
+    pub fn started_at_ms(&self) -> Option<i64> {
+        self.runtime.lock().unwrap().started_at_ms
+    }
+
+    pub fn exited_at_ms(&self) -> Option<i64> {
+        self.runtime.lock().unwrap().exited_at_ms
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        self.runtime.lock().unwrap().exit_code
+    }
+
+    pub fn lost_reason(&self) -> Option<SessionLostReason> {
+        self.runtime.lock().unwrap().lost_reason
+    }
+
+    /// Live subscriber count -- `GET /api/v1/sessions`'s `subscribers` field
+    /// (docs/04-api-protocol.md#get-apiv1sessions).
+    pub fn subscriber_count(&self) -> usize {
+        self.fanout.lock().unwrap().subscribers.len()
+    }
+
+    /// Resolves once the exit listener thread has recorded a final state.
+    /// `ws.rs` selects on this alongside `Subscription::recv` to know when to
+    /// send the `exit` frame; a task attaching after the session already
+    /// exited sees `true` immediately (`watch` holds its last value), rather
+    /// than waiting on an edge it already missed.
+    pub async fn exited(&self) {
+        let mut rx = self.watch_exited();
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.changed().await;
+    }
+
+    /// An owned `watch::Receiver` for a caller (`ws.rs`) that needs to hold
+    /// it across a `tokio::select!` loop rather than await it once.
+    pub fn watch_exited(&self) -> watch::Receiver<bool> {
+        self.exited.clone()
+    }
+
+    /// A fresh receiver for [`SessionEvent`]s -- one per WS connection, so a
+    /// slow or absent reader on one connection cannot back up another's
+    /// (docs/04-api-protocol.md#control-messages).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    /// `mode=control` on attach. Grants the lease only when it is free or
+    /// already held (actively or within grace) by `client_id` -- attach must
+    /// never preempt (docs/04-api-protocol.md#why-attach-must-not-preempt).
+    /// Returns whether control was granted.
+    pub fn attach_control(&self, client_id: &str, client_name: &str) -> bool {
+        let mut lease = self.control.lock().unwrap();
+        match lease.holder.as_deref() {
+            None => {
+                lease.holder = Some(client_id.to_string());
+                lease.holder_name = Some(client_name.to_string());
+                lease.grace = false;
+                true
+            }
+            Some(holder) if holder == client_id => {
+                lease.holder_name = Some(client_name.to_string());
+                lease.grace = false;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// `claim_control`. Always preempts, including during another holder's
+    /// grace window (docs/04-api-protocol.md#disconnect-grace: "the lease is
+    /// still preemptible"). Notifies the previous holder, if any and if
+    /// different, via `control_revoked`.
+    pub fn claim_control(&self, client_id: &str, client_name: &str) {
+        let previous = {
+            let mut lease = self.control.lock().unwrap();
+            let previous = match (lease.holder.take(), lease.holder_name.take()) {
+                (Some(holder), Some(name)) if holder != client_id => Some((holder, name)),
+                _ => None,
+            };
+            lease.holder = Some(client_id.to_string());
+            lease.holder_name = Some(client_name.to_string());
+            lease.grace = false;
+            previous
+        };
+        if let Some((lost_by, _lost_name)) = previous {
+            let _ = self.events.send(SessionEvent::ControlRevoked {
+                lost_by,
+                new_controller_id: client_id.to_string(),
+                new_controller_name: client_name.to_string(),
+            });
+        }
+    }
+
+    /// Explicit `release_control`. A no-op unless `client_id` is the current
+    /// holder -- a stale release from a client that already lost the lease
+    /// must not clear whoever holds it now.
+    pub fn release_control(&self, client_id: &str) {
+        let mut lease = self.control.lock().unwrap();
+        if lease.holder.as_deref() == Some(client_id) {
+            lease.holder = None;
+            lease.holder_name = None;
+            lease.grace = false;
+        }
+    }
+
+    pub fn is_controller(&self, client_id: &str) -> bool {
+        self.control.lock().unwrap().holder.as_deref() == Some(client_id)
+    }
+
+    pub fn controller_name(&self) -> Option<String> {
+        self.control.lock().unwrap().holder_name.clone()
+    }
+
+    /// Starts `client_id`'s disconnect grace window, if it is still the
+    /// holder at the moment its WS connection ends. A background task frees
+    /// the lease after `grace_ms` unless the same `client_id` reclaims it
+    /// first via [`attach_control`](Self::attach_control) (which clears
+    /// `grace`) -- the lease is **never** auto-granted to anyone else when
+    /// the window expires (docs/04-api-protocol.md#disconnect-grace).
+    pub fn begin_control_grace(self: &Arc<Self>, client_id: String, grace_ms: u64) {
+        {
+            let mut lease = self.control.lock().unwrap();
+            if lease.holder.as_deref() != Some(client_id.as_str()) {
+                return; // already lost the lease before disconnecting; nothing to hold.
+            }
+            lease.grace = true;
+        }
+        let session = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(grace_ms)).await;
+            let mut lease = session.control.lock().unwrap();
+            // Only free it if grace is still what's protecting this holder --
+            // a reconnect clears `grace`, and a `claim_control` from someone
+            // else already replaced `holder` entirely.
+            if lease.grace && lease.holder.as_deref() == Some(client_id.as_str()) {
+                lease.holder = None;
+                lease.holder_name = None;
+                lease.grace = false;
+            }
+        });
+    }
+
+    /// Begins termination: state becomes `closing` immediately (visible to
+    /// `GET` right away), then runs `pty.rs`'s bounded terminate policy,
+    /// which blocks for up to ~7s (docs/03-pty-layer.md#concrete-policy).
+    /// The exit listener thread -- not this method -- makes the final
+    /// `running`/`closing` -> `exited` transition, because a spontaneous
+    /// child exit must reach `exited` the same way a requested one does.
+    ///
+    /// **Does not remove the session from its `SessionManager`.** A
+    /// terminated session stays listed as `exited` until an explicit
+    /// `?purge=true` (docs/04-api-protocol.md#delete-apiv1sessionsid) --
+    /// see [`SessionManager::purge`]. Idempotent, same as the underlying
+    /// `pty.terminate()`.
     pub fn terminate(&self) -> Result<()> {
+        {
+            let mut runtime = self.runtime.lock().unwrap();
+            if runtime.state == SessionState::Running {
+                runtime.state = SessionState::Closing;
+            }
+        }
         let result = self.pty.terminate();
         self.sync_log();
-        if let Some(directory) = self.directory.upgrade() {
-            directory.lock().unwrap().remove(&self.id);
-        }
         result
     }
 }
@@ -532,16 +897,39 @@ fn trace_log_events(id: SessionId, events: &[LogEvent]) {
     }
 }
 
+/// Refuse to spawn past this many concurrent sessions -- `429`, not an OOM
+/// discovered the hard way (docs/06-security.md#process-spawning). `config.toml`
+/// overrides it via [`SessionManager::with_max_sessions`].
+const DEFAULT_MAX_SESSIONS: usize = 50;
+
+/// Why [`SessionManager::create`] refused a request, shaped for `api.rs` to
+/// map onto the HTTP status docs/04-api-protocol.md#post-apiv1sessions
+/// specifies -- `422` for the two validation variants, `429` for
+/// `MaxSessions`, `500` for `Spawn`.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    #[error("executable not found on PATH: {0}")]
+    ExecutableNotFound(String),
+    #[error("cwd does not exist or is not a directory: {}", .0.display())]
+    InvalidCwd(PathBuf),
+    #[error("max_sessions ({0}) reached")]
+    MaxSessions(usize),
+    #[error("spawning the session: {0}")]
+    Spawn(#[from] anyhow::Error),
+}
+
 /// Owns every live session. One lock for the session directory itself,
 /// separate from each `Session`'s own `fanout` lock -- creating or looking up
-/// a session never contends with another session's hot output path. Held
-/// behind an `Arc` (rather than plain `Mutex<..>`) so a `Session` can keep a
-/// `Weak` back-reference to it and self-remove on `terminate()`.
+/// a session never contends with another session's hot output path.
+/// `Session` keeps no back-link to it: [`SessionManager::purge`] removes by
+/// id through this map directly, and `terminate()` no longer self-removes
+/// (see the M4 module doc above).
 pub struct SessionManager {
     /// `<data_dir>/sessions`. Each session's log is `<root>/<id>/output.vt`
     /// (docs/05-persistence.md#layout).
     root: PathBuf,
     limits: LogLimits,
+    max_sessions: usize,
     /// One thread for every session's periodic `fsync`, so the reader threads
     /// never do one. Dropped with the manager, which flushes a last time.
     syncer: LogSyncer,
@@ -559,17 +947,58 @@ impl SessionManager {
         Self {
             root,
             limits,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             syncer: LogSyncer::new(limits.sync_interval),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Spawns `spec` behind a fresh PTY and registers the resulting session.
-    /// Wires `Fanout::publish` in as `pty::spawn`'s `on_output` closure --
-    /// this is the plug point docs/03-pty-layer.md's reader loop and the M1
-    /// module doc on `pty.rs` both point at.
-    pub fn create(&self, spec: SpawnSpec) -> Result<Arc<Session>> {
+    /// Overrides `max_sessions` from `config.toml` (default 50,
+    /// docs/07-remote-access.md#daemon-configuration-surface). A builder
+    /// method rather than a `with_limits` parameter so every existing call
+    /// site -- tests included -- keeps working unchanged.
+    pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions;
+        self
+    }
+
+    /// Spawns `spec` behind a fresh PTY and registers the resulting session,
+    /// tagged with the API-level `kind`/`preset` metadata `SpawnSpec` itself
+    /// has no room for. Wires `Fanout::publish` in as `pty::spawn`'s
+    /// `on_output` closure -- this is the plug point docs/03-pty-layer.md's
+    /// reader loop and the M1 module doc on `pty.rs` both point at.
+    ///
+    /// Validates `cwd` and resolves `command` against `$PATH` *before*
+    /// spawning (docs/06-security.md#process-spawning): a bad executable
+    /// would otherwise fork successfully and exit immediately, surfacing as
+    /// a session that flickers to `exited` instead of a clean `422`
+    /// (docs/04-api-protocol.md#post-apiv1sessions). `max_sessions` is
+    /// enforced first, before either check, so a saturated daemon fails fast.
+    pub fn create(
+        &self,
+        spec: SpawnSpec,
+        kind: impl Into<String>,
+        preset: Option<String>,
+    ) -> Result<Arc<Session>, CreateError> {
+        if self.sessions.lock().unwrap().len() >= self.max_sessions {
+            return Err(CreateError::MaxSessions(self.max_sessions));
+        }
+        if !spec.cwd.is_dir() {
+            return Err(CreateError::InvalidCwd(spec.cwd.to_path_buf()));
+        }
+        if !resolve_executable(spec.program) {
+            return Err(CreateError::ExecutableNotFound(spec.program.to_string()));
+        }
+
         let id = SessionId::new();
+        let meta = SessionMeta {
+            kind: kind.into(),
+            preset,
+            command: spec.program.to_string(),
+            args: spec.args.to_vec(),
+            cwd: spec.cwd.to_path_buf(),
+        };
+        let (cols, rows) = (spec.cols, spec.rows);
 
         // A brand-new session has no stored row; `None` is the fresh-start
         // case of docs/05-persistence.md#restart-recovery, and M7 is what
@@ -583,22 +1012,136 @@ impl SessionManager {
         let spawned = pty::spawn(spec, move |bytes| {
             let events = publish_fanout.lock().unwrap().publish(bytes);
             trace_log_events(id, &events);
-        })?;
+        })
+        .map_err(CreateError::Spawn)?;
 
+        let created_at_ms = now_ms();
+        let (exited_tx, exited) = watch::channel(false);
+        let pid = spawned.pid;
         let session = Arc::new(Session {
             id,
+            meta,
             pty: spawned.session,
             fanout,
-            directory: Arc::downgrade(&self.sessions),
+            runtime: Mutex::new(Runtime {
+                state: SessionState::Running,
+                pid,
+                cols,
+                rows,
+                created_at_ms,
+                started_at_ms: Some(created_at_ms),
+                exited_at_ms: None,
+                exit_code: None,
+                lost_reason: None,
+            }),
+            control: Mutex::new(ControlLease::default()),
+            events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
+            exited,
+            exited_tx,
             sync,
         });
         self.sessions.lock().unwrap().insert(id, Arc::clone(&session));
+        spawn_exit_listener(Arc::clone(&session), spawned.exit_rx);
         Ok(session)
     }
 
     pub fn get(&self, id: SessionId) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(&id).cloned()
     }
+
+    /// Every live session, for `GET /api/v1/sessions`. No ordering promise --
+    /// `api.rs` sorts newest-first (docs/04-api-protocol.md#get-apiv1sessions).
+    pub fn list(&self) -> Vec<Arc<Session>> {
+        self.sessions.lock().unwrap().values().cloned().collect()
+    }
+
+    /// `?purge=true`: removes the session from the directory (directory
+    /// entry first is not a concern here -- `api.rs` deletes
+    /// `data/sessions/{id}/` before calling this, matching the collector's
+    /// own directory-first-row-second ordering,
+    /// docs/05-persistence.md#garbage-collection). A no-op if the id is
+    /// already gone. Idempotent by construction (`HashMap::remove`).
+    pub fn purge(&self, id: SessionId) -> Option<Arc<Session>> {
+        self.sessions.lock().unwrap().remove(&id)
+    }
+}
+
+/// Resolves `command` the same way spawning eventually will -- a literal
+/// path if it contains a separator, otherwise a `$PATH` scan -- so a bad
+/// executable is caught as a clean `422` before a child is ever forked
+/// (docs/04-api-protocol.md#post-apiv1sessions), rather than surfacing as a
+/// session that spawns and immediately exits. Existence only; permission
+/// bits beyond "the executable bit is set on Unix" are not checked -- the
+/// exec call itself is the authoritative check for anything subtler, same as
+/// every shell's own `$PATH` lookup.
+fn resolve_executable(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.components().count() > 1 {
+        return is_executable_file(path);
+    }
+    let Some(path_var) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    // No PATHEXT scan -- accept an exact match, or one of the extensions the
+    // shipped presets actually use (docs/04-api-protocol.md#get-apiv1presets).
+    // A full PATHEXT implementation is not worth the complexity for the MVP;
+    // see docs/15-open-questions.md for the Windows gaps that are.
+    if path.is_file() {
+        return true;
+    }
+    ["exe", "cmd", "bat", "ps1"].iter().any(|ext| path.with_extension(ext).is_file())
+}
+
+/// Consumes `exit_rx` on its own thread -- the same shape as `pty.rs`'s own
+/// reader/writer/reaper/control threads (docs/03-pty-layer.md#thread-model):
+/// block on a channel, do the minimum work, never poll. Makes the *only*
+/// `Running`/`Closing` -> `Exited` transition, whether the exit was
+/// spontaneous or `terminate()`-requested, because docs/03-pty-layer.md's
+/// state machine requires exactly that: `RUNNING -> EXITED` fires off the
+/// reaper thread's `wait()` result directly, never off reader EOF.
+fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver<pty::PtyExit>) {
+    std::thread::Builder::new()
+        .name("session-exit".into())
+        .spawn(move || {
+            // A closed channel with no message would mean `pty::spawn`'s
+            // control thread died without ever publishing an exit -- a bug
+            // there, not something to panic this thread over.
+            let Ok(exit) = exit_rx.recv() else { return };
+
+            let (exit_code, lost_reason) = match exit.status {
+                Some(status) => (Some(status.exit_code() as i32), None),
+                None => (
+                    None,
+                    Some(match exit.lost_reason {
+                        Some(pty::LostReason::KillTimeout) => SessionLostReason::KillTimeout,
+                        Some(pty::LostReason::WaitError) | None => SessionLostReason::WaitError,
+                    }),
+                ),
+            };
+
+            {
+                let mut runtime = session.runtime.lock().unwrap();
+                runtime.state = SessionState::Exited;
+                runtime.exit_code = exit_code;
+                runtime.lost_reason = lost_reason;
+                runtime.exited_at_ms = Some(now_ms());
+            }
+            session.sync_log();
+            // `send` on a `watch` never fails as long as this `Sender` (owned
+            // by `session`, which this thread also holds a strong ref to) is
+            // alive -- it always is here.
+            let _ = session.exited_tx.send(true);
+        })
+        .expect("spawning session-exit thread");
 }
 
 #[cfg(test)]

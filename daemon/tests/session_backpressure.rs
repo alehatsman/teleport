@@ -41,7 +41,7 @@ async fn zero_subscribers_session_survives() {
     let manager = SessionManager::new(sessions_root("zero-subs"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
 
     session.write(b"echo hi\n").expect("write with no subscriber");
     session.resize(40, 120).expect("resize with no subscriber");
@@ -58,7 +58,7 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
     let manager = SessionManager::new(sessions_root("stuck-write"));
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), "sleep 30".to_string()];
-    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
 
     // Runs on its own thread, not this test's async task, so a write that
     // blocks doesn't block the assertion below from ever running.
@@ -78,21 +78,39 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
     assert!(t0.elapsed() < Duration::from_secs(9), "terminate() must not be wedged behind a stuck write");
 }
 
-/// `terminate()` must remove the session from its `SessionManager` -- left
-/// resolvable forever, a terminated session keeps its pty.rs writer thread
-/// (parked on `write_tx` until every clone drops) alive for the life of the
-/// daemon.
+/// **Changed in M4** (docs/04-api-protocol.md#delete-apiv1sessionsid):
+/// `terminate()` alone must leave the session resolvable and listed as
+/// `exited` -- only an explicit `?purge=true` (`SessionManager::purge`)
+/// removes it. The M2-era version of this test asserted the opposite
+/// (`terminate()` self-removing); that broke the "stays in the list as
+/// exited" contract M4's API needs, so the behavior and this test both
+/// changed together.
 #[tokio::test]
-async fn terminate_removes_the_session_from_its_manager() {
-    let manager = SessionManager::new(sessions_root("terminate-removes"));
+async fn terminate_leaves_the_session_listed_until_purged() {
+    let manager = SessionManager::new(sessions_root("terminate-leaves"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
     let id = session.id;
 
     session.terminate().expect("terminate should not error");
+    assert!(manager.get(id).is_some(), "a terminated session must stay listed until purged");
 
-    assert!(manager.get(id).is_none(), "terminated session must be removed from the manager");
+    // `terminate()` returning only guarantees the state left `running`; the
+    // final `-> exited` transition is made by the exit listener thread
+    // reacting to the same `wait()` result, asynchronously
+    // (docs/03-pty-layer.md#state-machine), so give it a moment.
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        if session.state() == teleportd::session::SessionState::Exited {
+            break;
+        }
+        assert!(Instant::now() < deadline, "session never reached exited after terminate()");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(manager.purge(id).is_some(), "purge must return the session it removed");
+    assert!(manager.get(id).is_none(), "purged session must be gone from the manager");
 }
 
 /// A subscriber that reads gets exactly what the session wrote, in order,
@@ -113,7 +131,7 @@ async fn subscriber_receives_output_in_order() {
     let manager = SessionManager::new(sessions_root("in-order"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
 
     let mut sub = session.subscribe();
     session.write(b"printf 'hello world'\n").expect("write");
@@ -153,7 +171,7 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     let manager = SessionManager::new(sessions_root("slow-sub"));
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {N}")];
-    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
 
     let slow = session.subscribe(); // never read from this one.
 
