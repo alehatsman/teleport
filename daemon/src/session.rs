@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, watch, Semaphore};
@@ -61,22 +61,13 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::log::{LogEvent, LogLimits, LogReader, LogSyncer, OutputLog, SyncHandle};
+use crate::now_ms;
 use crate::persistence;
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 
 /// docs/05-persistence.md#when-output_bytes-is-written: "at most once per
 /// second per session".
 const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
-
-/// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field
-/// here and, from M7 on, of the matching SQLite columns
-/// (docs/05-persistence.md#schema).
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 
 /// Queue bound per subscriber: whichever trips first
 /// (docs/03-pty-layer.md#backpressure).
@@ -682,6 +673,31 @@ pub enum AttachError {
 
 type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
 
+/// A cheap, `Clone`-able handle onto `SessionManager`'s live map -- just
+/// enough for `main.rs`'s GC pass to ask "is this id still live" without
+/// pulling in the rest of `SessionManager` (the `LogSyncer` thread, cap
+/// state). Shares the same underlying map, so it always reflects current
+/// membership; see [`SessionManager::live_handle`].
+#[derive(Clone)]
+pub struct LiveSessions(Arc<SessionDirectory>);
+
+impl LiveSessions {
+    /// Whether `id` is still tracked live (`Running`, `Closing`, or
+    /// `Exited` but not yet purged). GC must never delete a row/directory
+    /// this says yes to (docs/05-persistence.md#garbage-collection):
+    /// `api.rs`'s `find_session` checks this same map first, so a live id
+    /// is always served from here, never the DB fallback -- deleting its
+    /// directory out from under that would break `/log` while `GET` keeps
+    /// returning 200. An id that fails to parse as a `SessionId` can't be
+    /// live by construction.
+    pub fn contains(&self, id: &str) -> bool {
+        let Ok(id) = id.parse::<SessionId>() else {
+            return false;
+        };
+        self.0.lock().unwrap().contains_key(&id)
+    }
+}
+
 /// One session: a PTY primitive plus the fan-out state layered on top of it.
 /// No lock around `pty` -- `TerminalSession`'s `&self` methods (see
 /// docs/03-pty-layer.md#the-terminalsession-trait) already let `write`,
@@ -1215,6 +1231,12 @@ impl SessionManager {
         &self.root
     }
 
+    /// A persistent, cheap-to-clone handle for `main.rs`'s GC task to check
+    /// live membership against, without a full `SessionManager` clone.
+    pub fn live_handle(&self) -> LiveSessions {
+        LiveSessions(Arc::clone(&self.sessions))
+    }
+
     /// Atomically checks `max_sessions` against live sessions (`Running` or
     /// `Closing` -- an `exited`-but-unpurged entry holds no PTY or child
     /// process, so it doesn't count against the cap; otherwise routine
@@ -1346,8 +1368,25 @@ impl SessionManager {
                     db.note_output_bytes(&id.to_string(), next_offset);
                 }
             }
-        })
-        .map_err(CreateError::Spawn)?;
+        });
+        let spawned = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                // The row inserted above must not survive a spawn that never
+                // happened -- left behind, it would sit forever as a phantom
+                // `running`/pid-less row: `list`/`get` would serve it via
+                // the historical-row fallback (this id was never inserted
+                // into `self.sessions`), and GC's candidates are only
+                // `exited`/`lost`, so nothing would ever clean it up short
+                // of a restart forcing it to `lost`.
+                if let Some(db) = &self.db {
+                    if let Err(e) = db.delete_session_blocking(&id.to_string()) {
+                        warn!(session_id = %id, error = %e, "rolling back the session row after a failed spawn");
+                    }
+                }
+                return Err(CreateError::Spawn(e));
+            }
+        };
 
         let (exited_tx, exited) = watch::channel(false);
         let pid = spawned.pid;
