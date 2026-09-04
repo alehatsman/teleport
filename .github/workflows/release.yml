@@ -1,0 +1,125 @@
+name: Release
+
+# docs/16-release-pipeline.md. Separate from ci.yml on purpose: this builds
+# release artifacts and only runs on a version tag, never on every push.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # Fails fast, before any build runs, if the tag and Cargo.toml disagree --
+  # docs/16-release-pipeline.md#versioning.
+  check-version:
+    name: check tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version' daemon/Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')"
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::tag v$tag does not match daemon/Cargo.toml version $cargo_version"
+            exit 1
+          fi
+
+  # Built once and shared across every target job below -- the web bundle
+  # is platform-independent, so there's no reason to run npm on every OS.
+  build-web:
+    name: build web UI
+    needs: check-version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: build-web
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon -> target
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: build teleportd
+        working-directory: daemon
+        run: cargo build --release --features embedded-web --target ${{ matrix.target }}
+
+      - name: package (unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          name="teleport-${{ matrix.target }}"
+          mkdir "$name"
+          cp "daemon/target/${{ matrix.target }}/release/teleportd" "$name/"
+          tar czf "$name.tar.gz" "$name"
+      - name: package (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: bash
+        run: |
+          name="teleport-${{ matrix.target }}"
+          mkdir "$name"
+          cp "daemon/target/${{ matrix.target }}/release/teleportd.exe" "$name/"
+          7z a "$name.zip" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teleport-${{ matrix.target }}
+          path: teleport-${{ matrix.target }}.${{ matrix.archive_ext }}
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: teleport-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum * > checksums.txt
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes

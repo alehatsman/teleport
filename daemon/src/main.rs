@@ -150,7 +150,15 @@ async fn main() -> Result<()> {
         info!(path = %cli.web_dist.display(), "serving web UI");
         Some(cli.web_dist.clone())
     } else {
-        info!(path = %cli.web_dist.display(), "no built web UI at this path; serving API only");
+        // A binary built with `--features embedded-web` still serves the UI
+        // from its own baked-in bundle when `--web-dist` doesn't resolve to
+        // a real directory (docs/16-release-pipeline.md) -- the log line
+        // says which is actually about to happen.
+        if cfg!(feature = "embedded-web") {
+            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving embedded web UI");
+        } else {
+            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving API only");
+        }
         None
     };
 

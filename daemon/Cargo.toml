@@ -26,6 +26,14 @@ directories        = "5"
 # getrandom/getentropy/BCryptGenRandom; already pulled in transitively via
 # ulid -> rand.
 getrandom          = "0.2"
+# `embedded-web` feature only (docs/16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature).
+# Optional so a normal `cargo build`/`cargo test` never needs `web/dist` to
+# exist and never bakes in stale assets.
+rust-embed         = { version = "8", optional = true }
+mime_guess         = { version = "2", optional = true }
+
+[features]
+embedded-web = ["dep:rust-embed", "dep:mime_guess"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
