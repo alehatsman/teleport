@@ -122,7 +122,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "teleportd-config-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -140,11 +143,18 @@ mod tests {
     #[test]
     fn a_partial_file_only_overrides_what_it_names() {
         let dir = scratch_dir("partial");
-        std::fs::write(dir.join("config.toml"), "max_sessions = 5\nauth_token = false\n").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "max_sessions = 5\nauth_token = false\n",
+        )
+        .unwrap();
         let cfg = Config::load(&dir).expect("load");
         assert_eq!(cfg.max_sessions, 5);
         assert!(!cfg.auth_token);
-        assert_eq!(cfg.default_tail, DEFAULT_TAIL, "unnamed fields keep their default");
+        assert_eq!(
+            cfg.default_tail, DEFAULT_TAIL,
+            "unnamed fields keep their default"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

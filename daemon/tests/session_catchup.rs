@@ -39,7 +39,10 @@ fn sessions_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "teleportd-catchup-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
@@ -49,14 +52,27 @@ fn sessions_root(name: &str) -> PathBuf {
 /// ones -- a slow consumer trips the count half of the queue bound long
 /// before the byte half, and the count half is the cheaper one to reach in a
 /// test.
-fn spawn_backlog_then_trickle(manager: &SessionManager) -> std::sync::Arc<teleportd::session::Session> {
+fn spawn_backlog_then_trickle(
+    manager: &SessionManager,
+) -> std::sync::Arc<teleportd::session::Session> {
     let cwd = std::env::temp_dir();
     let args = vec![
         "-c".to_string(),
         format!("stty raw -echo; yes | head -c {BACKLOG}; while :; do printf 'tick\\n'; sleep 0.01; done"),
     ];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
+        .create(
+            SpawnSpec {
+                program: "/bin/sh",
+                args: &args,
+                cwd: &cwd,
+                env: &[],
+                cols: 80,
+                rows: 24,
+            },
+            "shell",
+            None,
+        )
         .expect("create session")
 }
 
@@ -69,7 +85,10 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // would test nothing.
     let deadline = Instant::now() + RECV_TIMEOUT;
     while session.next_offset() < BACKLOG {
-        assert!(Instant::now() < deadline, "the child never produced the backlog");
+        assert!(
+            Instant::now() < deadline,
+            "the child never produced the backlog"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
@@ -91,10 +110,20 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // bound during the walk, which is what makes the old ordering fail here.
     let (mut acc, attach, rounds) = support::catch_up(replay, ROUND_LATENCY).await;
 
-    assert!(rounds > 8, "a {BACKLOG}-byte backlog must take several bounded rounds, got {rounds}");
+    assert!(
+        rounds > 8,
+        "a {BACKLOG}-byte backlog must take several bounded rounds, got {rounds}"
+    );
     let mut end = attach.replay_to();
-    assert_eq!(end, acc.len() as u64, "replay rounds plus the final stretch must equal every byte served");
-    assert!(end >= ready_next_offset, "catch-up must reach at least the boundary `ready` announced");
+    assert_eq!(
+        end,
+        acc.len() as u64,
+        "replay rounds plus the final stretch must equal every byte served"
+    );
+    assert!(
+        end >= ready_next_offset,
+        "catch-up must reach at least the boundary `ready` announced"
+    );
 
     // The whole point: this subscriber is still connected, and its first
     // chunk continues the replay exactly.
@@ -103,8 +132,13 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
         let chunk = tokio::time::timeout(RECV_TIMEOUT, subscription.recv())
             .await
             .unwrap_or_else(|_| panic!("live chunk {i} never arrived"))
-            .unwrap_or_else(|| panic!("subscriber was disconnected after catch-up -- D1 has regressed"));
-        assert_eq!(chunk.offset, end, "live output must continue exactly where replay stopped");
+            .unwrap_or_else(|| {
+                panic!("subscriber was disconnected after catch-up -- D1 has regressed")
+            });
+        assert_eq!(
+            chunk.offset, end,
+            "live output must continue exactly where replay stopped"
+        );
         acc.extend_from_slice(&chunk.bytes);
         end += chunk.bytes.len() as u64;
     }

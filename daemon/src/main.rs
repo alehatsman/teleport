@@ -96,11 +96,18 @@ async fn main() -> Result<()> {
     let presets = presets::load_or_create(&data_dir)?;
 
     let listener = bind_with_fallback(cli.listen).await?;
-    let bound_addr = listener.local_addr().context("reading bound local address")?;
+    let bound_addr = listener
+        .local_addr()
+        .context("reading bound local address")?;
     write_port_file(&data_dir, bound_addr.port())?;
     info!(addr = %bound_addr, "teleportd listening");
 
-    println!("http://{}:{}/?token={}", bound_addr.ip(), bound_addr.port(), token);
+    println!(
+        "http://{}:{}/?token={}",
+        bound_addr.ip(),
+        bound_addr.port(),
+        token
+    );
 
     let log_limits = LogLimits {
         warn_bytes: config.log_warn_bytes,
@@ -111,8 +118,12 @@ async fn main() -> Result<()> {
         .with_max_sessions(config.max_sessions);
     // The Vite dev origin is only ever legitimate against a debug build of
     // this binary itself (docs/06-security.md#browser-origin-defense).
-    let origin_policy =
-        OriginPolicy::new(bound_addr.port(), cfg!(debug_assertions), &config.allowed_origins, &config.allowed_hosts);
+    let origin_policy = OriginPolicy::new(
+        bound_addr.port(),
+        cfg!(debug_assertions),
+        &config.allowed_origins,
+        &config.allowed_hosts,
+    );
 
     let web_dist = if cli.web_dist.is_dir() {
         info!(path = %cli.web_dist.display(), "serving web UI");

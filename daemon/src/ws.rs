@@ -60,7 +60,11 @@ pub async fn upgrade(
         return crate::api::ApiError::from(e).into_response();
     }
     if q.after.is_some() && q.tail.is_some() {
-        return (axum::http::StatusCode::BAD_REQUEST, "after and tail are mutually exclusive").into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "after and tail are mutually exclusive",
+        )
+            .into_response();
     }
     let Ok(session_id) = id.parse::<SessionId>() else {
         return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
@@ -73,7 +77,10 @@ pub async fn upgrade(
     // reconnecting client resume its own lease; a client that omits it gets
     // an ephemeral one and loses lease resumption
     // (docs/04-api-protocol.md#client-identity).
-    let client_id = q.client_id.clone().unwrap_or_else(|| format!("ephemeral-{}", ulid::Ulid::new()));
+    let client_id = q
+        .client_id
+        .clone()
+        .unwrap_or_else(|| format!("ephemeral-{}", ulid::Ulid::new()));
     let client_name = q
         .client_name
         .clone()
@@ -139,12 +146,22 @@ async fn run(
     control_grace_ms: u64,
 ) {
     let next_offset_hint = session.next_offset();
-    let (from, mut truncated) = bound_attach(after, tail, default_tail, max_replay_bytes, next_offset_hint);
+    let (from, mut truncated) = bound_attach(
+        after,
+        tail,
+        default_tail,
+        max_replay_bytes,
+        next_offset_hint,
+    );
 
     let replay = match session.attach(from) {
         Ok(replay) => replay,
         Err(AttachError::OffsetAhead { next_offset, .. }) => {
-            send_json(&mut socket, &json!({ "type": "error", "code": "offset_ahead", "next_offset": next_offset })).await;
+            send_json(
+                &mut socket,
+                &json!({ "type": "error", "code": "offset_ahead", "next_offset": next_offset }),
+            )
+            .await;
             let _ = socket.send(close(1008, "offset_ahead")).await;
             return;
         }
@@ -159,16 +176,23 @@ async fn run(
     // next -- `HistoryReplay::written` takes this round's own bytes back to
     // advance, so there is no path to the next round that skips writing them
     // out first (docs/04-api-protocol.md#catch-up--register-late-not-early).
-    let Some(mut step) = replay_round_or_close(&mut socket, session.id, replay.next_round()).await else {
+    let Some(mut step) = replay_round_or_close(&mut socket, session.id, replay.next_round()).await
+    else {
         return;
     };
     let attach = loop {
         match step {
-            ReplayStep::History { offset, bytes, replay: rest } => {
+            ReplayStep::History {
+                offset,
+                bytes,
+                replay: rest,
+            } => {
                 if send_binary(&mut socket, offset, &bytes).await.is_err() {
                     return;
                 }
-                let Some(next) = replay_round_or_close(&mut socket, session.id, rest.written(bytes)).await else {
+                let Some(next) =
+                    replay_round_or_close(&mut socket, session.id, rest.written(bytes)).await
+                else {
                     return;
                 };
                 step = next;
@@ -178,7 +202,11 @@ async fn run(
     };
     truncated = truncated || !attach.caught_up;
 
-    let control_epoch = if requested_control { session.attach_control(&client_id, &client_name) } else { None };
+    let control_epoch = if requested_control {
+        session.attach_control(&client_id, &client_name)
+    } else {
+        None
+    };
     let (cols, rows) = session.size();
 
     let ready = json!({
@@ -194,7 +222,11 @@ async fn run(
         "controller": session.controller_name(),
     });
     send_json(&mut socket, &ready).await;
-    if !attach.replay.is_empty() && send_binary(&mut socket, attach.replay_from, &attach.replay).await.is_err() {
+    if !attach.replay.is_empty()
+        && send_binary(&mut socket, attach.replay_from, &attach.replay)
+            .await
+            .is_err()
+    {
         return;
     }
 
@@ -337,14 +369,19 @@ async fn handle_control_message(
     let message: ClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
-            send_json(socket, &json!({ "type": "error", "code": "bad_request", "message": e.to_string() })).await;
+            send_json(
+                socket,
+                &json!({ "type": "error", "code": "bad_request", "message": e.to_string() }),
+            )
+            .await;
             return;
         }
     };
 
     match message {
         ClientMessage::Resize { cols, rows } => {
-            let controller = is_controlling.is_some_and(|epoch| session.is_controller(client_id, epoch));
+            let controller =
+                is_controlling.is_some_and(|epoch| session.is_controller(client_id, epoch));
             if controller {
                 if let Err(e) = session.resize(cols, rows) {
                     tracing::debug!(session_id = %session.id, error = %e, "resize rejected");
@@ -367,7 +404,11 @@ async fn handle_control_message(
 }
 
 async fn send_json(socket: &mut WebSocket, value: &serde_json::Value) {
-    if socket.send(Message::Text(value.to_string().into())).await.is_err() {
+    if socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .is_err()
+    {
         tracing::debug!("send failed; connection is going away");
     }
 }
@@ -383,7 +424,10 @@ async fn send_binary(socket: &mut WebSocket, offset: u64, bytes: &[u8]) -> Resul
 }
 
 fn close(code: u16, reason: &'static str) -> Message {
-    Message::Close(Some(CloseFrame { code, reason: reason.into() }))
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }))
 }
 
 /// Unwraps one `next_round`/`written` step, or closes the socket and reports
@@ -421,8 +465,15 @@ mod tests {
     fn no_cursor_replays_default_tail() {
         let next_offset = 500_000_000; // the "500 MB log" case
         let (from, truncated) = bound_attach(None, None, DEFAULT_TAIL, MAX_REPLAY, next_offset);
-        assert_eq!(from, next_offset - DEFAULT_TAIL, "must replay default_tail, not the whole log");
-        assert!(!truncated, "tail semantics are not a broken promise -- never flagged truncated");
+        assert_eq!(
+            from,
+            next_offset - DEFAULT_TAIL,
+            "must replay default_tail, not the whole log"
+        );
+        assert!(
+            !truncated,
+            "tail semantics are not a broken promise -- never flagged truncated"
+        );
     }
 
     /// docs/10-testing.md: "`tail=N` starts at exactly `max(0, next_offset -
@@ -445,7 +496,11 @@ mod tests {
     fn after_zero_on_a_huge_log_is_clamped_and_flagged_truncated() {
         let next_offset = 500_000_000;
         let (from, truncated) = bound_attach(Some(0), None, DEFAULT_TAIL, MAX_REPLAY, next_offset);
-        assert_eq!(from, next_offset - MAX_REPLAY, "replay_from must be exactly the max_replay_bytes boundary");
+        assert_eq!(
+            from,
+            next_offset - MAX_REPLAY,
+            "replay_from must be exactly the max_replay_bytes boundary"
+        );
         assert!(truncated);
     }
 
@@ -455,7 +510,8 @@ mod tests {
     fn after_within_the_replay_bound_is_not_truncated() {
         let next_offset = 10_000_000;
         let after = next_offset - 100; // well within max_replay_bytes
-        let (from, truncated) = bound_attach(Some(after), None, DEFAULT_TAIL, MAX_REPLAY, next_offset);
+        let (from, truncated) =
+            bound_attach(Some(after), None, DEFAULT_TAIL, MAX_REPLAY, next_offset);
         assert_eq!(from, after);
         assert!(!truncated);
     }
@@ -466,7 +522,13 @@ mod tests {
     #[test]
     fn an_oversized_tail_is_also_capped_by_max_replay_bytes() {
         let next_offset = 500_000_000;
-        let (from, _) = bound_attach(None, Some(50 * 1024 * 1024), DEFAULT_TAIL, MAX_REPLAY, next_offset);
+        let (from, _) = bound_attach(
+            None,
+            Some(50 * 1024 * 1024),
+            DEFAULT_TAIL,
+            MAX_REPLAY,
+            next_offset,
+        );
         assert_eq!(from, next_offset - MAX_REPLAY);
     }
 }

@@ -63,17 +63,27 @@ pub async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach
     let mut step = replay.next_round().expect("first catch-up round");
     loop {
         match step {
-            ReplayStep::History { offset, bytes, replay } => {
+            ReplayStep::History {
+                offset,
+                bytes,
+                replay,
+            } => {
                 assert_eq!(offset, next, "catch-up rounds must be contiguous");
                 next = offset + bytes.len() as u64;
                 acc.extend_from_slice(&bytes);
                 rounds += 1;
-                assert!(rounds <= MAX_TEST_ROUNDS, "catch-up did not converge within {MAX_TEST_ROUNDS} rounds");
+                assert!(
+                    rounds <= MAX_TEST_ROUNDS,
+                    "catch-up did not converge within {MAX_TEST_ROUNDS} rounds"
+                );
                 tokio::time::sleep(round_delay).await; // the "network"
                 step = replay.written(bytes).expect("catch-up round");
             }
             ReplayStep::Live(attach) => {
-                assert!(attach.caught_up, "a client that always outruns the producer must converge");
+                assert!(
+                    attach.caught_up,
+                    "a client that always outruns the producer must converge"
+                );
                 acc.extend_from_slice(&attach.replay);
                 return (acc, attach, rounds);
             }
@@ -109,7 +119,10 @@ fn sessions_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "teleportd-protocol-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
@@ -126,10 +139,17 @@ pub async fn spawn(config: Config) -> Daemon {
 /// (docs/08-packaging.md#build-pipeline).
 pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
 
-    let origin_policy = OriginPolicy::new(addr.port(), false, &config.allowed_origins, &config.allowed_hosts);
+    let origin_policy = OriginPolicy::new(
+        addr.port(),
+        false,
+        &config.allowed_origins,
+        &config.allowed_hosts,
+    );
     let state = Arc::new(AppState {
         sessions,
         origin_policy,
@@ -151,7 +171,11 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
         let _ = axum::serve(listener, app).await;
     });
 
-    Daemon { addr, state, server }
+    Daemon {
+        addr,
+        state,
+        server,
+    }
 }
 
 pub fn default_config() -> Config {
@@ -163,7 +187,18 @@ pub fn default_config() -> Config {
 /// test to get a session id to attach to.
 pub fn create_shell_session(daemon: &Daemon, args: Vec<String>) -> teleportd::session::SessionId {
     let cwd = std::env::temp_dir();
-    let spec = teleportd::pty::SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 };
-    let session = daemon.state.sessions.create(spec, "shell", None).expect("create session");
+    let spec = teleportd::pty::SpawnSpec {
+        program: "/bin/sh",
+        args: &args,
+        cwd: &cwd,
+        env: &[],
+        cols: 80,
+        rows: 24,
+    };
+    let session = daemon
+        .state
+        .sessions
+        .create(spec, "shell", None)
+        .expect("create session");
     session.id
 }

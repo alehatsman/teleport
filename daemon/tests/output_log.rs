@@ -14,29 +14,45 @@ fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "teleportd-log-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
 
 fn limits(max_bytes: u64, warn_bytes: u64) -> LogLimits {
-    LogLimits { max_bytes, warn_bytes, ..LogLimits::default() }
+    LogLimits {
+        max_bytes,
+        warn_bytes,
+        ..LogLimits::default()
+    }
 }
 
 /// `file_length == min(next_offset, log_capped_at)`, the identity that is the
 /// entire replay index (docs/05-persistence.md#output-log). Asserted after
 /// every operation, not just at the end.
 fn assert_invariant(log: &OutputLog, dir: &std::path::Path) {
-    let on_disk = std::fs::metadata(dir.join(LOG_FILE_NAME)).expect("stat log").len();
-    let expected = log.log_capped_at().map_or(log.next_offset(), |cap| log.next_offset().min(cap));
+    let on_disk = std::fs::metadata(dir.join(LOG_FILE_NAME))
+        .expect("stat log")
+        .len();
+    let expected = log
+        .log_capped_at()
+        .map_or(log.next_offset(), |cap| log.next_offset().min(cap));
     assert_eq!(
-        on_disk, expected,
+        on_disk,
+        expected,
         "file_length must equal min(next_offset {}, log_capped_at {:?})",
         log.next_offset(),
         log.log_capped_at()
     );
-    assert_eq!(on_disk, log.readable_end(), "readable_end must be the file length");
+    assert_eq!(
+        on_disk,
+        log.readable_end(),
+        "readable_end must be the file length"
+    );
 }
 
 /// An uncapped log persists everything and hands back the offset each chunk
@@ -52,7 +68,10 @@ fn append_offsets_and_range_reads_agree() {
     for chunk in chunks {
         let appended = log.append(chunk);
         starts.push(appended.start);
-        assert!(appended.events.is_empty(), "no cap, no warning, no error expected");
+        assert!(
+            appended.events.is_empty(),
+            "no cap, no warning, no error expected"
+        );
         assert_invariant(&log, &dir);
     }
     assert_eq!(starts, vec![0, 6, 15]);
@@ -68,7 +87,11 @@ fn append_offsets_and_range_reads_agree() {
     assert_eq!(reader.read_range(6, 15).unwrap(), b"terminal ".to_vec());
     assert_eq!(reader.read_range(3, 17).unwrap(), all[3..17].to_vec());
     assert_eq!(reader.read_range(20, 20).unwrap(), Vec::<u8>::new());
-    assert_eq!(reader.read_range(9, 4).unwrap(), Vec::<u8>::new(), "an inverted range is empty, not a panic");
+    assert_eq!(
+        reader.read_range(9, 4).unwrap(),
+        Vec::<u8>::new(),
+        "an inverted range is empty, not a panic"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -87,17 +110,35 @@ fn hitting_the_cap_stops_the_file_but_not_the_offset() {
         assert_invariant(&log, &dir);
     }
 
-    assert_eq!(log.log_capped_at(), Some(50), "cap lands on log_max_bytes exactly");
-    assert_eq!(log.readable_end(), 50, "the file stopped growing at the cap");
-    assert_eq!(log.next_offset(), 200, "offsets keep advancing past the cap");
+    assert_eq!(
+        log.log_capped_at(),
+        Some(50),
+        "cap lands on log_max_bytes exactly"
+    );
+    assert_eq!(
+        log.readable_end(),
+        50,
+        "the file stopped growing at the cap"
+    );
+    assert_eq!(
+        log.next_offset(),
+        200,
+        "offsets keep advancing past the cap"
+    );
 
     assert_eq!(
-        events.iter().filter(|e| matches!(e, LogEvent::Capped { at: 50 })).count(),
+        events
+            .iter()
+            .filter(|e| matches!(e, LogEvent::Capped { at: 50 }))
+            .count(),
         1,
         "Capped is reported once, at the cap offset: {events:?}"
     );
     assert_eq!(
-        events.iter().filter(|e| matches!(e, LogEvent::Warned { .. })).count(),
+        events
+            .iter()
+            .filter(|e| matches!(e, LogEvent::Warned { .. }))
+            .count(),
         1,
         "log_warn_bytes fires once, not per chunk: {events:?}"
     );
@@ -128,11 +169,18 @@ fn reopening_a_capped_log_does_not_rewind_next_offset() {
             log.append(&[b'y'; 20]);
         }
         assert_eq!((log.next_offset(), log.readable_end()), (200, 50));
-        StoredState { output_bytes: log.next_offset(), log_capped_at: log.log_capped_at() }
+        StoredState {
+            output_bytes: log.next_offset(),
+            log_capped_at: log.log_capped_at(),
+        }
     };
 
     let reopened = OutputLog::open(&dir, limits(50, 1024), Some(stored)).expect("reopen");
-    assert_eq!(reopened.next_offset(), 200, "next_offset must not move backwards across a restart");
+    assert_eq!(
+        reopened.next_offset(),
+        200,
+        "next_offset must not move backwards across a restart"
+    );
     assert_eq!(reopened.log_capped_at(), Some(50));
     assert_invariant(&reopened, &dir);
 
@@ -149,10 +197,21 @@ fn recovery_takes_the_larger_of_the_file_and_the_column() {
         log.append(&[b'x'; 4096]);
     }
 
-    let stale = StoredState { output_bytes: 1000, log_capped_at: None };
+    let stale = StoredState {
+        output_bytes: 1000,
+        log_capped_at: None,
+    };
     let recovered = OutputLog::open(&dir, LogLimits::default(), Some(stale)).expect("reopen");
-    assert_eq!(recovered.next_offset(), 4096, "the file wins when the column lags");
-    assert_eq!(recovered.log_capped_at(), None, "a full file is not a capped one");
+    assert_eq!(
+        recovered.next_offset(),
+        4096,
+        "the file wins when the column lags"
+    );
+    assert_eq!(
+        recovered.log_capped_at(),
+        None,
+        "a full file is not a capped one"
+    );
     assert_invariant(&recovered, &dir);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -169,10 +228,17 @@ fn a_column_ahead_of_the_file_is_reported_as_capped() {
         log.append(b"only these bytes survived");
     }
 
-    let stored = StoredState { output_bytes: 9_000, log_capped_at: None };
+    let stored = StoredState {
+        output_bytes: 9_000,
+        log_capped_at: None,
+    };
     let recovered = OutputLog::open(&dir, LogLimits::default(), Some(stored)).expect("reopen");
     assert_eq!(recovered.next_offset(), 9_000);
-    assert_eq!(recovered.log_capped_at(), Some(25), "persistence demonstrably stopped at the file length");
+    assert_eq!(
+        recovered.log_capped_at(),
+        Some(25),
+        "persistence demonstrably stopped at the file length"
+    );
     assert_invariant(&recovered, &dir);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -191,12 +257,19 @@ fn a_reopened_capped_log_does_not_resume_appending() {
         }
     }
 
-    let stored = StoredState { output_bytes: 80, log_capped_at: Some(40) };
+    let stored = StoredState {
+        output_bytes: 80,
+        log_capped_at: Some(40),
+    };
     let mut log = OutputLog::open(&dir, limits(40, 1024), Some(stored)).expect("reopen");
     let appended = log.append(b"more output");
     assert_eq!(appended.start, 80);
     assert_eq!(log.next_offset(), 91);
-    assert_eq!(log.readable_end(), 40, "the file must not grow again after a cap");
+    assert_eq!(
+        log.readable_end(),
+        40,
+        "the file must not grow again after a cap"
+    );
     assert_invariant(&log, &dir);
 
     let _ = std::fs::remove_dir_all(&dir);

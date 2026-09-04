@@ -27,12 +27,22 @@ fn sessions_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "teleportd-sessions-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
 fn spec<'a>(args: &'a [String], cols: u16, rows: u16, cwd: &'a PathBuf) -> SpawnSpec<'a> {
-    SpawnSpec { program: "/bin/sh", args, cwd, env: &[], cols, rows }
+    SpawnSpec {
+        program: "/bin/sh",
+        args,
+        cwd,
+        env: &[],
+        cols,
+        rows,
+    }
 }
 
 /// A session with zero subscribers is not a special case that needs to be
@@ -43,9 +53,13 @@ async fn zero_subscribers_session_survives() {
     let manager = SessionManager::new(sessions_root("zero-subs"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
+    let session = manager
+        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .expect("create session");
 
-    session.write(b"echo hi\n").expect("write with no subscriber");
+    session
+        .write(b"echo hi\n")
+        .expect("write with no subscriber");
     session.resize(40, 120).expect("resize with no subscriber");
     session.terminate().expect("terminate with no subscriber");
 }
@@ -60,7 +74,9 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
     let manager = SessionManager::new(sessions_root("stuck-write"));
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), "sleep 30".to_string()];
-    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
+    let session = manager
+        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .expect("create session");
 
     // Runs on its own thread, not this test's async task, so a write that
     // blocks doesn't block the assertion below from ever running.
@@ -77,7 +93,10 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
 
     let t0 = Instant::now();
     session.terminate().expect("terminate should not error");
-    assert!(t0.elapsed() < Duration::from_secs(9), "terminate() must not be wedged behind a stuck write");
+    assert!(
+        t0.elapsed() < Duration::from_secs(9),
+        "terminate() must not be wedged behind a stuck write"
+    );
 }
 
 /// **Changed in M4** (docs/04-api-protocol.md#delete-apiv1sessionsid):
@@ -92,11 +111,16 @@ async fn terminate_leaves_the_session_listed_until_purged() {
     let manager = SessionManager::new(sessions_root("terminate-leaves"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
+    let session = manager
+        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .expect("create session");
     let id = session.id;
 
     session.terminate().expect("terminate should not error");
-    assert!(manager.get(id).is_some(), "a terminated session must stay listed until purged");
+    assert!(
+        manager.get(id).is_some(),
+        "a terminated session must stay listed until purged"
+    );
 
     // `terminate()` returning only guarantees the state left `running`; the
     // final `-> exited` transition is made by the exit listener thread
@@ -107,12 +131,21 @@ async fn terminate_leaves_the_session_listed_until_purged() {
         if session.state() == teleportd::session::SessionState::Exited {
             break;
         }
-        assert!(Instant::now() < deadline, "session never reached exited after terminate()");
+        assert!(
+            Instant::now() < deadline,
+            "session never reached exited after terminate()"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    assert!(manager.purge(id).is_some(), "purge must return the session it removed");
-    assert!(manager.get(id).is_none(), "purged session must be gone from the manager");
+    assert!(
+        manager.purge(id).is_some(),
+        "purge must return the session it removed"
+    );
+    assert!(
+        manager.get(id).is_none(),
+        "purged session must be gone from the manager"
+    );
 }
 
 /// M4 review: `max_sessions` used to be checked and released under the lock,
@@ -123,7 +156,8 @@ async fn terminate_leaves_the_session_listed_until_purged() {
 /// real concurrent callers would race in.
 #[test]
 fn concurrent_creates_never_exceed_max_sessions() {
-    let manager = Arc::new(SessionManager::new(sessions_root("max-sessions-race")).with_max_sessions(3));
+    let manager =
+        Arc::new(SessionManager::new(sessions_root("max-sessions-race")).with_max_sessions(3));
     let cwd = temp_dir();
 
     let handles: Vec<_> = (0..10)
@@ -137,9 +171,16 @@ fn concurrent_creates_never_exceed_max_sessions() {
         })
         .collect();
 
-    let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("creator thread panicked")).collect();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("creator thread panicked"))
+        .collect();
     let succeeded: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
-    assert_eq!(succeeded.len(), 3, "at most max_sessions creates may succeed, even racing");
+    assert_eq!(
+        succeeded.len(),
+        3,
+        "at most max_sessions creates may succeed, even racing"
+    );
 
     for session in succeeded {
         let _ = session.terminate();
@@ -164,7 +205,9 @@ async fn subscriber_receives_output_in_order() {
     let manager = SessionManager::new(sessions_root("in-order"));
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
+    let session = manager
+        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .expect("create session");
 
     let mut sub = session.subscribe();
     session.write(b"printf 'hello world'\n").expect("write");
@@ -176,13 +219,20 @@ async fn subscriber_receives_output_in_order() {
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
     while !contains(&acc, "hello world") {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "timed out; got {:?}", String::from_utf8_lossy(&acc));
+        assert!(
+            !remaining.is_zero(),
+            "timed out; got {:?}",
+            String::from_utf8_lossy(&acc)
+        );
         let chunk = tokio::time::timeout(remaining, sub.recv())
             .await
             .expect("recv timed out")
             .expect("subscriber disconnected before all output arrived");
         if let Some(expected) = next_expected_offset {
-            assert_eq!(chunk.offset, expected, "offsets must be contiguous, no gap or overlap");
+            assert_eq!(
+                chunk.offset, expected,
+                "offsets must be contiguous, no gap or overlap"
+            );
         }
         next_expected_offset = Some(chunk.offset + chunk.bytes.len() as u64);
         acc.extend_from_slice(&chunk.bytes);
@@ -203,8 +253,13 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     const N: usize = 10 * 1024 * 1024; // 10 MiB, comfortably past the 8 MiB bound.
     let manager = SessionManager::new(sessions_root("slow-sub"));
     let cwd = temp_dir();
-    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {N}")];
-    let session = manager.create(spec(&args, 80, 24, &cwd), "shell", None).expect("create session");
+    let args = vec![
+        "-c".to_string(),
+        format!("stty raw -echo; yes | head -c {N}"),
+    ];
+    let session = manager
+        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .expect("create session");
 
     let slow = session.subscribe(); // never read from this one.
 
@@ -228,7 +283,10 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
         received += chunk.bytes.len();
     }
     let elapsed = t0.elapsed();
-    assert!(elapsed < Duration::from_secs(10), "drain of {N} bytes took {elapsed:?}, reader looks backpressured");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "drain of {N} bytes took {elapsed:?}, reader looks backpressured"
+    );
 
     // The never-reading subscriber must have been dropped once it exceeded
     // the bound, not silently buffered -- that's what keeps memory flat.
@@ -237,5 +295,8 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
         while slow.recv().await.is_some() {}
     })
     .await;
-    assert!(disconnected.is_ok(), "slow subscriber was never disconnected -- unbounded buffering");
+    assert!(
+        disconnected.is_ok(),
+        "slow subscriber was never disconnected -- unbounded buffering"
+    );
 }
