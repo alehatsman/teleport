@@ -630,11 +630,45 @@ tailscale serve --bg http://127.0.0.1:7337
 ```
 
 - tailnet hostname in `allowed_hosts`, its origin in `allowed_origins`
-- optional bearer token implemented and tested, default off
+- optional bearer token implemented and tested, on by default
 - verify `--bg` persistence survives a **full host reboot** on each OS
 
 **Gate:** a phone off the local network, on cellular, reaches a running agent over the
 tailnet, takes control, and types into it.
+
+> **Verified 2026-09-05 — config/docs half only; the gate itself is not yet met.**
+> `allowed_hosts`/`allowed_origins` (`daemon/src/config.rs`), the bearer-token
+> credential (`daemon/src/auth.rs`), and the Tailscale Serve setup instructions
+> ([07-remote-access.md](07-remote-access.md#default-tailscale-serve)) were already
+> built and documented during M4's auth-seam work — nothing new was written for M9.
+> Re-verified rather than re-implemented: full `cargo test` (111 tests, 0 failures),
+> `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` all clean, plus a
+> local smoke test standing up a real `teleportd` with `allowed_hosts =
+> ["fake-machine.tail1234.ts.net"]` / matching `allowed_origins` and driving it with
+> curl exactly as a Tailscale Serve reverse proxy would forward a request (tailnet
+> `Host` + `Origin` + `Authorization: Bearer`): correct `Host`/`Origin`/token → `201`;
+> missing token → `401`; wrong `Host` → `403`; wrong `Origin` → `403`; no `Origin`
+> (native-client shape) with a valid token → `201`. One correction made while
+> checking this: the bullet above said the bearer token defaults **off** — that
+> contradicts [06-security.md](06-security.md#authentication) ("bearer token, on by
+> default") and the shipped code (`Config::default().auth_token == true`), both of
+> which are correct; the bullet was simply stale and is fixed here.
+>
+> **Gate met 2026-09-05, on Linux (`mainpc`, real hardware, real tailnet).** Real
+> `teleportd` on `127.0.0.1:7337`, `allowed_hosts`/`allowed_origins` set to
+> `mainpc.tail37c478.ts.net`, `tailscale serve --bg` proxying it over HTTPS. Phone
+> (iOS) with Wi-Fi off, on cellular, opened `https://mainpc.tail37c478.ts.net/?token=…`,
+> took control of a session, and typed into it. `tailscale status` showed the phone's
+> endpoint move from a private LAN address (an earlier same-Wi-Fi pass, kept as a
+> distinct data point below) to a public IP once actually on cellular, connected
+> **direct** — no DERP relay. See [N1](15-open-questions.md#n1--keystroke-latency)
+> for the RTT numbers and typing-feel report.
+>
+> **Not done — needs a real reboot, deferred:** `tailscale serve status` after a
+> **full host reboot**, to confirm `--bg` persistence actually holds on this OS. Not
+> run in this session (rebooting the live dev machine mid-session is disruptive and
+> wasn't asked for) — do this whenever convenient and report back; nothing else is
+> outstanding for M9.
 
 **Also record** ([N1](15-open-questions.md#n1--keystroke-latency)): the RTT on that link,
 and whether `tailscale status` reports a direct connection or a DERP relay for the phone.

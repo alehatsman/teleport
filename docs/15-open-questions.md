@@ -22,7 +22,7 @@ backlog pretending to be a spec.
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
 | [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
-| [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
+| [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
@@ -597,6 +597,10 @@ only the first.
 
 **Not blocking. Measure at M9.**
 
+**Measured 2026-09-05, real hardware (`mainpc`, Linux, iPhone on cellular).** Numbers
+below are real. **Caveat: this measures the direct-path case, not the relayed one this
+section is actually worried about** — see after the numbers.
+
 Every keystroke costs one full round trip before it appears: the daemon owns the PTY, so
 a character is not on screen until the child has processed it and the bytes have come
 back. This is inherent to the architecture and is the correct trade — but it sets a
@@ -619,6 +623,23 @@ authoritative bytes. **Do not foreclose it.** Keeping replay a server-side decis
 
 Write the numbers into this section. They decide whether predictive echo is a v2 item or
 something the MVP cannot ship without.
+
+**Result (2026-09-05, iPhone on cellular, off the test machine's LAN, `tailscale
+ping`):** 32, 34, 36, 43, 57 ms — median ~36 ms. `tailscale status` showed the peer's
+endpoint as a public IP with `direct`, no `relay` in the status line: this connection
+never touched DERP. Subjective typing feel through the actual UI at this RTT:
+**instant, no noticeable lag**.
+
+**What this does and doesn't answer.** It answers the *good* case cleanly: when a
+direct WireGuard path exists, keystroke latency is a non-issue and predictive echo buys
+nothing worth its complexity. It does **not** answer this section's actual worst case —
+a phone behind CGNAT falling back to a DERP relay, the 80–200 ms scenario the whole
+section is about. This specific phone/carrier/network combination happened to punch a
+direct path; that is itself useful data (direct is achievable, not purely theoretical)
+but it is not the number that decides whether predictive echo is required. **Still
+open:** get a DERP-relayed sample — e.g. `tailscale ping` a peer while `tailscale
+status` shows `relay` for it (some carrier/NAT combinations force this; a corporate or
+CGNAT-heavy network is more likely to) — before treating N1 as closed.
 
 ## N2 — WebSocket compression
 
