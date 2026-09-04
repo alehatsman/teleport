@@ -361,6 +361,21 @@ Ping/Pong keepalive timing itself (implemented, not worth a real 60-second test 
 
 ## M5 — Browser terminal
 
+> **Delivered 2026-09-04** — `web/src/lib/{types,identity,api,stream}.ts`,
+> `Terminal.svelte`, `Sessions.svelte`, `Session.svelte`, `App.svelte`; `daemon/src/main.rs`
+> serves `web/dist` with SPA fallback. Two bugs only a real browser caught, not
+> typechecking: `sendInput` handed the WebSocket a JS string, which always goes out as a
+> *text* frame under the mixed-framing protocol — the daemon correctly rejected every
+> keystroke as `bad_request` and no input had ever reached a PTY through this client;
+> fixed by encoding to UTF-8 bytes before send. And a reopened tab always came back an
+> observer even for the client that held control seconds earlier, because `wantControl`
+> lived only in the in-memory `SessionStream` a page load discards — persisted per
+> session id in `identity.ts` instead, cleared the moment the server says otherwise. A
+> follow-up review pass then caught `terminate`/`purge` in `Sessions.svelte` with no
+> error handling (unlike `refresh`/`launch`), so a failed `DELETE` threw unhandled and
+> reached the user as a silent no-op button — caught into the same `loadError` banner.
+> `npm run check` and `npm run build` clean throughout.
+
 **Deliver:** `web/` — session list, session view, xterm.js behind `Terminal.svelte`,
 `stream.ts` implementing the offset contract.
 
@@ -370,6 +385,14 @@ Ping/Pong keepalive timing itself (implemented, not worth a real 60-second test 
 
 **Gate:** close the tab mid-agent-run, reopen, and the terminal shows a correct
 continuous transcript.
+
+**Met on Linux** — verified against a real daemon with a Playwright script driving two
+browser contexts (docs/10-testing.md's manual-pass style, run mid-milestone rather than
+only pre-release): create a session, take control, type a distinguishable command,
+confirm the echo, close and reopen the tab (replay continuous, control auto-resumed),
+second client attaches as observer and preempts, first client gets the "Control taken
+by" toast and demotes. Not saved as a repo test file — cross-client control-lease
+behavior is manual/scripted verification by design, not an automated e2e suite (see M6).
 
 > **Not** "the same on a phone over the LAN" — the daemon binds loopback and refuses
 > anything else without `--i-know-what-im-doing` ([06](06-security.md#listener)), and
@@ -381,6 +404,31 @@ continuous transcript.
 
 ## M6 — Control lease
 
+> **Delivered 2026-09-04** — no new code: this milestone's whole surface already
+> existed. The epoch-based lease (`daemon/src/session.rs`: `attach_control`,
+> `claim_control`, `release_control`, `begin_control_grace`, `write_if_controller`,
+> `is_controller`) and its `ws.rs` wiring (`not_controller` on input/resize from a
+> non-controller, `control_revoked` to the loser) landed as part of M4's review pass —
+> a lease race there (`is_controller` then `write` as separate lock acquisitions, and no
+> way to tell apart two connections sharing one `client_id`) needed the epoch mechanism
+> to fix, so the M6 protocol surface shipped a milestone early, with regression coverage
+> in `daemon/tests/ws_protocol.rs` (`claim_control_preempts_and_notifies_the_loser`,
+> `resize_from_the_controller_reaches_observers_as_resized`, `not_controller` on both
+> input and resize from an observer). The UI half (`Session.svelte`'s Controlling badge
+> / Take-control button / revocation toast, `stream.ts` never auto-sending
+> `claim_control` on reconnect) then shipped with M5 and was gate-tested there.
+> Re-verified independently today rather than trusting that record at face value:
+> two live browser contexts (desktop + phone viewport) against a real daemon and the
+> built SPA — desktop claims control, phone correctly renders as observer (no badge, no
+> resize authority); desktop resizes, phone letterboxes instead of fighting it; a rogue
+> WebSocket opened directly (bypassing the UI) has both an input frame and a resize
+> rejected with `not_controller`, confirmed by their absence from `/log` and unchanged
+> `cols`/`rows` on the session — not just the error frame; phone claims control,
+> preempts the desktop, desktop gets the toast and demotes with no data loss; a second
+> rogue connection is rejected the same way post-preemption, confirming the daemon
+> enforces this per-lease-holder, not by special-casing the first client. All ten checks
+> passed. 99/99 daemon tests green.
+
 **Deliver:** single-controller enforcement end to end.
 
 - `mode=control` on attach, `claim_control` / `release_control`
@@ -390,6 +438,8 @@ continuous transcript.
 
 **Gate:** a phone and a desktop attached simultaneously never fight over PTY size, and
 input never reaches the PTY from a non-controller.
+
+**Met on Linux** — see the independent re-verification above.
 
 ---
 
