@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teleportd::pty::SpawnSpec;
-use teleportd::session::SessionManager;
+use teleportd::session::{ReplayStep, SessionManager};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -164,12 +164,20 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     // the backpressure failure this test is trying to detect. `attach` counts
     // the replay too and closes that race
     // (docs/04-api-protocol.md#attach-race).
-    let mut fast = session.attach(0).expect("attach at 0");
-    let mut received = fast
-        .reader
-        .read_range(fast.replay_from, fast.replay_to)
-        .expect("read replay range")
-        .len();
+    let mut replay = session.attach(0).expect("attach at 0");
+    let mut received = 0usize;
+    let mut fast = loop {
+        match replay.next_round().expect("catch-up round") {
+            ReplayStep::History { bytes, replay: rest, .. } => {
+                received += bytes.len();
+                replay = rest;
+            }
+            ReplayStep::Live(attach) => {
+                received += attach.replay.len();
+                break attach;
+            }
+        }
+    };
 
     let t0 = Instant::now();
     while received < N {

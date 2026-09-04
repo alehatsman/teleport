@@ -176,6 +176,13 @@ subscriber queue full?
 This converts a slow consumer from a process-level failure mode into an ordinary
 reconnection event. It is a feature, not a degradation — exercise it in tests.
 
+**The bound covers live output only.** A subscriber is not registered until the history
+it still owes its client fits inside that bound with room to spare; catching up happens
+before registration, in bounded rounds off this mutex
+([04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early)). Registering
+first and replaying afterwards spends the same 8 MiB twice, and makes every attach to a
+busy session fail.
+
 ## Resize
 
 `ResizePseudoConsole` (and `TIOCSWINSZ` on Unix) changes the *pseudoconsole's*

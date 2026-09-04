@@ -55,6 +55,14 @@ equivalents chosen per platform.
 - attach at a boundary *exactly between* two output chunks
 - attach while the reader is mid-write (hammer with a concurrent writer)
 - `after > next_offset` → `offset_ahead` error, no panic
+- attach with `after` far behind, against a session sustaining 1 MB/s → attach completes,
+  no `1013`, no gap, no duplicate — the [D1](04-api-protocol.md#catch-up--register-late-not-early)
+  regression test; it fails on any build that registers the subscriber before writing the
+  replay, and passes trivially against an idle session, so it must be run against a busy one
+- the same with `tail` unset, exercising `default_tail`
+- a client that cannot keep up gets a *reported* hole, not an unbounded reconnect loop:
+  the gap stops shrinking, replay clamps to the last `live_gap_bytes`, and the offset
+  discontinuity is visible to the client
 - attach with no cursor on a 500 MB log replays `default_tail`, not 500 MB
 - `after=0` on a huge log is clamped to `max_replay_bytes` and `ready` reports
   `truncated: true` with a correct `replay_from`

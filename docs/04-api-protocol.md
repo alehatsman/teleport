@@ -312,6 +312,14 @@ the connection to live output.
 Client rule: track `next_offset` locally, advance it by payload length on every binary
 frame, and send it as `after` on reconnect. Never assume the stream restarts at 0.
 
+**A gap in the offsets is meaningful.** Offsets never rewind and two frames never
+overlap, but a frame's offset *may* exceed the end of the one before it. That means the
+daemon deliberately dropped bytes it could not serve: the log hit its size cap
+([05-persistence.md](05-persistence.md#size-cap)), or replay was clamped mid-catch-up
+([Attach race](#catch-up--register-late-not-early)). Clients render a discontinuity
+exactly as they render `truncated: true` — a "scrollback truncated" marker — and never
+splice the two sides together as though they were contiguous.
+
 ## Bounded attach
 
 A long-running agent produces a large log. `after=0` on a 500 MB session would replay
@@ -371,9 +379,7 @@ would otherwise vanish.
 **Correct order:**
 
 ```text
-register subscriber / establish replay boundary
-             ↓
-capture current output offset N
+capture the output offset N / register subscriber     ← one mutex
              ↓
 replay [requested_offset, N)
              ↓
@@ -387,6 +393,64 @@ loop takes when it advances `next_offset` and fans out
 ([03-pty-layer.md](03-pty-layer.md#reader-loop)). This guarantees every queued chunk
 starts at or after `N`, so replay and live output meet exactly once with no gap and no
 overlap.
+
+### Catch-up — register late, not early
+
+That ordering says *when* to register relative to reading `N`. It does not license
+registering before the replay has been **written to the client**, and doing so is a
+livelock.
+
+A subscriber registered up front accumulates live output for the entire duration of its
+replay, against the same 8 MiB queue bound
+([03-pty-layer.md](03-pty-layer.md#backpressure)) that `max_replay_bytes` is also 8 MiB
+of. On a session emitting 1 MB/s — the [load-sanity](10-testing.md#load-sanity) target —
+an 8 MiB replay to a phone on cellular takes tens of seconds and buffers far more than
+the bound. The subscriber overflows and is disconnected as a slow consumer *before it
+ever goes live*; it reconnects further behind and fails again. That triggers on
+precisely the session a user most wants to attach to, and no test that attaches to an
+idle session will ever see it.
+
+**The boundary therefore moves.** History is served in bounded rounds *before*
+registering, and the subscriber is registered only once the gap it still owes fits in
+its queue with room to spare:
+
+```text
+cursor = requested_offset
+loop {
+    lock:   N = next_offset;  end = min(N, readable_end);  gap = end - cursor
+            if gap <= live_gap_bytes {          # 1 MiB — one eighth of the queue bound
+                register subscriber             # same lock, same instant as reading N
+                unlock
+                write [cursor, end) to the client
+                go live                         # every queued chunk starts at or after N
+            }
+    unlock
+    write [cursor, cursor + replay_round_bytes) to the client    # off the lock
+    cursor += replay_round_bytes
+}
+```
+
+Each round is one short mutex acquisition and one bounded file read. **There is still
+exactly one buffer in the design** — the subscriber queue — and it is still 8 MiB. What
+changed is that it is no longer asked to hold history and live output at the same time.
+
+Bounding each round at `replay_round_bytes` also gives the client its first painted
+screen after 1 MiB rather than after the whole replay
+([15-open-questions.md](15-open-questions.md#n3--xtermjs-write-pacing-on-reattach)).
+
+**Convergence.** The gap closes only while the client outruns the producer — which is
+the same condition it must meet to stay attached at all, so the loop demands nothing new
+of it. A client that cannot is detected by the gap failing to shrink across four
+consecutive rounds. The daemon then clamps replay to the last `live_gap_bytes` before
+the boundary, registers, and lets ordinary backpressure take it from there: the client
+gets the live screen and a hole it is told about, instead of an unbounded reconnect loop.
+
+**`ready` is still the first frame, and its `next_offset` is still the boundary captured
+when the client attached** — not the one the subscriber is eventually registered at. The
+client does not need the difference. History and live output are one contiguous byte
+stream under one set of offsets, so "I have consumed up to `ready.next_offset`" still
+means "I hold the session's full history as of the moment I attached", whichever side of
+the handover each byte arrived from.
 
 If `after > N`, the client is ahead of the daemon (log was purged, or a stale client
 after a `lost` session): reply `error` with code `offset_ahead` and `next_offset`, and

@@ -150,10 +150,16 @@ by W1) and the grandchild-tree-close case, are expected to pass on Windows once 
 **Gate:** with a subscriber that never reads, PTY drain rate is unchanged and daemon
 memory stays flat. Verified under 1 MB/s sustained output.
 
-**Before M4:** resolve [D1](15-open-questions.md#d1--replay-must-not-share-the-live-subscriber-budget).
-As specified, a subscriber accumulates live output for the whole duration of its replay
-and can overflow this same 8 MiB bound before it ever goes live — which makes a busy
-session permanently unattachable. The attach ordering is correct; the budget is not.
+**D1 resolved 2026-09-04, before M4.** As originally specified, a subscriber accumulated
+live output for the whole duration of its replay and could overflow this same 8 MiB bound
+before it ever went live — which made a busy session permanently unattachable. The attach
+ordering was correct; the budget was not. The fix is the **moving boundary**
+([04](04-api-protocol.md#catch-up--register-late-not-early)): `Session::attach` no longer
+registers, it returns a `Replay` that serves history in 1 MiB rounds off the fan-out
+mutex, and registration happens only once the remaining gap is ≤ 1 MiB — one eighth of
+the queue bound, leaving seven eighths of headroom for live output. Still one buffer,
+still 8 MiB. Delivered in `session.rs` + two gate fixtures in
+`daemon/tests/session_catchup.rs`.
 
 ---
 
@@ -174,6 +180,14 @@ session permanently unattachable. The attach ordering is correct; the budget is 
 > receives starts at exactly `N` — that, not a dedup pass, is what closes
 > [the attach race](04-api-protocol.md#attach-race). `from > N` returns
 > `AttachError::OffsetAhead` (M4 renders it as the `offset_ahead` frame).
+>
+> **Amended by [D1](#m2--session-ownership-and-backpressure) (2026-09-04, same day).**
+> `attach` no longer registers. It returns a `Replay` — the `ready` fields plus a read
+> handle — and `Replay::next_round` serves history in bounded rounds, registering only
+> in the round that finds the remaining gap small enough to sit in a subscriber queue
+> alongside live output. The boundary and the registration are still one lock
+> acquisition, so the attach race stays closed exactly as described above; what moved is
+> *which* round takes it.
 >
 > Three resolutions the docs left open, recorded rather than silently picked:
 > **(1)** 05's "buffered append" is `write_all` straight to the file, not a userspace
@@ -240,7 +254,9 @@ boundary as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempt
 - `/health` with `api_versions` + `capabilities`; device fields behind the principal
 - sessions CRUD, `/log`, `/stream`
 - mixed framing: text = control JSON, binary = raw bytes with an 8-byte BE offset prefix
-- attach sequence in the correct order ([04](04-api-protocol.md#attach-race))
+- attach sequence in the correct order ([04](04-api-protocol.md#attach-race)), driving
+  `Replay::next_round` to the live boundary and writing each round to the socket before
+  asking for the next ([D1](04-api-protocol.md#catch-up--register-late-not-early))
 - **bounded attach**: `tail` param, `default_tail`, `max_replay_bytes`, `truncated` in
   `ready` ([04](04-api-protocol.md#bounded-attach))
 - `auth.rs` resolves a `Principal`; **handlers take the `Principal`, never headers**
