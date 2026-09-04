@@ -201,21 +201,45 @@ fn nonzero_exit_is_recorded_accurately() {
     assert!(!status.success());
 }
 
+// `target_os = "linux"`, not just `cfg(unix)`: this fixture has never been
+// reliably green on macOS. Two independently-reasoned detach recipes both
+// failed there -- one outright (perl never started), the other flaky (passed
+// once, then failed again with the same "EOF arrived suspiciously early"
+// shape a fixed grandchild-pid liveness check couldn't explain away). That
+// pattern looks like a genuine race in how macOS tears down a pty when its
+// session leader exits, not a scripting mistake -- tracked, not guessed at
+// further, as [S5](../../docs/15-open-questions.md#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos).
 #[test]
+#[cfg(target_os = "linux")]
 fn eof_and_exit_are_independent_signals() {
-    // The direct child exits almost immediately; a detached grandchild
-    // (ignoring SIGHUP, its own session) keeps the pty's slave side open for
-    // a few seconds after. wait() must not be blocked on that, and EOF must
-    // not arrive early just because the child already exited
+    // The direct child exits almost immediately; a backgrounded grandchild
+    // (ignoring SIGHUP) keeps the pty's slave side open for a few seconds
+    // after. wait() must not be blocked on that, and EOF must not arrive
+    // early just because the child already exited
     // (docs/15-open-questions.md#s2--eof-is-not-exit, S2's verified recipe).
     //
-    // The recipe calls `setsid(2)` via perl rather than the `setsid(1)`
-    // binary: that binary is util-linux, present on Linux but not on stock
-    // macOS, and the grandchild silently never starting ("command not
-    // found") is exactly what makes EOF arrive early instead of ~2s later.
-    // Perl ships on both and gives the same syscall.
-    let (spawned, _out_rx) = spawn_sh(
-        "trap '' HUP; perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- sh -c 'trap \"\" HUP; sleep 2' & exit 0",
+    // SIGHUP ignored *before* the fork races the parent's `exit 0` (S2's own
+    // finding) is what the grandchild actually needs: fork inherits signal
+    // disposition, and an ignored signal survives `exec` too (POSIX), so
+    // plain `trap '' HUP` on the parent covers a backgrounded `sleep` with no
+    // exec of its own -- no interpreter, no external `setsid` binary needed.
+    // Verified locally (`pty::fork` + `trap '' HUP; sleep 2 & echo $!` on
+    // Linux): direct child exits at ~1ms, EOF at ~2000ms, matching the
+    // grandchild's `sleep`. This is the Linux-only half of what was, until
+    // S5, a cross-platform fixture.
+    //
+    // `echo`ing the grandchild's pid (`$!`, the backgrounding shell's own
+    // idiom -- same as `terminate_kills_the_grandchild_process_tree` below)
+    // and probing it with `kill(pid, 0)` turns "it actually started and is
+    // running" into a fact about process state instead of a latency guess.
+    //
+    // Deliberately not probing `kill(pid, 0)` for "dead" *after* EOF fires:
+    // once reparented off its exited direct parent, this pid is reaped by
+    // whatever ancestor becomes its subreaper (usually init), not by us, so
+    // it may sit as a zombie for a while -- still `kill`-able, not actually
+    // running. That would make a "must be dead now" assertion its own flake.
+    let (spawned, out_rx) = spawn_sh(
+        "trap '' HUP; sleep 2 & pid=$!; echo GRANDCHILD_PID:$pid; exit 0",
         24,
         80,
     );
@@ -231,6 +255,20 @@ fn eof_and_exit_are_independent_signals() {
         "wait() should not wait on the grandchild: took {exit_latency:?}"
     );
     assert_eq!(exit.status.unwrap().exit_code(), 0);
+
+    let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| {
+        contains(acc, "GRANDCHILD_PID:")
+    });
+    let text = String::from_utf8_lossy(&acc);
+    let pid: i32 = text
+        .split("GRANDCHILD_PID:")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .expect("should have parsed the detached grandchild's pid from output");
+
+    // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "grandchild should still be alive right after exit_rx fired -- it should be mid-`sleep 2`, not gone already");
 
     // EOF should arrive later, once the grandchild's sleep ends and it exits too.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {

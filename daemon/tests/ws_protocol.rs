@@ -2,6 +2,11 @@
 //! docs/10-testing.md#3-protocol-tests that needs a real socket (framing,
 //! control lease, attach race, Origin/Host, keepalive semantics). HTTP-only
 //! checks live in `http_api.rs`.
+//!
+//! `cfg(unix)`-gated for the same reason as `http_api.rs`: fixtures go
+//! through `support::spawn`, which drives a real `/bin/sh`.
+
+#![cfg(unix)]
 
 mod support;
 
