@@ -25,6 +25,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
 use crate::device::Device;
+use crate::log::LogReader;
+use crate::persistence;
 use crate::presets::Preset;
 use crate::pty::SpawnSpec;
 use crate::session::{CreateError, SessionId, SessionManager, SessionState};
@@ -35,6 +37,11 @@ use crate::session::{CreateError, SessionId, SessionManager, SessionState};
 /// behind an `Arc` for the life of the process.
 pub struct AppState {
     pub sessions: SessionManager,
+    /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
+    /// that `sessions.get` doesn't know about falls back to this for `GET`
+    /// and `/log` -- a `lost`/`exited` row from before this process started
+    /// (persistence.rs's module doc explains why those aren't `Session`s).
+    pub db: Option<persistence::Db>,
     pub config: Config,
     pub device: Device,
     pub token: String,
@@ -373,7 +380,7 @@ struct SessionView {
     command: String,
     args: Vec<String>,
     cwd: String,
-    state: &'static str,
+    state: String,
     pid: Option<u32>,
     cols: u16,
     rows: u16,
@@ -382,7 +389,7 @@ struct SessionView {
     started_at_ms: Option<i64>,
     exited_at_ms: Option<i64>,
     exit_code: Option<i32>,
-    lost_reason: Option<&'static str>,
+    lost_reason: Option<String>,
     controller: Option<String>,
     subscribers: usize,
 }
@@ -397,7 +404,7 @@ impl SessionView {
             command: session.meta.command.clone(),
             args: session.meta.args.clone(),
             cwd: session.meta.cwd.display().to_string(),
-            state: session.state().as_str(),
+            state: session.state().as_str().to_string(),
             pid: session.pid(),
             cols,
             rows,
@@ -406,9 +413,36 @@ impl SessionView {
             started_at_ms: session.started_at_ms(),
             exited_at_ms: session.exited_at_ms(),
             exit_code: session.exit_code(),
-            lost_reason: session.lost_reason().map(|r| r.as_str()),
+            lost_reason: session.lost_reason().map(|r| r.as_str().to_string()),
             controller: session.controller_name(),
             subscribers: session.subscriber_count(),
+        }
+    }
+
+    /// A DB-only historical row -- no live `Session` behind it, so
+    /// `controller`/`subscribers` are always the "nobody's here" values
+    /// (docs/05-persistence.md; persistence.rs's module doc on why a
+    /// recovered row is never a `Session`).
+    fn from_row(row: &persistence::SessionRow) -> Self {
+        SessionView {
+            id: row.id.clone(),
+            kind: row.kind.clone(),
+            preset: row.preset.clone(),
+            command: row.command.clone(),
+            args: row.args.clone(),
+            cwd: row.cwd.clone(),
+            state: row.state.clone(),
+            pid: row.pid,
+            cols: row.cols,
+            rows: row.rows,
+            output_bytes: row.output_bytes,
+            created_at_ms: row.created_at_ms,
+            started_at_ms: row.started_at_ms,
+            exited_at_ms: row.exited_at_ms,
+            exit_code: row.exit_code,
+            lost_reason: row.lost_reason.clone(),
+            controller: None,
+            subscribers: 0,
         }
     }
 }
@@ -417,13 +451,40 @@ impl SessionView {
 /// Sorted newest-first; `env` never appears (it is never stored on
 /// [`crate::session::Session`] in the first place --
 /// docs/06-security.md#secrets-and-environment).
+///
+/// Merges live sessions (this process, from `SessionManager`) with rows
+/// SQLite knows about that this process never spawned -- a `lost`/`exited`
+/// session from before the last restart. A live entry always wins on a
+/// duplicate id: it's fresher (`controller`/`subscribers` a DB row can't
+/// have), and a live session's own row can itself be stale for up to a
+/// second (docs/05-persistence.md#when-output_bytes-is-written).
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
 ) -> impl IntoResponse {
-    let mut sessions = state.sessions.list();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms()));
-    let views: Vec<SessionView> = sessions.iter().map(|s| SessionView::from(s)).collect();
+    let live = state.sessions.list();
+    let live_ids: std::collections::HashSet<SessionId> = live.iter().map(|s| s.id).collect();
+    let mut views: Vec<SessionView> = live.iter().map(|s| SessionView::from(s)).collect();
+
+    if let Some(db) = &state.db {
+        match db.list_sessions().await {
+            Ok(rows) => {
+                for row in &rows {
+                    let is_live = row
+                        .id
+                        .parse::<SessionId>()
+                        .map(|id| live_ids.contains(&id))
+                        .unwrap_or(false);
+                    if !is_live {
+                        views.push(SessionView::from_row(row));
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "listing historical sessions from SQLite failed"),
+        }
+    }
+
+    views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
     Json(serde_json::json!({ "sessions": views }))
 }
 
@@ -432,8 +493,23 @@ async fn get_session(
     _principal: Principal,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let session = find_session(&state, &id)?;
-    Ok(Json(SessionView::from(&session)))
+    if let Ok(session) = find_session(&state, &id) {
+        return Ok(Json(SessionView::from(&session)));
+    }
+    let row = historical_row(&state, &id).await?;
+    Ok(Json(SessionView::from_row(&row)))
+}
+
+/// The DB-fallback half of `get_session`/`get_log`/`delete_session`: a
+/// session id that isn't live falls back to SQLite; `404` either way if
+/// nothing knows about it (`db: None` included -- same as before M7).
+async fn historical_row(state: &AppState, id: &str) -> Result<persistence::SessionRow, ApiError> {
+    let _: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
+    let db = state.db.as_ref().ok_or(ApiError::NotFound)?;
+    db.get_session(id)
+        .await
+        .map_err(|_| ApiError::NotFound)?
+        .ok_or(ApiError::NotFound)
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,11 +525,16 @@ struct DeleteQuery {
 ///
 /// `?purge=true` on an already-`exited` session skips the termination
 /// machine and deletes outright; on a still-running one it terminates first,
-/// waits for `exited`, then deletes the directory and the in-memory entry --
-/// directory first, matching the collector's own ordering
-/// (docs/05-persistence.md#garbage-collection). There is no SQLite row yet
-/// (M7), so "row second" here is [`SessionManager::purge`] removing the
-/// `Arc` from the directory.
+/// waits for `exited`, then deletes the directory, the SQLite row and the
+/// in-memory entry -- directory first, row second, matching the collector's
+/// own ordering (docs/05-persistence.md#garbage-collection).
+///
+/// A session id that isn't live but has a historical row (a `lost`/`exited`
+/// session from before this process started) can still be purged the same
+/// way, minus the termination step -- there is nothing running to terminate.
+/// Without `?purge=true` on such a row there is nothing to do either: it is
+/// already in a terminal state, so this is a no-op `202`, the same shape
+/// `terminate()`'s own idempotency gives a live already-`exited` session.
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -462,7 +543,24 @@ async fn delete_session(
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
-    let session = find_session(&state, &id)?;
+    let Ok(session) = find_session(&state, &id) else {
+        let row = historical_row(&state, &id).await?;
+        if q.purge {
+            let log_dir = state.sessions.root().join(&row.id);
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
+            {
+                tracing::warn!(session_id = %row.id, error = %e, "removing session directory task panicked");
+            }
+            if let Some(db) = &state.db {
+                if let Err(e) = db.delete_session(&row.id).await {
+                    tracing::warn!(session_id = %row.id, error = %e, "deleting historical session row failed");
+                }
+            }
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        return Ok(StatusCode::ACCEPTED);
+    };
 
     if q.purge {
         if session.state() != SessionState::Exited {
@@ -492,6 +590,11 @@ async fn delete_session(
         if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
         {
             tracing::warn!(session_id = %session.id, error = %e, "removing session directory task panicked");
+        }
+        if let Some(db) = &state.db {
+            if let Err(e) = db.delete_session(&session.id.to_string()).await {
+                tracing::warn!(session_id = %session.id, error = %e, "deleting session row failed");
+            }
         }
         state.sessions.purge(session.id);
         return Ok(StatusCode::NO_CONTENT);
@@ -525,8 +628,27 @@ async fn get_log(
     Query(q): Query<LogQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let session = find_session(&state, &id)?;
-    let end = session.next_offset();
+    let (end, mut reader) = if let Ok(session) = find_session(&state, &id) {
+        (
+            session.next_offset(),
+            session
+                .log_reader()
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        )
+    } else {
+        // A `lost`/`exited` session from before this process started --
+        // "historical log remains available" (docs/04-api-protocol.md's
+        // restart sequence diagram). No `Session`/`Fanout` behind it, so
+        // this opens `output.vt` directly rather than through one
+        // (persistence.rs's module doc explains why there is no `Session`
+        // to go through).
+        let row = historical_row(&state, &id).await?;
+        let path = state.sessions.root().join(&row.id).join("output.vt");
+        (
+            row.output_bytes,
+            LogReader::open(&path).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        )
+    };
 
     let (from, to) = if q.from.is_some() || q.to.is_some() {
         (q.from.unwrap_or(0), q.to.unwrap_or(end))
@@ -538,9 +660,6 @@ async fn get_log(
     let to = to.min(end);
     let from = from.min(to);
 
-    let mut reader = session
-        .log_reader()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let bytes = reader
         .read_range(from, to)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
