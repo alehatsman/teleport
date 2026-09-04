@@ -20,15 +20,17 @@ backlog pretending to be a spec.
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
-| [D1](#d1--replay-must-not-share-the-live-subscriber-budget) | Replay shares the live subscriber budget | M4 | design change + test |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [D3](#d3--attention-signals-in-the-mvp-ui) | Are `bell` / `idle` surfaced in the MVP? | M8 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 
-W1, S1–S4, and D1 are **blocking**. The rest are decisions that must be *made* before
-their milestone, not necessarily *built*. **W1 is the one that matters most right now**:
+W1 and S1–S4 are **blocking**. The rest are decisions that must be *made* before
+their milestone, not necessarily *built*. (D1 — replay sharing the live subscriber
+budget — is **closed**: the fix is the catch-up loop in
+[04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early), built and
+gated 2026-09-04.) **W1 is the one that matters most right now**:
 until it's understood, no Windows result from S1/S2/S4 can be trusted, because all three
 depend on observing a ConPTY child exit on its own.
 
@@ -490,49 +492,6 @@ already explained by W1.
 
 ---
 
-# D1 — Replay must not share the live subscriber budget
-
-**Blocks M4. This is a design change, not a spike.**
-
-Three facts that are individually right and jointly broken:
-
-| Fact | Source |
-|---|---|
-| Subscriber queue bound: 256 chunks / 8 MiB | [03](03-pty-layer.md#backpressure) |
-| `max_replay_bytes`: 8 MiB | [07](07-remote-access.md) |
-| Attach order: register → capture `N` → replay `[requested, N)` → drain buffered ≥ `N` → live | [04](04-api-protocol.md#attach-race) |
-
-The subscriber is registered and accumulating live output **for the entire duration of the
-replay**. On a session emitting 1 MB/s — the load-sanity target in
-[10](10-testing.md#load-sanity) — an 8 MiB replay to a phone on cellular takes tens of
-seconds and buffers far more than the 8 MiB bound. The subscriber overflows and is
-disconnected as a slow consumer *before it ever goes live*. It reconnects further behind
-and fails again.
-
-That is a livelock, and it triggers on precisely the session a user most wants to
-attach to: a busy one. It will not show up in any test that attaches to an idle session.
-
-**The attach ordering itself is correct and must not change** — it is what guarantees no
-gap and no duplicate. What must change is the budget.
-
-| Option | Notes |
-|---|---|
-| Spool live output to a separate bounded region during replay | preserves ordering; adds a second buffer to size and reason about |
-| Replay to a moving boundary: read the file, re-take the mutex, repeat until the remaining gap fits the queue, *then* register | keeps exactly one buffer; several short mutex acquisitions; converges only while the client outruns the producer |
-| Register with an unbounded queue, switch to bounded once live | simplest; reintroduces the unbounded memory the bound exists to prevent. Rejected. |
-
-**Recommendation: option 2**, falling back to option 1 if convergence proves flaky under
-a fast producer. Option 2 keeps one buffer in the design, which is the reason the current
-backpressure story is easy to reason about.
-
-Add to [10-testing.md](10-testing.md#2-sessionoffset-unit-tests) when this closes:
-
-- attach with `after` far behind, against a session sustaining 1 MB/s → attach completes,
-  no `1013`, no gap, no duplicate
-- the same with `tail` unset, exercising `default_tail`
-
----
-
 # Decisions to make
 
 ## D2 — Session-list freshness
@@ -611,7 +570,8 @@ something the MVP cannot ship without.
 Terminal output compresses roughly 10:1. `permessage-deflate` is negotiated at the
 handshake, requires **no protocol change**, and would cut cellular bytes and shorten every
 replay. If the pinned `axum` / `tokio-tungstenite` versions support it at acceptable cost,
-it is the cheapest networking win available and it makes D1's replay problem smaller too.
+it is the cheapest networking win available, and it shortens every catch-up round on an
+attach ([04](04-api-protocol.md#catch-up--register-late-not-early)) into the bargain.
 
 **Do not compress above the WebSocket layer.** Compressing the payload ourselves would put
 a codec between an offset and the bytes it indexes, which breaks the one invariant the

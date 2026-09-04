@@ -10,10 +10,19 @@
 //! `Fanout` mutex. That is what makes docs/03-pty-layer.md#reader-loop's
 //! ordering -- **persist, then advance the offset, then fan out** -- one
 //! call (`OutputLog::append`) instead of three steps a later edit could
-//! reorder. The same mutex closes the attach race: [`Session::attach`]
-//! registers the subscriber *and* reads the replay boundary `N` under one
-//! acquisition, so every chunk that subscriber ever receives starts at or
-//! after `N` (docs/04-api-protocol.md#attach-race).
+//! reorder. The same mutex closes the attach race: the round of
+//! [`Replay::next_round`] that registers the subscriber *also* reads the
+//! replay boundary `N` under one acquisition, so every chunk that subscriber
+//! ever receives starts at or after `N` (docs/04-api-protocol.md#attach-race).
+//!
+//! **D1 (resolved before M4):** registering the subscriber and *then* writing
+//! the replay spends the 8 MiB queue bound twice -- the subscriber buffers
+//! live output for the whole duration of a replay that is itself capped at
+//! 8 MiB, overflows, and is disconnected as a slow consumer before it ever
+//! goes live. [`Session::attach`] therefore does not register at all: it
+//! returns a [`Replay`] that hands history back in bounded rounds, and only
+//! the round that finds the remaining gap small enough registers
+//! (docs/04-api-protocol.md#catch-up--register-late-not-early).
 //!
 //! **Still out of scope:** bounded attach (`tail`, `max_replay_bytes`,
 //! `truncated`) and the WS close code that distinguishes a slow consumer
@@ -42,6 +51,24 @@ use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 /// (docs/03-pty-layer.md#backpressure).
 const MAX_QUEUE_CHUNKS: usize = 256;
 const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most history a subscriber may still owe its client at the moment it is
+/// registered. One eighth of the queue bound, so seven eighths stay free for
+/// live output while the client writes that last stretch out -- which is the
+/// headroom D1 says the design was missing
+/// (docs/04-api-protocol.md#catch-up--register-late-not-early).
+pub const LIVE_GAP_BYTES: u64 = MAX_QUEUE_BYTES as u64 / 8;
+
+/// Bytes one catch-up round reads off the fan-out mutex. Doubles as the
+/// pacing unit the client paints at, instead of one write of the whole log
+/// (docs/15-open-questions.md#n3--xtermjs-write-pacing-on-reattach).
+pub const REPLAY_ROUND_BYTES: u64 = LIVE_GAP_BYTES;
+
+/// Consecutive rounds the gap may fail to shrink before the daemon stops
+/// trying to catch this client up. A client that loses ground four rounds
+/// running is not going to survive the live stream either; clamping and
+/// reporting the hole beats an unbounded reconnect loop.
+const MAX_STALLED_ROUNDS: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(Ulid);
@@ -188,22 +215,160 @@ impl Drop for Subscription {
     }
 }
 
-/// A subscriber registered at the replay boundary. `replay_from..replay_to`
-/// is the byte range to serve out of `reader` before the first chunk from
-/// `subscription`; the two meet exactly once -- no gap, no duplicate.
-pub struct Attach {
-    /// Where replay actually starts. The requested offset, except for a
-    /// client attaching past a cap: there it is `next_offset` and the range
-    /// is empty (docs/05-persistence.md#size-cap).
+/// The catch-up half of an attach: a read handle plus a cursor, not yet
+/// registered with the fan-out.
+///
+/// The three public fields are exactly what `ready` needs
+/// (docs/04-api-protocol.md#control-messages) and they are available before
+/// any history has been written, which is why `ready` can still be the first
+/// frame. Drive it with [`next_round`](Self::next_round) until it hands back
+/// an [`Attach`].
+pub struct Replay {
+    /// Where replay actually starts -- `ready.replay_from`. The requested
+    /// offset, except for a client attaching past a cap: there it is
+    /// `next_offset` and nothing is replayed
+    /// (docs/05-persistence.md#size-cap).
     pub replay_from: u64,
-    /// One past the last replayable byte: `min(N, readable_end)`.
-    pub replay_to: u64,
+    /// The boundary captured when the client attached -- `ready.next_offset`.
+    /// **Not** necessarily the offset the subscriber is finally registered
+    /// at; a client that consumes up to here holds the session's full history
+    /// as of the moment it attached, which is all `ready` ever promised
+    /// (docs/04-api-protocol.md#catch-up--register-late-not-early).
+    pub next_offset: u64,
+    /// The cap as of the attach, for `ready`. A cap that lands *during*
+    /// catch-up shows up on [`Attach::log_capped_at`] instead; either way the
+    /// client sees the hole it creates as a jump in the offset prefix
+    /// (docs/04-api-protocol.md#offsets-are-the-replay-index).
+    pub log_capped_at: Option<u64>,
+
+    fanout: Arc<Mutex<Fanout>>,
+    reader: LogReader,
+    /// Next byte still owed to the client.
+    cursor: u64,
+    /// The gap as of the previous round, for convergence detection. Starts at
+    /// `u64::MAX` so the first round can never count as a stall.
+    previous_gap: u64,
+    stalled_rounds: u32,
+}
+
+/// One step of a catch-up loop. The `History` variant carries the rest of the
+/// [`Replay`] rather than borrowing it, so a caller cannot pump a replay that
+/// has already gone live and register a second subscriber by accident.
+pub enum ReplayStep {
+    /// A bounded stretch of history. Write it to the client, then call
+    /// [`Replay::next_round`] on `replay` again.
+    History { offset: u64, bytes: Vec<u8>, replay: Replay },
+    /// The gap closed: the subscriber is registered and the handover is set
+    /// up. Write [`Attach::replay`] first, then stream the subscription.
+    Live(Attach),
+}
+
+/// A subscriber registered at the replay boundary, with the last stretch of
+/// history it still owes. Write `replay` (starting at `replay_from`), then
+/// every chunk from `subscription`; the two meet exactly once -- no gap, no
+/// duplicate.
+pub struct Attach {
+    /// Where the final stretch of replay starts.
+    pub replay_from: u64,
+    /// The final stretch of history, read after registration and bounded by
+    /// `LIVE_GAP_BYTES`. Empty for a client that was already at the boundary,
+    /// or one attaching past a cap.
+    pub replay: Vec<u8>,
     /// `N` -- the boundary. Every chunk from `subscription` starts here or
-    /// later, guaranteed by the single lock `attach` takes.
+    /// later, guaranteed by the single lock the registering round takes.
     pub next_offset: u64,
     pub log_capped_at: Option<u64>,
-    pub reader: LogReader,
+    /// False when the catch-up loop gave up: the client kept losing ground,
+    /// so `replay_from` was moved forward and the bytes behind it were
+    /// dropped. M4 has nothing extra to send -- the hole is visible as a jump
+    /// in the offset prefix, which clients must already handle for the
+    /// log-cap case (docs/04-api-protocol.md#offsets-are-the-replay-index).
+    pub caught_up: bool,
     pub subscription: Subscription,
+}
+
+impl Attach {
+    /// One past the last replayed byte.
+    pub fn replay_to(&self) -> u64 {
+        self.replay_from + self.replay.len() as u64
+    }
+}
+
+impl Replay {
+    /// Advances the catch-up loop by one round.
+    ///
+    /// Either hands back a bounded stretch of history for the caller to write
+    /// -- read *off* the fan-out mutex, so a slow client never holds up the
+    /// PTY -- or, once the remaining gap fits comfortably inside a
+    /// subscriber's queue, registers and returns the live handover.
+    ///
+    /// The caller must write each `History` round to its client **before**
+    /// asking for the next one. That is what makes the gap a measurement of
+    /// whether the client is outrunning the producer, and therefore what
+    /// makes the loop converge (docs/04-api-protocol.md#catch-up--register-late-not-early).
+    pub fn next_round(mut self) -> Result<ReplayStep, AttachError> {
+        // Everything under the lock is arithmetic plus, on the last round, a
+        // registration: no file I/O, same short hold the reader thread takes.
+        let (next_offset, end, log_capped_at, subscription) = {
+            let mut fanout = self.fanout.lock().unwrap();
+            let next_offset = fanout.log.next_offset();
+            let end = next_offset.min(fanout.log.readable_end());
+            let log_capped_at = fanout.log.log_capped_at();
+
+            let gap = end.saturating_sub(self.cursor);
+            if gap >= self.previous_gap {
+                self.stalled_rounds += 1;
+            } else {
+                self.stalled_rounds = 0;
+            }
+            self.previous_gap = gap;
+
+            let register = gap <= LIVE_GAP_BYTES || self.stalled_rounds >= MAX_STALLED_ROUNDS;
+            let subscription = register.then(|| fanout.register(&self.fanout));
+            (next_offset, end, log_capped_at, subscription)
+        };
+
+        let Some(subscription) = subscription else {
+            let to = (self.cursor + REPLAY_ROUND_BYTES).min(end);
+            let offset = self.cursor;
+            let bytes = self.reader.read_range(offset, to)?;
+            // Advance by what was actually read, not by what was asked for: a
+            // short read must not leave a hole the client is never told about.
+            self.cursor += bytes.len() as u64;
+            return Ok(ReplayStep::History { offset, bytes, replay: self });
+        };
+
+        let mut replay_from = self.cursor;
+        let mut caught_up = true;
+        if replay_from >= end {
+            // Nothing left, or everything left is behind a cap. Either way the
+            // stream resumes at the boundary rather than at a file position
+            // that no longer means what the client thinks
+            // (docs/05-persistence.md#size-cap).
+            replay_from = next_offset;
+        } else if end - replay_from > LIVE_GAP_BYTES {
+            // Stalled: this client cannot be caught up. Serve it the freshest
+            // `LIVE_GAP_BYTES` and leave a reported hole behind them, rather
+            // than a queue it is certain to overflow.
+            replay_from = end - LIVE_GAP_BYTES;
+            caught_up = false;
+        }
+
+        // Read off the lock. The subscriber is already registered, so these
+        // bytes and the first queued chunk are contiguous by construction:
+        // this range ends at or before `end <= next_offset`, and every chunk
+        // that subscription will ever see starts at or after `next_offset`.
+        let replay = self.reader.read_range(replay_from, end)?;
+
+        Ok(ReplayStep::Live(Attach {
+            replay_from,
+            replay,
+            next_offset,
+            log_capped_at,
+            caught_up,
+            subscription,
+        }))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -258,22 +423,29 @@ impl Session {
         fanout.register(&self.fanout)
     }
 
-    /// Subscribes *and* establishes the replay boundary atomically.
+    /// Begins an attach: opens a read handle and establishes the replay
+    /// boundary, **without** registering a subscriber.
     ///
-    /// Registration and the read of `N` happen under one lock -- the same one
-    /// the reader loop takes to append and fan out -- which is what
-    /// guarantees replay and live output meet exactly once
-    /// (docs/04-api-protocol.md#attach-race). Opening the read handle happens
-    /// under it too: cheap, and it saves the caller reasoning about the file
-    /// moving. Reading the bytes does not -- that is the caller's job, off
-    /// the lock, through `Attach::reader`.
+    /// The returned [`Replay`] carries everything `ready` needs, so the
+    /// caller can send that frame immediately and then drive
+    /// [`Replay::next_round`] to the live handover. Registration happens in
+    /// the round that finds the remaining gap small enough -- under the same
+    /// lock that reads `N`, which is what keeps the attach race closed
+    /// (docs/04-api-protocol.md#attach-race), and late enough that the
+    /// subscriber's queue is never asked to hold history and live output at
+    /// the same time (docs/04-api-protocol.md#catch-up--register-late-not-early).
+    /// Opening the read handle happens under the lock too: cheap, and it
+    /// saves the caller reasoning about the file moving. Reading the bytes
+    /// does not -- that is `Replay`'s job, off the lock, one bounded round at
+    /// a time.
     ///
     /// Replay here is unbounded by design; `tail` / `max_replay_bytes` are
-    /// M4's (docs/04-api-protocol.md#bounded-attach) and narrow `replay_from`
-    /// before the read. Keeping the bound above this line is what lets a VT
-    /// state snapshot replace a byte range later without a protocol change.
-    pub fn attach(&self, from: u64) -> Result<Attach, AttachError> {
-        let mut fanout = self.fanout.lock().unwrap();
+    /// M4's (docs/04-api-protocol.md#bounded-attach) and narrow `from` before
+    /// it reaches this call. Keeping the bound above this line is what lets a
+    /// VT state snapshot replace a byte range later without a protocol
+    /// change.
+    pub fn attach(&self, from: u64) -> Result<Replay, AttachError> {
+        let fanout = self.fanout.lock().unwrap();
 
         let next_offset = fanout.log.next_offset();
         if from > next_offset {
@@ -282,22 +454,25 @@ impl Session {
         let log_capped_at = fanout.log.log_capped_at();
         let readable_end = fanout.log.readable_end();
         let reader = fanout.log.reader()?;
+        drop(fanout);
 
         // Bytes between a cap and `next_offset` were streamed live and are
         // gone. A client asking for them gets no replay and is told where the
         // stream resumes, rather than being served whatever happens to sit at
         // that file position (docs/05-persistence.md#size-cap).
-        let mut replay_from = from;
-        let mut replay_to = next_offset.min(readable_end);
-        if replay_from >= replay_to {
-            replay_from = next_offset;
-            replay_to = next_offset;
-        }
+        let replay_from =
+            if from >= next_offset.min(readable_end) { next_offset } else { from };
 
-        let subscription = fanout.register(&self.fanout);
-        drop(fanout);
-
-        Ok(Attach { replay_from, replay_to, next_offset, log_capped_at, reader, subscription })
+        Ok(Replay {
+            replay_from,
+            next_offset,
+            log_capped_at,
+            fanout: Arc::clone(&self.fanout),
+            reader,
+            cursor: replay_from,
+            previous_gap: u64::MAX,
+            stalled_rounds: 0,
+        })
     }
 
     /// The authoritative output offset: bytes below it have been handed out,
@@ -464,6 +639,120 @@ mod tests {
 
         drop(sub);
         assert_eq!(fanout.lock().unwrap().subscribers.len(), 0, "Drop must remove the slot without waiting for output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Builds a `Replay` straight onto a scratch `Fanout`, skipping the PTY
+    /// that `Session::attach` would need. The two D1 fixtures below are about
+    /// the catch-up loop's arithmetic, and that is entirely decided by the
+    /// log and the subscriber list -- driving it with a real child would add
+    /// timing to a question that has none.
+    fn scratch_replay(fanout: &Arc<Mutex<Fanout>>) -> Replay {
+        let guard = fanout.lock().unwrap();
+        let next_offset = guard.log.next_offset();
+        let reader = guard.log.reader().expect("reader");
+        drop(guard);
+        Replay {
+            replay_from: 0,
+            next_offset,
+            log_capped_at: None,
+            fanout: Arc::clone(fanout),
+            reader,
+            cursor: 0,
+            previous_gap: u64::MAX,
+            stalled_rounds: 0,
+        }
+    }
+
+    fn publish_mib(fanout: &Arc<Mutex<Fanout>>, mib: usize) {
+        let block = vec![b'x'; 64 * 1024];
+        for _ in 0..(mib * 16) {
+            fanout.lock().unwrap().publish(&block);
+        }
+    }
+
+    /// **D1, structurally.** No subscriber exists while history is still
+    /// being served, so the 8 MiB queue bound cannot be spent on replay --
+    /// which is the whole failure
+    /// (docs/04-api-protocol.md#catch-up--register-late-not-early). Needs
+    /// private `Fanout::subscribers`, so it lives here.
+    #[tokio::test]
+    async fn no_subscriber_exists_until_the_remaining_gap_fits() {
+        let dir = scratch_dir("catchup");
+        let fanout = scratch_fanout(&dir);
+        publish_mib(&fanout, 3);
+
+        let mut replay = scratch_replay(&fanout);
+        let next_offset = replay.next_offset;
+
+        let mut rounds = 0u64;
+        let attach = loop {
+            assert!(
+                fanout.lock().unwrap().subscribers.is_empty(),
+                "round {rounds}: a subscriber must not be registered while history is still owed"
+            );
+            match replay.next_round().expect("catch-up round") {
+                ReplayStep::History { offset, bytes, replay: rest } => {
+                    assert_eq!(offset, rounds * REPLAY_ROUND_BYTES, "rounds must be contiguous");
+                    assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES, "a round is bounded");
+                    rounds += 1;
+                    replay = rest;
+                }
+                ReplayStep::Live(attach) => break attach,
+            }
+        };
+
+        assert_eq!(rounds, 2, "3 MiB is two 1 MiB rounds, then a 1 MiB gap that fits");
+        assert_eq!(fanout.lock().unwrap().subscribers.len(), 1, "the last round registers");
+        assert!(attach.caught_up);
+        assert_eq!(attach.replay_from, 2 * REPLAY_ROUND_BYTES);
+        assert_eq!(attach.replay.len() as u64, LIVE_GAP_BYTES);
+        assert_eq!(attach.replay_to(), next_offset, "replay must meet the live boundary exactly");
+
+        drop(attach);
+        assert!(fanout.lock().unwrap().subscribers.is_empty(), "dropping the attach unregisters");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of D1: convergence is not guaranteed, so the loop must
+    /// have a floor. A producer the client never outruns makes the gap grow
+    /// every round; after `MAX_STALLED_ROUNDS` the daemon stops trying,
+    /// clamps replay to the freshest `LIVE_GAP_BYTES`, and reports the hole
+    /// rather than spinning or handing over a queue that is certain to
+    /// overflow.
+    #[tokio::test]
+    async fn a_catch_up_that_never_converges_gives_up_and_reports_the_hole() {
+        let dir = scratch_dir("stall");
+        let fanout = scratch_fanout(&dir);
+        publish_mib(&fanout, 3);
+
+        let mut replay = scratch_replay(&fanout);
+        let mut rounds = 0u64;
+        let attach = loop {
+            assert!(rounds < 16, "the catch-up loop did not terminate");
+            match replay.next_round().expect("catch-up round") {
+                ReplayStep::History { bytes, replay: rest, .. } => {
+                    rounds += 1;
+                    assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES);
+                    // The producer gains 2 MiB for every 1 MiB served: this
+                    // client is losing ground, every round, on purpose.
+                    publish_mib(&fanout, 2);
+                    replay = rest;
+                }
+                ReplayStep::Live(attach) => break attach,
+            }
+        };
+
+        assert_eq!(rounds, MAX_STALLED_ROUNDS as u64, "one round to set the baseline, then four stalls");
+        assert!(!attach.caught_up, "a clamped replay must say so");
+        let served = rounds * REPLAY_ROUND_BYTES;
+        assert!(attach.replay_from > served, "the clamp must leave a hole, not silently rewind");
+        assert_eq!(attach.replay.len() as u64, LIVE_GAP_BYTES, "the client gets the freshest MiB");
+        assert_eq!(
+            attach.replay_to(),
+            attach.next_offset,
+            "and it still meets the live boundary exactly -- the hole is behind it, not in front"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
