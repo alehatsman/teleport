@@ -3,6 +3,14 @@
 //! via `tower::ServiceExt::oneshot`, no real socket needed. WS-specific
 //! checks (framing, control lease, Origin on the upgrade) live in
 //! `ws_protocol.rs`.
+//!
+//! `cfg(unix)`-gated for the same reason as `session_replay.rs`: several
+//! fixtures drive a real `/bin/sh`, which doesn't exist on Windows -- same
+//! boundary as [W2](../../docs/15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted)
+//! (docs/11-mvp-plan.md#m4--http--websocket-api: "Windows: cross-compile-checked
+//! only, no fixtures run").
+
+#![cfg(unix)]
 
 mod support;
 

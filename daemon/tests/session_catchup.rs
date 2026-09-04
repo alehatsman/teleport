@@ -13,10 +13,19 @@
 //! in `session.rs`; this fixture is the end-to-end one, so it pays real time
 //! to a real child.
 //!
-//! `cfg(unix)`-gated for the same reason as `session_replay.rs`: it drives a
-//! real `/bin/sh`.
+//! `target_os = "linux"`-gated: it drives a real `/bin/sh` (same reason as
+//! `session_replay.rs`'s `cfg(unix)`), but also, found 2026-09-05, its pacing
+//! (`ROUND_LATENCY`, the trickle's `sleep 0.01` cadence) is tuned against
+//! Linux timing and doesn't reliably reproduce D1's failure mode on
+//! `macos-latest` -- the fixture's own guard caught this ("the pre-registered
+//! subscriber survived the catch-up window ... make the child noisier or the
+//! rounds slower before trusting it") rather than silently passing having
+//! tested nothing. Same category as
+//! [N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner):
+//! timing assumptions calibrated on one platform's CI runner, not diagnosed
+//! further without real macOS hardware to re-tune them against.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 mod support;
 

@@ -219,6 +219,12 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // Unix-only: `$SHELL` expansion is a Unix shell convention, and the
+    // Windows leg of this test would build a `Preset` it never uses --
+    // caught as an `unused_variables` clippy error (`-D warnings`) once
+    // `cargo test` stopped failing earlier in the Windows CI job and let
+    // `cargo clippy --all-targets` actually run, 2026-09-04.
+    #[cfg(unix)]
     #[test]
     fn shell_preset_expands_the_env_var() {
         let preset = Preset {
@@ -228,10 +234,7 @@ mod tests {
             args: vec![],
             icon: "terminal".into(),
         };
-        #[cfg(unix)]
-        {
-            std::env::set_var("SHELL", "/bin/zsh");
-            assert_eq!(preset.resolved_command(), "/bin/zsh");
-        }
+        std::env::set_var("SHELL", "/bin/zsh");
+        assert_eq!(preset.resolved_command(), "/bin/zsh");
     }
 }

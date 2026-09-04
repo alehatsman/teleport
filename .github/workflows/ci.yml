@@ -38,7 +38,11 @@ jobs:
         with:
           workspaces: daemon -> target
       - run: cargo build --all-targets
-      - run: cargo test
+      # --no-fail-fast: one failing test binary used to hide every later one
+      # (2026-09-05: cargo test stopping at the first failure hid three more
+      # macOS-only fixtures behind it, discovered one CI round-trip at a
+      # time until this flag showed the true, bounded scope in a single run).
+      - run: cargo test --no-fail-fast
       - run: cargo clippy --all-targets -- -D warnings
 
   daemon-audit:
