@@ -281,11 +281,40 @@ pub struct Replay {
 /// has already gone live and register a second subscriber by accident.
 pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
-    /// [`Replay::next_round`] on `replay` again.
-    History { offset: u64, bytes: Vec<u8>, replay: Replay },
+    /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
+    History { offset: u64, bytes: Vec<u8>, replay: HistoryReplay },
     /// The gap closed: the subscriber is registered and the handover is set
     /// up. Write [`Attach::replay`] first, then stream the subscription.
     Live(Attach),
+}
+
+/// A `Replay` that has just served one round of history. `written` is the
+/// only way back to a [`ReplayStep`] from here, and it takes that round's
+/// `bytes` as an argument -- not just `self` -- so a caller cannot ask for
+/// the next round without first having them in hand. That is what turns
+/// "write this round before requesting the next one"
+/// (docs/04-api-protocol.md#catch-up--register-late-not-early) from a
+/// comment into something the compiler checks: there is no path from a
+/// `History` step to the next one that does not pass through `bytes`.
+pub struct HistoryReplay {
+    round_len: usize,
+    replay: Replay,
+}
+
+impl HistoryReplay {
+    /// Advances the catch-up loop. `bytes` must be the round's own bytes --
+    /// checked by length, not just present for the type checker's sake -- so
+    /// passing back the wrong thing (or a placeholder) fails loudly here
+    /// rather than quietly reintroducing the pre-fetch race D1 closed.
+    pub fn written(self, bytes: Vec<u8>) -> Result<ReplayStep, AttachError> {
+        assert_eq!(
+            bytes.len(),
+            self.round_len,
+            "HistoryReplay::written must be called with this round's own bytes -- \
+             docs/04-api-protocol.md#catch-up--register-late-not-early"
+        );
+        self.replay.next_round()
+    }
 }
 
 /// A subscriber registered at the replay boundary, with the last stretch of
@@ -361,7 +390,12 @@ impl Replay {
             // Advance by what was actually read, not by what was asked for: a
             // short read must not leave a hole the client is never told about.
             self.cursor += bytes.len() as u64;
-            return Ok(ReplayStep::History { offset, bytes, replay: self });
+            let round_len = bytes.len();
+            return Ok(ReplayStep::History {
+                offset,
+                bytes,
+                replay: HistoryReplay { round_len, replay: self },
+            });
         };
 
         let mut replay_from = self.cursor;
@@ -718,21 +752,27 @@ mod tests {
         let fanout = scratch_fanout(&dir);
         publish_mib(&fanout, 3);
 
-        let mut replay = scratch_replay(&fanout);
+        let replay = scratch_replay(&fanout);
         let next_offset = replay.next_offset;
 
-        let mut rounds = 0u64;
-        let attach = loop {
+        let assert_no_subscriber = |rounds: u64| {
             assert!(
                 fanout.lock().unwrap().subscribers.is_empty(),
                 "round {rounds}: a subscriber must not be registered while history is still owed"
             );
-            match replay.next_round().expect("catch-up round") {
+        };
+
+        let mut rounds = 0u64;
+        assert_no_subscriber(rounds);
+        let mut step = replay.next_round().expect("first catch-up round");
+        let attach = loop {
+            match step {
                 ReplayStep::History { offset, bytes, replay: rest } => {
                     assert_eq!(offset, rounds * REPLAY_ROUND_BYTES, "rounds must be contiguous");
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES, "a round is bounded");
                     rounds += 1;
-                    replay = rest;
+                    assert_no_subscriber(rounds);
+                    step = rest.written(bytes).expect("catch-up round");
                 }
                 ReplayStep::Live(attach) => break attach,
             }
@@ -762,18 +802,20 @@ mod tests {
         let fanout = scratch_fanout(&dir);
         publish_mib(&fanout, 3);
 
-        let mut replay = scratch_replay(&fanout);
+        let replay = scratch_replay(&fanout);
         let mut rounds = 0u64;
+        assert!(rounds < 16, "the catch-up loop did not terminate");
+        let mut step = replay.next_round().expect("first catch-up round");
         let attach = loop {
-            assert!(rounds < 16, "the catch-up loop did not terminate");
-            match replay.next_round().expect("catch-up round") {
+            match step {
                 ReplayStep::History { bytes, replay: rest, .. } => {
                     rounds += 1;
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES);
                     // The producer gains 2 MiB for every 1 MiB served: this
                     // client is losing ground, every round, on purpose.
                     publish_mib(&fanout, 2);
-                    replay = rest;
+                    assert!(rounds < 16, "the catch-up loop did not terminate");
+                    step = rest.written(bytes).expect("catch-up round");
                 }
                 ReplayStep::Live(attach) => break attach,
             }
@@ -789,6 +831,28 @@ mod tests {
             attach.next_offset,
             "and it still meets the live boundary exactly -- the hole is behind it, not in front"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #1 finding 5: `HistoryReplay::written` is the only way to reach
+    /// the next `ReplayStep`, and it takes this round's bytes as an
+    /// argument rather than being reachable off bare `self` -- so a caller
+    /// that tries to advance without holding the right bytes (a pre-fetch,
+    /// or a placeholder) is caught here instead of silently reintroducing
+    /// the queue-overflow race D1 closed.
+    #[test]
+    #[should_panic(expected = "HistoryReplay::written must be called with this round's own bytes")]
+    fn written_rejects_bytes_that_are_not_this_round_s_own() {
+        let dir = scratch_dir("written-guard");
+        let fanout = scratch_fanout(&dir);
+        publish_mib(&fanout, 3);
+
+        let replay = scratch_replay(&fanout);
+        let ReplayStep::History { replay, .. } = replay.next_round().expect("first catch-up round") else {
+            panic!("3 MiB backlog must not go live on the first round");
+        };
+
+        let _ = replay.written(vec![0u8; 1]); // not this round's REPLAY_ROUND_BYTES-sized stretch
         let _ = std::fs::remove_dir_all(&dir);
     }
 
