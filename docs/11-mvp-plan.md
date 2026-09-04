@@ -89,13 +89,16 @@ from integration tests.
 
 **Gate:** the PTY integration fixture list in
 [10-testing.md](10-testing.md#1-pty-integration-fixtures-daemontestspty_rs) passes on
-Linux, macOS, **and Windows** — including close-under-output-load and the grandchild
-process-tree case — **except** the two fixtures that depend on observing a *graceful*
-exit code on Windows (`child exits normally`, `child exits nonzero`), which are blocked
-on [W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
-and tracked there, not silently skipped. Every other fixture, including
-user-initiated `terminate` (which hard-kills and is unaffected by W1) and the
-grandchild-tree-close case, is not deferred and must pass on Windows.
+Linux — **met, 10/10** (see "Delivered for Unix" above). The fixtures are themselves
+Unix-shell fixtures (`/bin/sh` scripts, `libc::kill`/`killpg` process-tree checks) and
+`daemon/tests/pty_primitive.rs` is `cfg(unix)`-gated accordingly; porting them to run on
+Windows (a `cmd.exe`-based equivalent suite, not just lifting the `cfg` gate) is tracked
+as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted), not silently
+implied by this Gate. Two of the ten — `child exits normally`, `child exits nonzero` —
+are additionally blocked on
+[W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+even once ported; the rest, including user-initiated `terminate` (hard-kills, unaffected
+by W1) and the grandchild-tree-close case, are expected to pass on Windows once W2 lands.
 
 ---
 

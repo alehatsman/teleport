@@ -15,6 +15,7 @@ backlog pretending to be a spec.
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
 | [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed, root cause still open** — general to ConPTY (not `cmd.exe`-specific), spike, Windows (2026-09-04) |
+| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
@@ -194,6 +195,21 @@ this says the mechanism doesn't see the event at all, on this build, for this
 spawn path. **Do not write the Windows leg of `pty.rs`'s reap/exit-status path
 against the current design until W1 is understood.** The Unix leg (S1-S4, fully
 closed on Linux) is unaffected and can proceed.
+
+## W2 — Windows fixture parity not yet attempted
+
+`daemon/tests/pty_primitive.rs` (docs/10-testing.md#1-pty-integration-fixtures-daemontestspty_rs)
+is written entirely around Unix shell mechanics -- `/bin/sh -c` scripts, `stty`,
+`setsid`/`trap` for the grandchild case, and `libc::kill`/`killpg` liveness probes for
+the process-tree-kill assertion. None of that exists on Windows, so the file is
+`#![cfg(unix)]`-gated: on a Windows checkout `cargo test` currently runs **zero** of
+these fixtures, not "8 pass, 2 blocked on [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)."
+
+**Closed by:** a `cmd.exe`- or PowerShell-based equivalent fixture file, written when
+someone can actually run and verify it on Windows (same constraint that shaped the M1
+spike itself -- docs/11-mvp-plan.md's "proceed for Unix now" decision). Until then, treat
+the M1 Gate as Linux-verified only; do not read `cfg(unix)` as "everything else already
+passes elsewhere."
 
 ## S1 — Who reaps the child?
 

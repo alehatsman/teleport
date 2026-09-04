@@ -68,6 +68,16 @@ const STATE_EXITED: u8 = 2;
 /// needs to know the platform, the abstraction has leaked and the fix
 /// belongs here, not at the call site.
 pub trait TerminalSession {
+    /// Enqueues `bytes` onto the write channel (capacity
+    /// `WRITE_CHANNEL_CAPACITY`); the writer thread sends them on. Normally
+    /// returns immediately, but if the child never reads its pty
+    /// ([S3](../../docs/15-open-questions.md#s3--a-blocking-write-wedges-terminate))
+    /// and the channel is already full, this call blocks the caller until it
+    /// drains or the session exits -- unlike `terminate()`, that bound is not
+    /// enforced here. A caller sharing a `PtySession` behind a `Mutex` (M1
+    /// scope note above) must not call this while holding that lock on an
+    /// async runtime's own thread; wrap it in `spawn_blocking`, same rule as
+    /// the reader loop (docs/03-pty-layer.md#the-rule).
     fn write(&mut self, bytes: &[u8]) -> Result<()>;
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
     /// Blocks for up to `GRACEFUL_WAIT + KILL_WAIT` (~7s): the bounded wait
@@ -238,9 +248,14 @@ impl TerminalSession for PtySession {
         }
 
         let (reply_tx, reply_rx) = mpsc::sync_channel::<PtyExit>(1);
-        self.control_tx
-            .send(ControlEvent::Terminate { reply_tx })
-            .context("pty control thread is gone")?;
+        if self.control_tx.send(ControlEvent::Terminate { reply_tx }).is_err() {
+            // The control thread is already gone -- it must have processed a
+            // spontaneous ChildExited (and dropped control_rx) in the window
+            // between our compare_exchange above and this send(). The session
+            // is exited either way, so this is the same race the comment
+            // below covers, just caught one step earlier -- treat as success.
+            return Ok(());
+        }
 
         // Blocks for up to GRACEFUL_WAIT + KILL_WAIT -- that bounded wait is
         // what "terminate" means here (docs/03-pty-layer.md#concrete-policy).
