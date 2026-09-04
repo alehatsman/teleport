@@ -1,5 +1,6 @@
 # Rust
 /daemon/target/
+/spike/target/
 
 # Web
 /web/node_modules/

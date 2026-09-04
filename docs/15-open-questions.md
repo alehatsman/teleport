@@ -14,10 +14,10 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | spike |
-| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | spike |
-| [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | spike |
-| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | spike |
+| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
+| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04) |
+| [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux (2026-09-04) |
+| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows blocked on tooling, see below |
 | [D1](#d1--replay-must-not-share-the-live-subscriber-budget) | Replay shares the live subscriber budget | M4 | design change + test |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [D3](#d3--attention-signals-in-the-mvp-ui) | Are `bell` / `idle` surfaced in the MVP? | M8 | decision |
@@ -70,6 +70,29 @@ platforms, with no thread parked in `wait()` while a `write` or `terminate` is p
 | `try_wait()` polled from the control thread on a 50–100 ms tick | no extra thread, but requires the control thread to never block — see [S3](#s3--a-blocking-write-wedges-terminate) |
 | `SIGCHLD` handler | Unix-only; needs a Windows path regardless. Rejected unless the spike surprises us. |
 
+**Spike result (2026-09-04):** ran `exit0`/`exit7`/external-`SIGKILL` under both
+mechanisms, plus `try_wait()` polling at 75 ms, on Linux x86_64
+(`portable-pty` 0.9.0). Both mechanisms observe the correct exit code every time;
+`poll` latency tracks the tick (~75 ms), `blocking wait()` on a dedicated thread is
+~0 ms. `SIGKILL`ed children report `exit_code=1` — `portable-pty` normalizes a
+signal death to a plain failure code on Unix, it does **not** surface the signal
+number. Don't build any UI or log line that expects to distinguish "exited 1" from
+"killed by signal" through this API; if that distinction ever matters, it has to
+come from a Unix-specific path around `portable-pty`, not through it.
+
+On Windows (11, build 26200 / ≥24H2, cross-compiled `x86_64-pc-windows-gnu`,
+executed directly — see the Windows section under S4 for why "directly" matters
+here): the `SIGKILL`-equivalent case (spawn a child that never exits on its own,
+`taskkill /F` it externally) reproduces cleanly — exit code observed at ~0 ms via
+both `poll` and `blocking wait()`, same as Linux. **Decision: dedicated blocking
+`wait()` thread**, one per session. It is the simplest option, meets the <100 ms
+pass criterion with room to spare, and — combined with [S3](#s3)'s separate writer
+thread — never sits behind a pending `write`/`terminate`. Reject polling: it adds
+a tick-latency tradeoff for no benefit once a dedicated thread is already paid for
+by S3. This sets the per-session thread count to **four**: reader, writer, control
+(`resize`/`terminate`), reaper (`wait()`). See [03-pty-layer.md#thread-model](03-pty-layer.md#thread-model),
+now updated.
+
 ## S2 — EOF is not exit
 
 **Claimed:** the [Reader loop](03-pty-layer.md#reader-loop) breaks on `read() == 0`
@@ -98,6 +121,52 @@ the state machine tolerates each arriving without the other.
 
 This has a knock-on for the checklist: `10-testing.md` line "Kill an agent process
 externally (`kill -9`) → reader sees EOF" encodes the assumption. Fix it when S2 closes.
+
+**Spike result (2026-09-04, Linux x86_64):** confirmed the basic case (`echo hi;
+exit 0`) and a 20000-line burst both show `wait()` and EOF landing together
+(gap 0 ms) — no surprise there, nothing holds the pty open after the shell exits.
+
+The grandchild case took real effort to even reproduce, and the effort *is* the
+finding. Naive detachment does **not** survive session teardown on Linux:
+
+- `nohup sleep 5 &` — dies with the parent. (Root cause turned out to be
+  unrelated to nohup's own reliability; see below.)
+- `setsid sh -c 'sleep 5' &` — also dies, immediately, even though `setsid`
+  genuinely puts it in a new session and process group.
+- Both reproduced identically through `portable-pty`'s own spawn **and** through
+  the standalone `script` utility, ruling out a `portable-pty`-specific bug — this
+  is Linux tty/session teardown behavior, not our code.
+- What actually survives: `trap '' HUP; setsid sh -c 'trap "" HUP; sleep 5' &`.
+  SIGHUP must be ignored **before** the fork races against the parent's exit — a
+  plain `setsid` or `nohup` after the fact loses that race essentially every time
+  in this environment. Once it survives, the master genuinely does not see EOF
+  until the grandchild exits (verified: `wait()` returns at 0 ms, EOF arrives at
+  ~5000 ms, matching the grandchild's sleep).
+
+**Implication:** the doc's framing ("a child that spawns a grandchild inheriting
+the PTY, then exits: the grandchild holds the slave open, no EOF") is real, but
+rarer in practice than it reads — a background job needs a correctly-ordered
+`setsid` + SIGHUP-ignore to survive at all, and most naive daemonizing attempts
+(`nohup cmd &`, `cmd & disown`) will simply die with the shell instead of leaking
+into this state. Both outcomes still require the same handling on our side: exit
+code and state must come from `wait()` alone (confirmed never wrong across every
+scenario tested), and the reader thread must tolerate EOF arriving long after
+`wait()`, or never distinctly before it.
+
+**Open corollary this spike surfaced, not yet answered by the docs:** when
+`wait()` returns before EOF (the surviving-grandchild case), does the session
+move to `exited` immediately using the child's exit code, while the reader
+thread keeps draining in the background until its own EOF (which may now be
+unbounded — the grandchild can live indefinitely)? Or does `exited` wait for
+both? The state machine in [03](03-pty-layer.md#state-machine) is written for the
+*user-initiated* `CLOSING → EXITED` path; it does not say what happens when the
+child exits on its own while a descendant still holds the slave. Recommend:
+`exited` fires on `wait()` alone (that's the whole point of S2 — never block
+session-list accuracy on EOF), and the reader thread keeps appending to
+`output.vt` in the background, independent of session state, until it gets EOF
+or the session is GC'd. Needs a decision recorded in
+[03-pty-layer.md#state-machine](03-pty-layer.md#state-machine) before M2's
+`SessionManager` is built around it.
 
 ## S3 — A blocking write wedges `terminate`
 
@@ -136,6 +205,31 @@ Either answer puts the per-session thread count at **three or four**, not two. T
 honest price of the invariant. Pay it and update `03-pty-layer.md#thread-model`; do not
 economize on threads and reintroduce the wedge.
 
+**Spike result (2026-09-04, Linux x86_64):** confirmed the wedge directly, and it
+took a correction to reproduce honestly. First attempt wrote 1 MiB to a
+never-reading child's master and it "wrote" fine in 170 ms — because the pty's
+default termios is cooked+echo, and echo drains an unread write regardless of
+whether the child ever reads stdin. That's not the scenario S3 is about. Set the
+pty to raw mode (`cfmakeraw` + `tcsetattr`) first — what a real remote-shell
+session runs in anyway — and the write genuinely never returns on its own.
+
+With that corrected: **shared queue** (write and terminate on one worker
+processing commands in order, matching the current two-thread model) — terminate
+did not complete inside a 10 s bound; it is queued strictly behind the write and
+the write never finishes on its own. **Separate writer thread** (terminate issued
+directly, bypassing the writer's queue) — terminate completes in ~0 ms regardless.
+
+**Decision: separate dedicated writer thread**, per the first candidate answer.
+`resize` and `terminate` stay together on the control thread (both genuinely
+short/bounded); only `write` gets its own thread. Combined with [S1](#s1-who-reaps-the-child)'s
+reaper thread, that's four threads per session: reader, writer, control
+(`resize`/`terminate`), reaper (`wait()`).
+[03-pty-layer.md#thread-model](03-pty-layer.md#thread-model) is updated to match.
+Input that can't be delivered (a full/blocked write) is simply left blocked on its
+own thread — never allowed to hold up `resize` or `terminate`; whether to also add
+a bounded input queue with drop-on-overflow (the second candidate) is a
+can-defer, not required to close S3.
+
 ## S4 — Does dropping the master close the pseudoconsole?
 
 **Claimed:** [Termination](03-pty-layer.md#termination) step 2 gives the Windows graceful
@@ -160,6 +254,45 @@ dedicated thread, and it is load-bearing for the M1 gate.
 **Pass criteria:** a documented drop order that reliably closes the pseudoconsole on both
 builds, with a measured upper bound on how long it can block. If dropping is unreliable,
 call `ClosePseudoConsole` explicitly rather than relying on `Drop` ordering.
+
+**Spike result — Unix, closed (2026-09-04, Linux x86_64):** the question doesn't have
+a Windows-only answer; the Unix equivalent ("drop the master, which raises SIGHUP" —
+[Termination](03-pty-layer.md#concrete-policy) step 2's stated fallback) has the
+identical shape and was tested directly. With a reader clone and writer held exactly
+as the real thread model holds them (mirroring production, not a synthetic
+single-handle test), dropping *only* the `MasterPty` — while the reader/writer clones
+stay alive — closed nothing: no EOF, no SIGHUP, no effect, for at least 10s. This is
+expected once you look at it (the clones are `dup()`s of the same underlying fd, and
+the kernel reference-counts the open file description, not `portable-pty`'s Rust
+handle) but it directly contradicts treating "drop master" as a termination
+mechanism, since the real architecture *always* has the reader thread holding a
+clone for the session's entire life. **Recommendation: delete the Unix fallback
+language in [03-pty-layer.md#concrete-policy](03-pty-layer.md#concrete-policy) step 2.**
+Rely solely on the primary path already documented there — `killpg(pgid, SIGHUP)`
+then `SIGTERM` — and only drop the master/reader/writer handles as post-reap
+cleanup, never as the mechanism that makes termination happen. Done below.
+
+**Windows — still open, blocked on tooling, not on Windows itself.** Cross-compiled
+the same spike (`x86_64-pc-windows-gnu`) and ran it against the real Windows 11 host
+underneath this WSL2 sandbox (build 26200, confirmed ≥24H2) via WSL's process
+interop (`cmd.exe`/`powershell.exe` invoking the `.exe` directly — no Windows Rust
+toolchain was installed, so this was the only path available here). Partial result:
+external termination works identically to Linux — `SIGKILL`-equivalent
+(`taskkill /F`) on a hung child is observed via `wait()` at ~0 ms, both via polling
+and a dedicated thread ([S1](#s1-who-reaps-the-child)'s Windows leg came from this
+run. But **every test requiring a child to exit or produce output on its own — not
+externally killed — hung indefinitely**: `cmd /c "exit 0"`, `cmd /c "echo hi"`, and
+the S4 drop-master case itself never completed, identically whether launched via
+`cmd.exe` or `powershell.exe`. This reproduced identically on both launchers, which
+rules out a `cmd.exe`-quoting explanation; the likely cause is that WSL-interop
+launches processes without a real interactive window station/console session,
+which `ConPTY`'s console host may depend on — i.e. this looks like a limitation of
+*driving Windows through the WSL bridge*, not a finding about ConPTY itself. **This
+needs re-running from an actual interactive Windows session** (Windows Terminal or
+a plain console, on the same machine, not through WSL interop) before S4's Windows
+half and the corresponding Windows legs of S1/S2 can be marked closed. The spike
+binaries are already built for `x86_64-pc-windows-gnu`; re-running them just needs
+a normal Windows terminal — see `spike/` on the `m1-pty-spike` branch.
 
 ---
 
