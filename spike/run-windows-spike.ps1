@@ -58,6 +58,11 @@ function Run-Spike {
     Remove-Item $stderrFile, $stdoutFile -ErrorAction SilentlyContinue
 }
 
+# S0 -- control: no ConPTY at all, does `cmd /c "exit 0"` reap normally?
+# Added after the first real run showed every graceful-exit ConPTY child hang;
+# this isolates whether ConPTY is the variable.
+Run-Spike "S0 control (no pty)" "s0_control.exe" @() 15
+
 # S1 -- who reaps the child (see docs/15-open-questions.md#s1)
 Run-Spike "S1 exit0 / poll"          "s1_reaper.exe" @("exit0","poll")             15
 Run-Spike "S1 exit0 / blocking"      "s1_reaper.exe" @("exit0","blocking")         15
