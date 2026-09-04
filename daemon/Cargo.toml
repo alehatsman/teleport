@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio              = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 axum               = { version = "0.8", features = ["ws"] }
+tower              = { version = "0.5", features = ["util"] }
 tower-http         = { version = "0.6", features = ["fs", "trace"] }
 portable-pty       = "0.9"
 rusqlite           = { version = "0.32", features = ["bundled"] }
@@ -28,6 +29,16 @@ getrandom          = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# M4 protocol tests drive `api.rs` in-process (no real socket needed) and
+# `ws.rs` over a real one. `tower`'s `ServiceExt::oneshot` (a real
+# `[dependencies]` entry as of M5, for the SPA-fallback dispatch in
+# `api.rs`) does the in-process driving; `tokio-tungstenite` is already
+# pulled in transitively by axum's `ws` feature (axum vendors its WebSocket
+# support on it) and just gets exposed to tests here.
+tokio-tungstenite  = "0.29"
+futures-util       = "0.3"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
