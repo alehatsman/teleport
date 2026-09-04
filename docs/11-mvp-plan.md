@@ -513,9 +513,10 @@ input never reaches the PTY from a non-controller.
 >
 > **Two scope cuts, recorded in `persistence.rs`'s module doc rather than made silently:**
 > (1) `session_events` only ever gets `created`/`exited`/`lost` rows — `resized`,
-> `control_granted`/`_revoked`, `subscriber_attached`/`_detached`, `slow_consumer`,
-> `bell`, `idle` would each need new plumbing through `ws.rs`/the control lease/the reader
-> loop, out of proportion to this milestone's gate; the schema already has the room. (2)
+> `control_granted`/`_revoked`, `subscriber_attached`/`_detached`, `slow_consumer` would
+> each need new plumbing through `ws.rs`/the control lease, out of proportion to this
+> milestone's gate; the schema already has the room. `bell`/`idle` were in this same cut
+> at M7 but got wired for real in M8 below — see that callout. (2)
 > `sessions.log_capped_at` is never written — stays `NULL` even once a log actually caps
 > — purely informational (harmless: `read_range` self-clamps regardless), fixed by the
 > same `note_*` pattern whenever someone next touches capping.
@@ -559,6 +560,40 @@ callout above.
 
 ## M8 — Agent presets
 
+> **Delivered 2026-09-05.** Most of this milestone's surface, like M6's, had already
+> shipped as part of M4/M5: `presets.rs`, `presets.toml`, `GET /api/v1/presets`, and a
+> working preset `<select>` + custom-command fallback in `Sessions.svelte` all predate
+> this callout. Two gaps remained and are closed here:
+>
+> **Recent working directories** (`web/src/lib/Sessions.svelte`): a `recentCwds` derived
+> value dedupes `sessions` by `cwd`, keeps each one's most recent `created_at_ms`, sorts
+> descending, caps at 8, and feeds a `<datalist>` on the `cwd` input — progressive
+> enhancement over the existing free-text field, no new storage or endpoint (`sessions`
+> was already being polled for the list view).
+>
+> **D3 — attention signals** (docs/15-open-questions.md, now resolved and removed from
+> that file): D3's own text turned out to be stale — it claimed M2 recorded `bell`/`idle`
+> rows that nothing read, but `persistence.rs`'s M7 module doc already said the opposite:
+> those two were never inserted. Built for real instead of just wiring a read side:
+> `session.rs`'s `on_output` closure scans every chunk for a BEL byte (`Session::last_bell_ms`,
+> throttled `session_events` write); a new periodic sweep task in `main.rs` (same shape as
+> `spawn_gc_task`) calls `Session::tick_idle` on every live session every 5s, detecting
+> output gone quiet for 30s while the process stays running (`Session::idle_since_ms`,
+> cleared automatically once output resumes). Both are lock-free `Arc<AtomicI64>` fields,
+> never contending with the PTY hot path. Surfaced as `last_bell_ms`/`idle_since_ms` on
+> `GET /api/v1/sessions` (docs/04-api-protocol.md#get-apiv1sessions), `null` for anything
+> not `running`. `Sessions.svelte` shows a badge when a running session is idle or rang a
+> bell in the last two minutes (bell recency is bounded client-side; the daemon field
+> itself never clears). The 30s idle threshold and 5s sweep interval are new, undocumented-
+> elsewhere defaults (`session::IDLE_THRESHOLD_MS`/`IDLE_SWEEP_INTERVAL_MS`) — called out
+> as picked, not specified anywhere before now. No `persistence.rs` change was needed:
+> `Command::NoteEvent`/`Db::note_event` were already fully generic.
+>
+> New `daemon/tests/attention_signals.rs` (3 tests): BEL detection against a real spawned
+> shell, and `tick_idle`'s set/clear/no-op-after-exit behavior driven with synthetic
+> clocks and a tiny threshold rather than a real 30-second sleep. 110/110 daemon tests green,
+> 0 clippy warnings. Web: `svelte-check` and `vite build` both clean.
+
 **Deliver:** `presets.rs` + `presets.toml` + `GET /api/v1/presets` + a launcher in the UI.
 
 > **Treat agents as presets.** A preset supplies executable, argv defaults, and
@@ -573,6 +608,13 @@ callout above.
 
 **Gate:** launching Claude Code and Codex from the UI works, disconnect-survives, and
 replays correctly. Zero agent-specific code below `session.rs`.
+
+**Met on Linux** — the launch/disconnect/replay mechanics this gate is actually about
+were browser-verified as part of M4/M5's own delivered callouts (the preset launcher
+shipped then). Today's two additions (recent-cwd datalist, attention badge) are
+UI-only and were verified via `svelte-check` + `vite build` plus the automated suite
+above, not exercised in a live browser this session — noted rather than implied by
+reusing M6's "independently re-verified" language for something narrower.
 
 ---
 
