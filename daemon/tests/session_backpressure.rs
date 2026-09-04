@@ -113,6 +113,37 @@ async fn terminate_leaves_the_session_listed_until_purged() {
     assert!(manager.get(id).is_none(), "purged session must be gone from the manager");
 }
 
+/// M4 review: `max_sessions` used to be checked and released under the lock,
+/// then re-acquired to insert -- concurrent creates could all pass the check
+/// before any of them inserted, overshooting the cap. `create()` itself does
+/// real, non-trivial work between check and insert (validating `cwd`,
+/// resolving the executable, forking the child), which is exactly the window
+/// real concurrent callers would race in.
+#[test]
+fn concurrent_creates_never_exceed_max_sessions() {
+    let manager = Arc::new(SessionManager::new(sessions_root("max-sessions-race")).with_max_sessions(3));
+    let cwd = temp_dir();
+
+    let handles: Vec<_> = (0..10)
+        .map(|_| {
+            let manager = Arc::clone(&manager);
+            let cwd = cwd.clone();
+            std::thread::spawn(move || {
+                let args = vec!["-c".to_string(), "sleep 2".to_string()];
+                manager.create(spec(&args, 80, 24, &cwd), "shell", None)
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("creator thread panicked")).collect();
+    let succeeded: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
+    assert_eq!(succeeded.len(), 3, "at most max_sessions creates may succeed, even racing");
+
+    for session in succeeded {
+        let _ = session.terminate();
+    }
+}
+
 /// A subscriber that reads gets exactly what the session wrote, in order,
 /// with monotonically increasing, non-overlapping offsets between
 /// consecutive chunks.

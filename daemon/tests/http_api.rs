@@ -184,6 +184,48 @@ async fn full_lifecycle_create_list_terminate_purge() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// M4 review: `max_sessions` used to count every directory entry, including
+/// `exited`-but-unpurged ones, so routine create/DELETE traffic (without
+/// `?purge=true`) could wedge `create()` at 429 forever with nothing
+/// actually running.
+#[tokio::test]
+async fn purging_an_exited_session_frees_a_max_sessions_slot() {
+    let mut config = support::default_config();
+    config.max_sessions = 1;
+    let daemon = support::spawn(config).await;
+
+    let make = |cmd: &str| {
+        json!({
+            "kind": "shell",
+            "command": "/bin/sh",
+            "args": ["-c", cmd],
+            "cwd": std::env::temp_dir().to_string_lossy(),
+            "cols": 80,
+            "rows": 24,
+        })
+    };
+
+    let (status, created) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("true"))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Let it exit on its own, then terminate (202) without ?purge=true --
+    // the M2 contract keeps it listed as `exited`, not removed.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (_, view) = request(&daemon, get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN))).await;
+        if view["state"] == "exited" {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "session never reached exited");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // At the cap, but nothing is actually running -- create must not 429.
+    let (status, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("true"))).await;
+    assert_eq!(status, StatusCode::CREATED, "an exited-but-unpurged session must not count against max_sessions");
+}
+
 #[tokio::test]
 async fn bad_origin_on_a_mutating_request_is_rejected() {
     let daemon = support::spawn(support::default_config()).await;

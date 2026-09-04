@@ -91,6 +91,7 @@ pub fn load_or_create(data_dir: &Path) -> Result<Vec<Preset>> {
         Ok(contents) => {
             let file: PresetsFile =
                 toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+            validate_presets(&file.presets).with_context(|| format!("validating {}", path.display()))?;
             Ok(file.presets)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -102,6 +103,22 @@ pub fn load_or_create(data_dir: &Path) -> Result<Vec<Preset>> {
         }
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// Catches a hand-edited `presets.toml` that parses as valid TOML but makes
+/// no sense as presets -- a duplicate id (silently shadowed by whichever
+/// entry `Vec::iter().find` reaches first at session-create time) or an
+/// empty id/command (M4 review: previously only TOML syntax was checked, so
+/// these surfaced later as a confusing `422` instead of a clear startup
+/// error).
+fn validate_presets(presets: &[Preset]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for p in presets {
+        anyhow::ensure!(!p.id.is_empty(), "a preset has an empty id");
+        anyhow::ensure!(!p.command.is_empty(), "preset {:?} has an empty command", p.id);
+        anyhow::ensure!(seen.insert(p.id.as_str()), "duplicate preset id: {:?}", p.id);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -137,6 +154,52 @@ mod tests {
     fn a_malformed_file_is_a_clean_error_not_a_silent_overwrite() {
         let dir = scratch_dir("malformed");
         fs::write(dir.join("presets.toml"), "not valid toml {{{").unwrap();
+        assert!(load_or_create(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M4 review: valid-TOML-but-nonsense presets (a duplicate id) used to
+    /// load silently, and `create_session`'s `find`-by-id would pick
+    /// whichever entry came first with no warning.
+    #[test]
+    fn a_duplicate_preset_id_is_a_clean_error() {
+        let dir = scratch_dir("duplicate-id");
+        fs::write(
+            dir.join("presets.toml"),
+            r#"
+            [[presets]]
+            id = "shell"
+            label = "Shell"
+            command = "/bin/sh"
+            icon = "terminal"
+
+            [[presets]]
+            id = "shell"
+            label = "Shell Again"
+            command = "/bin/bash"
+            icon = "terminal"
+            "#,
+        )
+        .unwrap();
+        assert!(load_or_create(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M4 review: same gap, for an empty command.
+    #[test]
+    fn an_empty_preset_command_is_a_clean_error() {
+        let dir = scratch_dir("empty-command");
+        fs::write(
+            dir.join("presets.toml"),
+            r#"
+            [[presets]]
+            id = "broken"
+            label = "Broken"
+            command = ""
+            icon = "terminal"
+            "#,
+        )
+        .unwrap();
         assert!(load_or_create(&dir).is_err());
         let _ = fs::remove_dir_all(&dir);
     }

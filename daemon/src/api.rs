@@ -187,8 +187,11 @@ struct CreateSessionRequest {
     kind: String,
     preset: Option<String>,
     command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
+    /// `None` (the field omitted) falls back to the preset's own args;
+    /// `Some(vec![])` is an explicit request for no args and is honored as
+    /// such. A plain `Vec<String>` with `#[serde(default)]` can't tell those
+    /// two apart -- both deserialize to an empty vec (M4 review).
+    args: Option<Vec<String>>,
     cwd: String,
     cols: u16,
     rows: u16,
@@ -226,16 +229,25 @@ async fn create_session(
         .command
         .or_else(|| preset.map(|p| p.resolved_command()))
         .ok_or_else(|| ApiError::BadRequest("command is required unless a preset supplies it".to_string()))?;
-    let args = if req.args.is_empty() {
-        preset.map(|p| p.args.clone()).unwrap_or_default()
-    } else {
-        req.args
-    };
+    let args = resolve_args(req.args, preset);
     let env: Vec<(String, String)> = req.env.into_iter().collect();
     let cwd = PathBuf::from(req.cwd);
+    let (cols, rows, kind, preset_id) = (req.cols, req.rows, req.kind, req.preset);
 
-    let spec = SpawnSpec { program: &command, args: &args, cwd: &cwd, env: &env, cols: req.cols, rows: req.rows };
-    let session = state.sessions.create(spec, req.kind, req.preset)?;
+    // `SessionManager::create` does blocking filesystem work (validating
+    // `cwd`, a `$PATH` scan to resolve the executable) and an OS-level
+    // fork/exec -- run it on the blocking pool so a slow/contended
+    // filesystem or spawn doesn't stall this worker thread's other
+    // in-flight requests (M4 review: this used to run inline on the async
+    // handler). `SpawnSpec` borrows `command`/`args`/`cwd`/`env`, so it's
+    // built inside the closure rather than moved in already constructed.
+    // `state` isn't needed again after this, so it moves in whole.
+    let session = tokio::task::spawn_blocking(move || {
+        let spec = SpawnSpec { program: &command, args: &args, cwd: &cwd, env: &env, cols, rows };
+        state.sessions.create(spec, kind, preset_id)
+    })
+    .await
+    .map_err(|e| ApiError::Create(CreateError::Spawn(e.into())))??;
 
     Ok((
         StatusCode::CREATED,
@@ -246,6 +258,14 @@ async fn create_session(
             output_offset: session.next_offset(),
         }),
     ))
+}
+
+/// `args: None` (the field omitted from the request) falls back to the
+/// preset's own args; `Some(vec![])` is an explicit "no args" request and is
+/// honored as such -- a plain `Vec<String>` with `#[serde(default)]` can't
+/// tell those two apart, both deserialize to an empty vec (M4 review).
+fn resolve_args(explicit: Option<Vec<String>>, preset: Option<&Preset>) -> Vec<String> {
+    explicit.unwrap_or_else(|| preset.map(|p| p.args.clone()).unwrap_or_default())
 }
 
 #[derive(Debug, Serialize)]
@@ -346,10 +366,24 @@ async fn delete_session(
 
     if q.purge {
         if session.state() != SessionState::Exited {
-            session.terminate().ok();
+            // `terminate()` can block for the whole graceful-shutdown window
+            // (up to ~7s, docs/03-pty-layer.md#termination) -- spawn_blocking
+            // keeps that off this worker thread, same as the non-purge path
+            // below (M4 review: this used to run inline, and purge needs the
+            // result before it can safely delete the directory).
+            let terminate_session = Arc::clone(&session);
+            match tokio::task::spawn_blocking(move || terminate_session.terminate()).await {
+                Ok(Err(e)) => tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed"),
+                Ok(Ok(())) => {}
+                Err(e) => tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked"),
+            }
             session.exited().await;
         }
-        let _ = std::fs::remove_dir_all(session.log_path().parent().unwrap_or(&session.log_path()));
+        let log_dir = session.log_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| session.log_path());
+        // `remove_dir_all` is blocking fs work too.
+        if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await {
+            tracing::warn!(session_id = %session.id, error = %e, "removing session directory task panicked");
+        }
         state.sessions.purge(session.id);
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -407,7 +441,11 @@ fn parse_byte_range(header: &str, len: u64) -> Option<(u64, u64)> {
     let spec = header.strip_prefix("bytes=")?;
     let (start, end) = spec.split_once('-')?;
     let start: u64 = start.parse().ok()?;
-    let end: u64 = if end.is_empty() { len } else { end.parse::<u64>().ok()? + 1 };
+    // `checked_add` rather than `+ 1`: an end of `u64::MAX` (e.g. a
+    // malformed/adversarial `Range` header) must reject the range and fall
+    // back to the full response, not overflow-panic or silently wrap to 0
+    // (M4 review).
+    let end: u64 = if end.is_empty() { len } else { end.parse::<u64>().ok()?.checked_add(1)? };
     Some((start, end))
 }
 
@@ -418,4 +456,45 @@ async fn list_presets(State(state): State<Arc<AppState>>, _principal: Principal)
 fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {
     let id: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     state.sessions.get(id).ok_or(ApiError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preset_with_args(args: &[&str]) -> Preset {
+        Preset {
+            id: "shell".to_string(),
+            label: "Shell".to_string(),
+            command: "$SHELL".to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            icon: "terminal".to_string(),
+        }
+    }
+
+    #[test]
+    fn omitted_args_falls_back_to_the_preset_default() {
+        let preset = preset_with_args(&["-l"]);
+        assert_eq!(resolve_args(None, Some(&preset)), vec!["-l".to_string()]);
+    }
+
+    /// The M4 review finding: `Some(vec![])` must win over the preset's
+    /// default, not be treated the same as an omitted `args` field.
+    #[test]
+    fn explicit_empty_args_is_honored_not_replaced_by_the_preset_default() {
+        let preset = preset_with_args(&["-l"]);
+        assert_eq!(resolve_args(Some(vec![]), Some(&preset)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn explicit_args_override_the_preset_default() {
+        let preset = preset_with_args(&["-l"]);
+        let explicit = vec!["-c".to_string(), "true".to_string()];
+        assert_eq!(resolve_args(Some(explicit.clone()), Some(&preset)), explicit);
+    }
+
+    #[test]
+    fn no_preset_and_omitted_args_is_empty() {
+        assert_eq!(resolve_args(None, None), Vec::<String>::new());
+    }
 }
