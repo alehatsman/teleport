@@ -35,8 +35,11 @@ equivalents chosen per platform.
 - resize and confirm the child observes it (`stty size` on Unix, `mode con` on Windows)
 - child exits normally → exit code `0` recorded. The code comes from the child wait,
   **not** from EOF on the master — the two are separate signals and can arrive in
-  either order ([S2](15-open-questions.md#s2--eof-is-not-exit))
-- child exits nonzero → exit code recorded accurately
+  either order ([S2](15-open-questions.md#s2--eof-is-not-exit)). **Windows: blocked
+  on [W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)**
+  — a gracefully-exiting ConPTY child is not currently observed as exited at all;
+  this fixture is expected to fail on Windows until W1 resolves, not silently skipped
+- child exits nonzero → exit code recorded accurately. Same Windows caveat as above
 - terminate a running child → state machine reaches `exited` within the bounded policy
 - terminate a child that is producing output at full rate → no deadlock, no lost tail
 - close a session whose shell has spawned grandchildren → the tree is gone (Windows:
