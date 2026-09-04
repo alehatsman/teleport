@@ -70,6 +70,27 @@ pub const REPLAY_ROUND_BYTES: u64 = LIVE_GAP_BYTES;
 /// reporting the hole beats an unbounded reconnect loop.
 const MAX_STALLED_ROUNDS: u32 = 4;
 
+/// Absolute ceiling on catch-up rounds, independent of `MAX_STALLED_ROUNDS`.
+/// A client whose throughput barely exceeds the producer's shrinks the gap
+/// by a few bytes every round -- resetting `stalled_rounds` to 0 each time
+/// -- and can defer registration indefinitely, re-acquiring the fan-out
+/// mutex every round with no bound in sight. Sized at four full backlogs of
+/// the default log cap so a legitimate one-shot catch-up of the largest
+/// on-disk log never trips it; a client that still hasn't converged after
+/// this many rounds gets the same clamp-and-report-the-hole treatment a
+/// stalled one does.
+const MAX_CATCHUP_ROUNDS: u32 = 4 * (crate::log::DEFAULT_LOG_MAX_BYTES / REPLAY_ROUND_BYTES) as u32;
+
+/// Whether this round should register the subscriber and go live. A pure
+/// function of the three catch-up floors so each can be exercised without
+/// driving a `Replay` through real rounds: the gap already fits (the common
+/// case), the client has stopped gaining ground at all
+/// (`MAX_STALLED_ROUNDS`), or it hasn't converged in any number of rounds
+/// (`MAX_CATCHUP_ROUNDS`) even though it kept gaining a little each time.
+fn should_register(gap: u64, stalled_rounds: u32, total_rounds: u32) -> bool {
+    gap <= LIVE_GAP_BYTES || stalled_rounds >= MAX_STALLED_ROUNDS || total_rounds >= MAX_CATCHUP_ROUNDS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(Ulid);
 
@@ -249,6 +270,10 @@ pub struct Replay {
     /// `u64::MAX` so the first round can never count as a stall.
     previous_gap: u64,
     stalled_rounds: u32,
+    /// Rounds run so far, counted whether or not the gap shrank. A client
+    /// that gains a few bytes of ground every round resets `stalled_rounds`
+    /// forever without ever registering -- see `MAX_CATCHUP_ROUNDS`.
+    total_rounds: u32,
 }
 
 /// One step of a catch-up loop. The `History` variant carries the rest of the
@@ -322,8 +347,9 @@ impl Replay {
                 self.stalled_rounds = 0;
             }
             self.previous_gap = gap;
+            self.total_rounds += 1;
 
-            let register = gap <= LIVE_GAP_BYTES || self.stalled_rounds >= MAX_STALLED_ROUNDS;
+            let register = should_register(gap, self.stalled_rounds, self.total_rounds);
             let subscription = register.then(|| fanout.register(&self.fanout));
             (next_offset, end, log_capped_at, subscription)
         };
@@ -472,6 +498,7 @@ impl Session {
             cursor: replay_from,
             previous_gap: u64::MAX,
             stalled_rounds: 0,
+            total_rounds: 0,
         })
     }
 
@@ -661,6 +688,7 @@ mod tests {
             cursor: 0,
             previous_gap: u64::MAX,
             stalled_rounds: 0,
+            total_rounds: 0,
         }
     }
 
@@ -754,6 +782,27 @@ mod tests {
             "and it still meets the live boundary exactly -- the hole is behind it, not in front"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `MAX_STALLED_ROUNDS` only catches a client that stops gaining ground
+    /// *entirely*; one that gains a few bytes every round resets
+    /// `stalled_rounds` to 0 forever and would re-acquire the fan-out mutex
+    /// indefinitely without a second floor.
+    /// Driving that through real rounds would mean actually shrinking a
+    /// multi-gigabyte gap one byte at a time, so this exercises the pure
+    /// decision `next_round` defers to instead -- deterministic and fast,
+    /// same as the arithmetic it's testing.
+    #[test]
+    fn total_rounds_forces_registration_even_when_the_gap_keeps_shrinking() {
+        let gap = LIVE_GAP_BYTES + 1; // never small enough to register on its own
+        assert!(
+            !should_register(gap, 0, MAX_CATCHUP_ROUNDS - 1),
+            "must not register early just because rounds are piling up"
+        );
+        assert!(
+            should_register(gap, 0, MAX_CATCHUP_ROUNDS),
+            "a client that never stalls must still be bounded by total rounds"
+        );
     }
 
     /// The ordering rule, checked from the outside: by the time a chunk is

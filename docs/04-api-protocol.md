@@ -445,9 +445,13 @@ screen after 1 MiB rather than after the whole replay
 **Convergence.** The gap closes only while the client outruns the producer — which is
 the same condition it must meet to stay attached at all, so the loop demands nothing new
 of it. A client that cannot is detected by the gap failing to shrink across four
-consecutive rounds. The daemon then clamps replay to the last `live_gap_bytes` before
-the boundary, registers, and lets ordinary backpressure take it from there: the client
-gets the live screen and a hole it is told about, instead of an unbounded reconnect loop.
+consecutive rounds — but a client that always shrinks the gap, just barely, resets that
+counter every round and would otherwise never stop re-acquiring the mutex. A second,
+absolute floor catches that case too: past a fixed number of total rounds (four backlogs'
+worth of the largest on-disk log), the daemon gives up regardless of whether the gap was
+still inching down. Either floor clamps replay to the last `live_gap_bytes` before the
+boundary, registers, and lets ordinary backpressure take it from there: the client gets
+the live screen and a hole it is told about, instead of an unbounded reconnect loop.
 
 **`ready` is still the first frame, and its `next_offset` is still the boundary captured
 when the client attached** — not the one the subscriber is eventually registered at. The
