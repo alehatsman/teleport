@@ -73,13 +73,21 @@
   }
 
   async function terminate(id: string) {
-    await api.deleteSession(id);
-    await refresh();
+    try {
+      await api.deleteSession(id);
+      await refresh();
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
+    }
   }
 
   async function purge(id: string) {
-    await api.deleteSession(id, true);
-    await refresh();
+    try {
+      await api.deleteSession(id, true);
+      await refresh();
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
+    }
   }
 </script>
 
