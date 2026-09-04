@@ -89,6 +89,16 @@ Properties to design for:
   direct payoff of the MVP design.
 - **Prefer a direct path when one exists.** Same-LAN clients should not relay.
 
+**Prior art (Sep 2026):** Claude Code Remote Control ships this exact shape in
+production — daemon-side process makes outbound-only HTTPS, registers and polls, no
+inbound port ever opened; the phone/browser client is routed to it by Anthropic's own
+servers, over multiple short-lived, single-purpose credentials. Independent
+confirmation that outbound-only + short-lived scoped credentials is the right choice,
+not evidence for anything new to build. See
+[12](12-identity-and-connectivity.md#stage-3-pairing) for the one thing worth adding
+alongside it: a standing device-trust check layered on top of the pairing credential,
+not a replacement for it.
+
 ## Infrastructure options
 
 | Option | Fit for relay | Notes |

@@ -147,6 +147,24 @@ daemon stores it 0600 and reports success
 The code is short-lived (10 min), single-use, and rate-limited on the backend. This is
 the standard TV/console pairing flow; do not invent a new one.
 
+**Two additions worth pulling in when stage 3 is actually built** (prior-art check
+against Claude Code Remote Control, Sep 2026 — not a change to the flow above, both
+layer on top of it):
+
+- **QR code as a second redemption path for the phone-in-hand case.** The headless
+  flow's typed 8-character code is right for "SSH'd into a box, no GUI." A phone
+  sitting next to an already-authenticated desktop shouldn't need typing — scan a QR
+  code encoding the same short-lived enrollment token instead. Additive, not a
+  replacement.
+- **A device-trust layer above the pairing credential.** Pairing above binds a device
+  to an account once and is done. Claude's model adds a second, standing check on top:
+  enrollment offered only right after a full sign-in (never silently), plus a
+  freshness requirement (sign-in no older than ~18h) refreshed by a biometric
+  step-up (Face ID / Touch ID / Windows Hello / passkey) rather than a full re-login.
+  Worth deciding alongside [14](14-cloud-backend.md#the-decision-to-make-first-what-can-the-relay-read)'s
+  relay-read decision, since it changes what "paired" is allowed to mean — not
+  something to bolt on after the relay ships.
+
 Unpairing is initiated from either side and must revoke the credential server-side —
 a stolen laptop's daemon must stop being reachable.
 
