@@ -104,6 +104,21 @@ by W1) and the grandchild-tree-close case, are expected to pass on Windows once 
 
 ## M2 — Session ownership and backpressure
 
+> **Delivered 2026-09-04** — `daemon/src/session.rs` + `daemon/tests/session_backpressure.rs`
+> (4 fixtures, one a `#[cfg(test)]` unit test co-located in `session.rs` for access to
+> private `Fanout` state; 17/17 total daemon tests green on Linux, `cargo clippy
+> --all-targets -- -D warnings` clean). Built on `pty.rs`'s `on_output` closure hook, as
+> that module's M1 note anticipated. `next_offset` and the subscriber registry share one
+> `Fanout`, guarded by one `Mutex` separate from `Session`'s own PTY-control mutex, so
+> creating/listing sessions never contends with another session's hot output path. The
+> byte half of the 256-chunk/8-MiB bound is enforced by a shared `AtomicUsize` the
+> `Subscription`'s receive side decrements — `tokio::sync::mpsc`'s own bound is
+> chunk-count-only. Overflow and channel-closed both collapse to the same immediate
+> `retain`-based removal (no separate "mark slow" state) since there's no WS close code to
+> emit yet — that distinction is M4's. `exit_rx`/`eof_rx` from `pty::spawn` are left
+> unconsumed; wiring session state to them is M4/M7, not backpressure. No persistence:
+> `output.vt` and the log are M3.
+
 **Deliver:** `session.rs` — `SessionManager`, `Session`, subscriber registry.
 
 - a session survives **zero** subscribers, indefinitely
