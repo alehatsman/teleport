@@ -379,9 +379,13 @@ would otherwise vanish.
 **Correct order:**
 
 ```text
-capture the output offset N / register subscriber     ← one mutex
+capture the output offset N                            ← mutex
              ↓
-replay [requested_offset, N)
+replay [requested_offset, N) in bounded rounds,
+re-checking the gap each round (see Catch-up below)
+             ↓
+register subscriber, same mutex as the final,
+freshly re-read N                                       ← mutex
              ↓
 deliver buffered events >= N
              ↓
