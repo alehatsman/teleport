@@ -25,16 +25,24 @@ fn sessions_root(name: &str) -> PathBuf {
 }
 
 /// A session that emits exactly `bytes` bytes of `yes` output as fast as it
-/// can. `stty raw -echo` keeps the tty line discipline from injecting
-/// anything of its own, so the log is the child's output and nothing else.
+/// can, then blocks forever reading its own stdin. `stty raw -echo` keeps
+/// the tty line discipline from injecting anything of its own, so the log is
+/// the child's output and nothing else.
 ///
 /// Every fixture here reaches this output through `attach`, never a bare
 /// `subscribe()`: the child is already producing by the time `create`
 /// returns, and only `attach` accounts for the bytes that landed before the
 /// caller registered.
+///
+/// The trailing `cat` reads nothing real -- nothing ever writes to this
+/// pty's input side -- it exists only to hold the slave fd open past the
+/// last byte of output, so these fixtures' exact-byte-count assertions never
+/// race the child's own exit: the session ends when the test calls
+/// `terminate()`, on the test's schedule, not the child's. Every caller
+/// terminates the session when it's done.
 fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Session> {
     let cwd = std::env::temp_dir();
-    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}")];
+    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}; cat")];
     manager
         .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 })
         .expect("create session")
