@@ -57,6 +57,7 @@
 //! module reconstructing a fake live session.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -64,12 +65,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_millis() as i64
-}
+use crate::now_ms;
 
 /// A `sessions` row, read back. `args` is `argv_json` already parsed --
 /// nothing downstream should touch the JSON encoding directly.
@@ -458,8 +454,11 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 ///
 /// 1. every row still `running`/`closing` -> `lost` / `daemon_restart`,
 ///    with a matching `session_events(lost)` row.
-/// 2. every session directory's `output.vt` length reconciled against the
-///    stored `output_bytes`, **file wins** if larger
+/// 2. each of *those* (and only those -- a row already `exited` had its
+///    final `output_bytes` written atomically by `mark_exited`, so
+///    re-`stat`ing it on every subsequent restart is pure waste) session
+///    directory's `output.vt` length reconciled against the stored
+///    `output_bytes`, **file wins** if larger
 ///    (docs/05-persistence.md#restart-recovery: "the file cannot lie about
 ///    bytes it holds"; a capped log is the one case the column can be ahead,
 ///    and `MAX()` in the `UPDATE` below leaves those alone).
@@ -487,15 +486,8 @@ fn recover(conn: &Connection, sessions_root: &Path) -> Result<RecoverySummary> {
         )?;
     }
 
-    let ids: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT id FROM sessions")?;
-        let ids = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids
-    };
-    for id in ids {
-        let log_path = sessions_root.join(&id).join("output.vt");
+    for id in &stale_ids {
+        let log_path = sessions_root.join(id).join("output.vt");
         let Ok(meta) = std::fs::metadata(&log_path) else {
             continue;
         };
@@ -554,12 +546,21 @@ fn mark_exited(
     lost_reason: Option<&str>,
     output_bytes: u64,
 ) -> Result<()> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE sessions
          SET state = 'exited', exited_at_ms = ?1, exit_code = ?2, lost_reason = ?3, output_bytes = ?4
          WHERE id = ?5",
         params![exited_at_ms, exit_code, lost_reason, output_bytes as i64, id],
     )?;
+    if updated == 0 {
+        // The row is already gone -- a concurrent `?purge=true` (`api.rs`'s
+        // `delete_session`) won the race against this exit landing on the
+        // writer thread. Nothing left to update, and inserting a
+        // `session_events` row for a session that no longer exists would
+        // fail the `foreign_keys=ON` constraint. Not an error: the intended
+        // end state (no row) already holds.
+        return Ok(());
+    }
     conn.execute(
         "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, 'exited', NULL)",
         params![id, exited_at_ms],

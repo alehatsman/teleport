@@ -21,7 +21,7 @@ use teleportd::api::{build_router, AppState};
 use teleportd::auth::OriginPolicy;
 use teleportd::log::LogLimits;
 use teleportd::session::SessionManager;
-use teleportd::{config, presets};
+use teleportd::{config, now_ms, presets};
 
 const DEFAULT_PORT: u16 = 7337;
 /// 256 bits, per docs/06-security.md#the-credential.
@@ -131,7 +131,12 @@ async fn main() -> Result<()> {
     let sessions = SessionManager::with_limits(sessions_root.clone(), log_limits)
         .with_max_sessions(config.max_sessions)
         .with_db(db.clone());
-    spawn_gc_task(db.clone(), sessions_root, config.retain_days);
+    spawn_gc_task(
+        db.clone(),
+        sessions_root,
+        config.retain_days,
+        sessions.live_handle(),
+    );
     // The Vite dev origin is only ever legitimate against a debug build of
     // this binary itself (docs/06-security.md#browser-origin-defense).
     let origin_policy = OriginPolicy::new(
@@ -284,18 +289,38 @@ fn remove_port_file(data_dir: &Path) -> Result<()> {
 /// deleted, then its row -- directory first, so a crash mid-GC leaves a row
 /// with no log rather than a log with no row. Detached (`tokio::spawn`, not
 /// awaited) -- GC is background housekeeping, not on any request path.
-fn spawn_gc_task(db: teleportd::persistence::Db, sessions_root: PathBuf, retain_days: u64) {
+fn spawn_gc_task(
+    db: teleportd::persistence::Db,
+    sessions_root: PathBuf,
+    retain_days: u64,
+    live: teleportd::session::LiveSessions,
+) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
         loop {
             interval.tick().await;
-            run_gc_pass(&db, &sessions_root, retain_days).await;
+            run_gc_pass(&db, &sessions_root, retain_days, &live).await;
         }
     });
 }
 
-async fn run_gc_pass(db: &teleportd::persistence::Db, sessions_root: &Path, retain_days: u64) {
-    let cutoff_ms = now_ms() - retain_days as i64 * 24 * 60 * 60 * 1000;
+/// Retention is capped to ~100 years -- `retain_days as i64 * a_day_in_ms`
+/// would otherwise wrap `i64` for a large enough `u64` config value (which
+/// an operator setting a huge number to mean "keep forever" could plausibly
+/// write), landing `cutoff_ms` in the *future* and making every exited/lost
+/// row an immediate GC candidate. There is no "retain forever" setting;
+/// the config doc should point operators at a large-but-finite number
+/// instead.
+const MAX_RETAIN_DAYS: u64 = 365 * 100;
+
+async fn run_gc_pass(
+    db: &teleportd::persistence::Db,
+    sessions_root: &Path,
+    retain_days: u64,
+    live: &teleportd::session::LiveSessions,
+) {
+    let retain_days = retain_days.min(MAX_RETAIN_DAYS) as i64;
+    let cutoff_ms = now_ms() - retain_days * 24 * 60 * 60 * 1000;
     let candidates = match db.gc_candidates(cutoff_ms).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -304,24 +329,39 @@ async fn run_gc_pass(db: &teleportd::persistence::Db, sessions_root: &Path, reta
         }
     };
     for row in candidates {
+        // `SessionManager` still holds this id live (an `exited` row not
+        // yet `?purge=true`'d) -- `api.rs`'s `find_session` checks that map
+        // first, so every request for it is still served from there, never
+        // this row. Deleting the directory now would break `/log` while
+        // `GET` keeps returning 200. Skip; retried next pass, and it drops
+        // out once the id is actually purged.
+        if live.contains(&row.id) {
+            continue;
+        }
         let dir = sessions_root.join(&row.id);
-        if let Err(e) = fs::remove_dir_all(&dir) {
-            if e.kind() != io::ErrorKind::NotFound {
+        // `remove_dir_all` is blocking I/O; off the async worker thread so
+        // a large or slow-to-delete directory can't stall other work on it
+        // (live PTY reads, WS frame delivery) for the duration.
+        let remove_result = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || fs::remove_dir_all(&dir)).await
+        };
+        match remove_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.kind() == io::ErrorKind::NotFound => {}
+            Ok(Err(e)) => {
                 warn!(session_id = %row.id, error = %e, "GC: removing session directory failed");
                 continue; // row stays -- retried next pass, never deleted without its directory gone first.
+            }
+            Err(e) => {
+                warn!(session_id = %row.id, error = %e, "GC: directory-removal task panicked");
+                continue;
             }
         }
         if let Err(e) = db.delete_session(&row.id).await {
             warn!(session_id = %row.id, error = %e, "GC: deleting session row failed");
         }
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_millis() as i64
 }
 
 /// Resolves once Ctrl+C or (Unix only) SIGTERM is received.
