@@ -48,6 +48,13 @@ struct Cli {
     /// from Tailscale Serve instead (docs/06-security.md#listener).
     #[arg(long)]
     i_know_what_im_doing: bool,
+
+    /// Built SPA assets to serve at `/` (docs/08-packaging.md#build-pipeline).
+    /// Relative to the current working directory. Missing is not an error --
+    /// the `npm run dev` workflow ([09](../docs/09-frontend.md#dev-workflow))
+    /// never touches this path.
+    #[arg(long, default_value = "web/dist")]
+    web_dist: PathBuf,
 }
 
 #[tokio::main]
@@ -107,6 +114,14 @@ async fn main() -> Result<()> {
     let origin_policy =
         OriginPolicy::new(bound_addr.port(), cfg!(debug_assertions), &config.allowed_origins, &config.allowed_hosts);
 
+    let web_dist = if cli.web_dist.is_dir() {
+        info!(path = %cli.web_dist.display(), "serving web UI");
+        Some(cli.web_dist.clone())
+    } else {
+        info!(path = %cli.web_dist.display(), "no built web UI at this path; serving API only");
+        None
+    };
+
     let state = Arc::new(AppState {
         sessions,
         origin_policy,
@@ -116,6 +131,7 @@ async fn main() -> Result<()> {
         config,
         started_at: Instant::now(),
         version: env!("CARGO_PKG_VERSION"),
+        web_dist,
     });
     let app = build_router(state);
 

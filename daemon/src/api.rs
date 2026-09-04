@@ -12,13 +12,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tower::ServiceExt;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
@@ -40,6 +42,10 @@ pub struct AppState {
     pub origin_policy: OriginPolicy,
     pub started_at: Instant,
     pub version: &'static str,
+    /// Built SPA assets (`web/dist`), if found at startup
+    /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
+    /// run dev` workflow, which never touches this router at all.
+    pub web_dist: Option<PathBuf>,
 }
 
 /// `Principal` as an axum extractor: every handler that needs one declares
@@ -140,7 +146,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}/log", get(get_log))
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
+        .fallback(spa_fallback)
         .with_state(state)
+}
+
+/// SPA fallback for everything that isn't one of the routes above
+/// (docs/08-packaging.md#build-pipeline): unknown non-`/api` paths return
+/// `index.html` so a hard reload on a client-side route (e.g.
+/// `/sessions/<id>`) still boots the app. An unmatched `/api/*` path is
+/// checked explicitly and kept a `404` -- a typo'd API path must never
+/// silently come back as an HTML document.
+async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    if req.uri().path().starts_with("/api/") {
+        return route_not_found();
+    }
+    let Some(dist) = &state.web_dist else {
+        return route_not_found();
+    };
+    // `.fallback()`, not `.not_found_service()` -- the latter pins the
+    // response to `404` even when the shell serves fine, and a client
+    // deep-linking to `/sessions/<id>` on reload must get a normal `200`,
+    // not a `404` with an HTML body.
+    let serve_dir = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
+    match serve_dir.oneshot(req).await {
+        Ok(response) => response.into_response(),
+        // `ServeDir`'s service is infallible; kept as a match, not an
+        // `.unwrap()`, so a future tower-http version that adds a real error
+        // path degrades to a 500 instead of panicking the daemon.
+        Err(err) => match err {},
+    }
+}
+
+/// A `404` for a path that is neither a registered route nor (when a
+/// `web_dist` is configured) a client-side one the SPA shell can take over.
+/// Distinct from [`ApiError::NotFound`], which means "no session with this
+/// id" -- reusing that message here would mislabel an unmatched route as a
+/// missing session.
+fn route_not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "not_found", "message": "no such route" })))
+        .into_response()
 }
 
 const API_VERSIONS: &[&str] = &["v1"];
