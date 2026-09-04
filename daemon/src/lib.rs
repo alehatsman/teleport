@@ -5,3 +5,4 @@
 //! integration tests").
 
 pub mod pty;
+pub mod session;
