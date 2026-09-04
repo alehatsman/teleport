@@ -129,6 +129,16 @@ by W1) and the grandchild-tree-close case, are expected to pass on Windows once 
 > not this pass. `exit_rx`/`eof_rx` from `pty::spawn` are otherwise left unconsumed; wiring
 > session state to them is M4/M7, not backpressure. No persistence: `output.vt` and the
 > log are M3.
+>
+> **Amended during M3.** The gate fixture
+> (`slow_subscriber_is_disconnected_and_never_blocks_the_reader`) failed roughly three
+> runs in five, which was misread at the time as a timing flake under CPU contention. It
+> was not: its draining subscriber used `subscribe()`, so it never saw the tens of KiB
+> the child had already produced before `create()` returned, and could not account for
+> all 10 MiB no matter how fast it drained — a subscribe race showing up as a stall
+> indistinguishable from the backpressure failure the test exists to catch. It now
+> attaches at 0 and counts the replay, which is exactly the race
+> [M3's `attach`](#m3--append-only-replay) was built to close. 8/8 clean runs after.
 
 **Deliver:** `session.rs` — `SessionManager`, `Session`, subscriber registry.
 

@@ -25,19 +25,16 @@ fn sessions_root(name: &str) -> PathBuf {
 }
 
 /// A session that emits exactly `bytes` bytes of `yes` output as fast as it
-/// can, then idles. `stty raw -echo` keeps the tty line discipline from
-/// injecting anything of its own, so the log is the child's output and
-/// nothing else.
+/// can. `stty raw -echo` keeps the tty line discipline from injecting
+/// anything of its own, so the log is the child's output and nothing else.
 ///
-/// The trailing `sleep` is load-bearing: when the last slave-side fd closes,
-/// Linux discards whatever is still sitting unread in the master's buffer, so
-/// a child that exits the instant it is done costs the reader the tail of its
-/// own output under CPU contention. Keeping the shell alive keeps the slave
-/// open, which is what lets these fixtures assert on an exact byte count.
-/// Every caller terminates the session when it is finished.
+/// Every fixture here reaches this output through `attach`, never a bare
+/// `subscribe()`: the child is already producing by the time `create`
+/// returns, and only `attach` accounts for the bytes that landed before the
+/// caller registered.
 fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Session> {
     let cwd = std::env::temp_dir();
-    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}; sleep 300")];
+    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}")];
     manager
         .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 })
         .expect("create session")

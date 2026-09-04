@@ -156,12 +156,24 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
 
     let slow = session.subscribe(); // never read from this one.
-    let mut fast = session.subscribe();
+
+    // `attach(0)`, not `subscribe()`. The child is already producing by the
+    // time `create` returns, so a plain subscriber silently misses whatever
+    // landed before it registered -- tens of KiB under load -- and can never
+    // account for all N bytes, which reads as a stall that looks exactly like
+    // the backpressure failure this test is trying to detect. `attach` counts
+    // the replay too and closes that race
+    // (docs/04-api-protocol.md#attach-race).
+    let mut fast = session.attach(0).expect("attach at 0");
+    let mut received = fast
+        .reader
+        .read_range(fast.replay_from, fast.replay_to)
+        .expect("read replay range")
+        .len();
 
     let t0 = Instant::now();
-    let mut received = 0usize;
     while received < N {
-        let chunk = tokio::time::timeout(DEFAULT_TIMEOUT, fast.recv())
+        let chunk = tokio::time::timeout(DEFAULT_TIMEOUT, fast.subscription.recv())
             .await
             .unwrap_or_else(|_| panic!("fast subscriber stalled after {received}/{N} bytes -- reader was blocked by the slow one"))
             .expect("fast subscriber disconnected before receiving all output");
