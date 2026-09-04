@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import * as api from "./api";
-  import type { CreateSessionRequest, Preset, Session } from "./types";
+  import type { CreateSessionRequest, Preset, Session, SessionState } from "./types";
 
   let { onOpen }: { onOpen: (id: string) => void } = $props();
 
   let sessions: Session[] = $state([]);
   let presets: Preset[] = $state([]);
+  let loading = $state(true);
   let loadError: string | null = $state(null);
 
   let showLauncher = $state(false);
@@ -15,8 +16,16 @@
   let selectedPreset = $state("");
   let customCommand = $state("/bin/sh");
   let cwd = $state("");
+  let firstFieldEl: HTMLSelectElement | undefined = $state();
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  const STATE_LABELS: Record<SessionState, string> = {
+    running: "Running",
+    closing: "Closing",
+    exited: "Exited",
+    lost: "Lost",
+  };
 
   // D3 (docs/04-api-protocol.md#get-apiv1sessions):
   // idle_since_ms is already a live signal (the daemon clears it the moment
@@ -49,6 +58,7 @@
 
   onMount(async () => {
     await Promise.all([refresh(), loadPresets()]);
+    loading = false;
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
     // open decision -- polling is the pragmatic interim answer for M5, not
     // a considered final one. Flagged, not silently closed.
@@ -79,9 +89,24 @@
     }
   }
 
-  function openLauncher() {
+  async function openLauncher() {
     launchError = null;
     showLauncher = true;
+    await tick();
+    firstFieldEl?.focus();
+  }
+
+  function closeLauncher() {
+    showLauncher = false;
+  }
+
+  function onLauncherKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") closeLauncher();
+  }
+
+  function onLauncherSubmit(e: SubmitEvent) {
+    e.preventDefault();
+    launch();
   }
 
   async function launch() {
@@ -111,6 +136,10 @@
   }
 
   async function purge(id: string) {
+    // Purge also deletes the on-disk log (api.ts) -- the one irreversible
+    // action in this app. One confirm, not a custom modal: boring and it
+    // still stops a mis-tap.
+    if (!confirm("Delete this session and its log? This can't be undone.")) return;
     try {
       await api.deleteSession(id, true);
       await refresh();
@@ -123,82 +152,102 @@
 <div class="sessions-view">
   <header>
     <h1>teleport</h1>
-    <button class="primary" onclick={openLauncher}>New session</button>
+    <button class="primary" onclick={openLauncher} aria-expanded={showLauncher} aria-controls="launcher-panel">
+      New session
+    </button>
   </header>
 
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {/if}
+  <main>
+    {#if loadError}
+      <div class="banner error" role="alert">{loadError}</div>
+    {/if}
 
-  {#if showLauncher}
-    <div class="launcher">
-      <label>
-        Preset
-        <select bind:value={selectedPreset}>
-          <option value="">Custom command</option>
-          {#each presets as preset (preset.id)}
-            <option value={preset.id}>{preset.label}</option>
-          {/each}
-        </select>
-      </label>
-      {#if !selectedPreset}
+    {#if showLauncher}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -- Escape-to-close on the
+           container, standard for a form acting as a dismissable panel; the actual controls
+           inside remain focusable, interactive elements. -->
+      <form id="launcher-panel" class="launcher" onsubmit={onLauncherSubmit} onkeydown={onLauncherKeydown}>
         <label>
-          Command
-          <input type="text" bind:value={customCommand} />
-        </label>
-      {/if}
-      <label>
-        Working directory
-        <input type="text" bind:value={cwd} placeholder="/home/me/project" list="recent-cwds" />
-        {#if recentCwds.length > 0}
-          <datalist id="recent-cwds">
-            {#each recentCwds as dir (dir)}
-              <option value={dir}></option>
+          Preset
+          <select bind:value={selectedPreset} bind:this={firstFieldEl}>
+            <option value="">Custom command</option>
+            {#each presets as preset (preset.id)}
+              <option value={preset.id}>{preset.label}</option>
             {/each}
-          </datalist>
+          </select>
+        </label>
+        {#if !selectedPreset}
+          <label>
+            Command
+            <input type="text" bind:value={customCommand} autocapitalize="none" autocorrect="off" spellcheck="false" />
+          </label>
         {/if}
-      </label>
-      {#if launchError}
-        <div class="banner error">{launchError}</div>
-      {/if}
-      <div class="actions">
-        <button onclick={() => (showLauncher = false)} disabled={launching}>Cancel</button>
-        <button class="primary" onclick={launch} disabled={launching}>{launching ? "Launching…" : "Launch"}</button>
-      </div>
-    </div>
-  {/if}
-
-  {#if sessions.length === 0}
-    <p class="empty">No sessions yet.</p>
-  {:else}
-    <ul class="session-list">
-      {#each sessions as session (session.id)}
-        <li class="session-row">
-          <button class="open" onclick={() => onOpen(session.id)}>
-            <span
-              class="state"
-              class:running={session.state === "running"}
-              class:exited={session.state === "exited"}
-              class:lost={session.state === "lost"}
-            ></span>
-            {#if needsAttention(session)}
-              <span class="attention" title="waiting for you">●</span>
-            {/if}
-            <span class="command">{session.command}</span>
-            <span class="cwd">{session.cwd}</span>
-            {#if session.controller}
-              <span class="controller">controlled by {session.controller}</span>
-            {/if}
-          </button>
-          {#if session.state === "exited" || session.state === "lost"}
-            <button class="danger" onclick={() => purge(session.id)}>Delete</button>
-          {:else}
-            <button onclick={() => terminate(session.id)}>Terminate</button>
+        <label>
+          Working directory
+          <input
+            type="text"
+            bind:value={cwd}
+            placeholder="/home/me/project"
+            list="recent-cwds"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+          />
+          {#if recentCwds.length > 0}
+            <datalist id="recent-cwds">
+              {#each recentCwds as dir (dir)}
+                <option value={dir}></option>
+              {/each}
+            </datalist>
           {/if}
-        </li>
-      {/each}
-    </ul>
-  {/if}
+        </label>
+        {#if launchError}
+          <div class="banner error" role="alert">{launchError}</div>
+        {/if}
+        <div class="actions">
+          <button type="button" onclick={closeLauncher} disabled={launching}>Cancel</button>
+          <button type="submit" class="primary" disabled={launching}>{launching ? "Launching…" : "Launch"}</button>
+        </div>
+      </form>
+    {/if}
+
+    {#if loading}
+      <p class="empty">Loading…</p>
+    {:else if sessions.length === 0}
+      <p class="empty">No sessions yet.</p>
+    {:else}
+      <ul class="session-list">
+        {#each sessions as session (session.id)}
+          <li class="session-row">
+            <a class="open" href={`#/sessions/${session.id}`} onclick={() => onOpen(session.id)}>
+              <span
+                class="state"
+                aria-hidden="true"
+                class:running={session.state === "running"}
+                class:exited={session.state === "exited"}
+                class:lost={session.state === "lost"}
+              ></span>
+              <span class="sr-only">{STATE_LABELS[session.state]}.</span>
+              {#if needsAttention(session)}
+                <span class="attention" aria-hidden="true">●</span>
+                <span class="sr-only">Needs attention.</span>
+              {/if}
+              <span class="command">{session.command}</span>
+              <span class="cwd">{session.cwd}</span>
+              {#if session.controller}
+                <span class="controller">controlled by {session.controller}</span>
+              {/if}
+            </a>
+            {#if session.state === "exited" || session.state === "lost"}
+              <button class="danger" onclick={() => purge(session.id)}>Delete</button>
+            {:else}
+              <button onclick={() => terminate(session.id)}>Terminate</button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </main>
 </div>
 
 <style>
@@ -218,8 +267,8 @@
     margin: 0;
   }
   .banner.error {
-    background: #4a1414;
-    color: #ffb4b4;
+    background: var(--error-bg);
+    color: var(--error-fg);
     padding: 0.5rem 0.75rem;
     border-radius: 4px;
     margin-bottom: 0.75rem;
@@ -228,7 +277,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    border: 1px solid #333;
+    border: 1px solid var(--border-strong);
     border-radius: 6px;
     padding: 0.75rem;
     margin-bottom: 1rem;
@@ -259,7 +308,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    border: 1px solid #2a2a2a;
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
   }
@@ -271,6 +320,7 @@
     background: none;
     border: none;
     text-align: left;
+    text-decoration: none;
     color: inherit;
     cursor: pointer;
     padding: 0;
@@ -280,20 +330,20 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #666;
+    background: var(--muted);
     flex-shrink: 0;
   }
   .state.running {
-    background: #3ecf6a;
+    background: var(--success);
   }
   .state.exited {
-    background: #666;
+    background: var(--muted);
   }
   .state.lost {
-    background: #c9a227;
+    background: var(--warning);
   }
   .attention {
-    color: #f59e0b;
+    color: var(--attention);
     font-size: 0.7rem;
     flex-shrink: 0;
   }
@@ -313,13 +363,13 @@
     opacity: 0.7;
   }
   button.primary {
-    background: #2563eb;
-    color: white;
+    background: var(--accent);
+    color: var(--accent-fg);
     border: none;
   }
   button.danger {
-    background: #7f1d1d;
-    color: #ffdada;
+    background: var(--danger-bg);
+    color: var(--danger-fg);
     border: none;
   }
   button {

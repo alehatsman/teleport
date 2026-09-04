@@ -4,6 +4,35 @@
   color-scheme: dark;
   --bg: #121212;
   --fg: #e6e6e6;
+  --muted: #666;
+
+  /* Surfaces, darkest to lightest. */
+  --surface-deep: #0c0c0c; /* terminal canvas */
+  --surface: #1a1a1a; /* inputs */
+  --surface-raised: #1e1e1e; /* toast, key-bar buttons */
+
+  /* Borders. */
+  --border: #2a2a2a;
+  --border-strong: #333;
+
+  /* Brand / interactive accent. */
+  --accent: #2563eb;
+  --accent-fg: #fff;
+
+  /* Status colors -- each pairs a dim background with a legible foreground. */
+  --success: #3ecf6a;
+  --warning: #c9a227;
+  --warning-strong: #e0a72c;
+  --attention: #f59e0b;
+
+  --danger-bg: #7f1d1d;
+  --danger-fg: #ffdada;
+  --error-bg: #4a1414;
+  --error-fg: #ffb4b4;
+  --notice-bg: #3a2f0e;
+  --notice-fg: #ffd98a;
+  --badge-bg: #14532d;
+  --badge-fg: #bbf7d0;
 }
 
 * {
@@ -35,9 +64,24 @@ button {
 input,
 select {
   font: inherit;
-  background: #1a1a1a;
+  background: var(--surface);
   color: inherit;
-  border: 1px solid #333;
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 0.35rem 0.5rem;
+}
+
+/* Screen-reader-only: visually hidden, still in the accessibility tree.
+   Used to give color/icon-only indicators a text alternative without
+   disturbing their visual layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
