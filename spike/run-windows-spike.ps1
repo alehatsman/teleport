@@ -31,7 +31,7 @@ function Run-Spike {
     param(
         [string]$Label,
         [string]$Exe,
-        [string[]]$Args,
+        [string[]]$ExeArgs,
         [int]$TimeoutSec
     )
 
@@ -41,7 +41,7 @@ function Run-Spike {
     $stdoutFile = Join-Path $env:TEMP "spike_stdout_$PID.txt"
     Remove-Item $stderrFile, $stdoutFile -ErrorAction SilentlyContinue
 
-    $p = Start-Process -FilePath (Join-Path $exeDir $Exe) -ArgumentList $Args `
+    $p = Start-Process -FilePath (Join-Path $exeDir $Exe) -ArgumentList $ExeArgs `
         -NoNewWindow -PassThru `
         -RedirectStandardError $stderrFile -RedirectStandardOutput $stdoutFile
 
