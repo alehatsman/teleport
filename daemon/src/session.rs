@@ -51,6 +51,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -60,7 +61,12 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::log::{LogEvent, LogLimits, LogReader, LogSyncer, OutputLog, SyncHandle};
+use crate::persistence;
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
+
+/// docs/05-persistence.md#when-output_bytes-is-written: "at most once per
+/// second per session".
+const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
 
 /// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field
 /// here and, from M7 on, of the matching SQLite columns
@@ -705,6 +711,10 @@ pub struct Session {
     /// takes would stall the PTY behind disk latency, which is the whole
     /// thing docs/05-persistence.md#output-log forbids.
     sync: SyncHandle,
+    /// `None` unless [`SessionManager::with_db`] was used -- see the field
+    /// of the same name there. `terminate()` and the exit listener use this
+    /// directly rather than going back through the manager.
+    db: Option<persistence::Db>,
 }
 
 impl Session {
@@ -834,6 +844,13 @@ impl Session {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.cols = cols;
             runtime.rows = rows;
+        }
+        // Fire-and-forget, same as the throttled `output_bytes` write --
+        // resizes are rare (a user action, not the hot path), but there is
+        // still no reason to make the caller wait on disk for it
+        // (docs/05-persistence.md#when-output_bytes-is-written).
+        if let Some(db) = &self.db {
+            db.note_size(&self.id.to_string(), cols, rows);
         }
         let _ = self.events.send(SessionEvent::Resized { cols, rows });
         Ok(())
@@ -1064,6 +1081,16 @@ impl Session {
                 runtime.state = SessionState::Closing;
             }
         }
+        // Best effort, same as every other DB write from this struct: a
+        // stale `closing`/`running` row is exactly what restart recovery
+        // already knows how to fix (docs/05-persistence.md#restart-recovery),
+        // so a failure here degrades to "recovery has slightly stale
+        // information," never to a stuck PTY teardown.
+        if let Some(db) = &self.db {
+            if let Err(e) = db.mark_closing_blocking(&self.id.to_string()) {
+                warn!(session_id = %self.id, error = %e, "persisting the closing transition failed");
+            }
+        }
         let result = self.pty.terminate();
         self.sync_log();
         result
@@ -1137,6 +1164,12 @@ pub struct SessionManager {
     /// creates can't all pass the check before any of them inserts (M4
     /// review: the cap wasn't enforced atomically).
     reserved: Mutex<usize>,
+    /// `None` in every test that has no reason to touch SQLite (the large
+    /// majority -- PTY/backpressure/replay/protocol coverage predates M7 and
+    /// stays that way). Every write site below is a no-op when this is
+    /// `None`; `main.rs` is the only caller that sets it via
+    /// [`SessionManager::with_db`].
+    db: Option<persistence::Db>,
 }
 
 impl SessionManager {
@@ -1154,6 +1187,7 @@ impl SessionManager {
             syncer: LogSyncer::new(limits.sync_interval),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             reserved: Mutex::new(0),
+            db: None,
         }
     }
 
@@ -1164,6 +1198,21 @@ impl SessionManager {
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
+    }
+
+    /// Wires SQLite persistence in (docs/11-mvp-plan.md#m7). `main.rs` is
+    /// the only real caller; tests that don't exercise M7 leave `db: None`
+    /// and every write below quietly no-ops.
+    pub fn with_db(mut self, db: persistence::Db) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// `<data_dir>/sessions` -- `api.rs`'s log-fallback path for a session id
+    /// not held live needs this to open `<root>/<id>/output.vt` directly
+    /// (docs/05-persistence.md#layout), without going through a `Session`.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Atomically checks `max_sessions` against live sessions (`Running` or
@@ -1231,23 +1280,75 @@ impl SessionManager {
             cwd: spec.cwd.to_path_buf(),
         };
         let (cols, rows) = (spec.cols, spec.rows);
+        let created_at_ms = now_ms();
 
         // A brand-new session has no stored row; `None` is the fresh-start
-        // case of docs/05-persistence.md#restart-recovery, and M7 is what
-        // will pass `Some` for a recovered one.
+        // case of docs/05-persistence.md#restart-recovery. Recovered rows
+        // never reach this path -- they are not `Session`s at all
+        // (persistence.rs's module doc explains why).
         let log = OutputLog::open(&self.root.join(id.to_string()), self.limits, None)?;
         let sync = log.sync_handle();
         self.syncer.register(&sync);
         let fanout = Arc::new(Mutex::new(Fanout::new(log)));
 
+        // Insert *before* `pty::spawn` -- the row must exist before the
+        // child can produce a single byte
+        // (docs/01-architecture.md#session-creation-sequence). Best effort:
+        // a DB write failing here does not stop a session from working live,
+        // it just means a restart won't know this one ever existed (`db` is
+        // `None` in most tests, and a real runtime DB failure is already
+        // fatal at daemon startup, not here).
+        if let Some(db) = &self.db {
+            let row = persistence::NewSessionRow {
+                id: id.to_string(),
+                kind: meta.kind.clone(),
+                preset: meta.preset.clone(),
+                command: meta.command.clone(),
+                args: meta.args.clone(),
+                cwd: meta.cwd.display().to_string(),
+                // Not yet known -- `pty::spawn` hasn't run (the row must
+                // exist before it does). Left `NULL`; nothing in the MVP
+                // needs a recovered/historical row's `pid`, only a live
+                // `Session::pid()` does, and that never reads this column.
+                pid: None,
+                cols,
+                rows,
+                created_at_ms,
+            };
+            if let Err(e) = db.insert_session_blocking(row) {
+                warn!(session_id = %id, error = %e, "persisting the new session row failed");
+            }
+        }
+
+        // Fire-and-forget, throttled to at most once/second while output is
+        // flowing (docs/05-persistence.md#when-output_bytes-is-written) --
+        // `last_persist_ms` is shared with nothing else, so the check is a
+        // lock-free compare-and-swap, never the reader thread waiting on
+        // SQLite.
+        let db_for_output = self.db.clone();
+        let last_persist_ms = Arc::new(AtomicI64::new(0));
         let publish_fanout = Arc::clone(&fanout);
         let spawned = pty::spawn(spec, move |bytes| {
-            let events = publish_fanout.lock().unwrap().publish(bytes);
+            let (events, next_offset) = {
+                let mut fanout = publish_fanout.lock().unwrap();
+                let events = fanout.publish(bytes);
+                (events, fanout.log.next_offset())
+            };
             trace_log_events(id, &events);
+            if let Some(db) = &db_for_output {
+                let now = now_ms();
+                let last = last_persist_ms.load(Ordering::Relaxed);
+                if now - last >= OUTPUT_BYTES_PERSIST_INTERVAL_MS
+                    && last_persist_ms
+                        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    db.note_output_bytes(&id.to_string(), next_offset);
+                }
+            }
         })
         .map_err(CreateError::Spawn)?;
 
-        let created_at_ms = now_ms();
         let (exited_tx, exited) = watch::channel(false);
         let pid = spawned.pid;
         let session = Arc::new(Session {
@@ -1271,6 +1372,7 @@ impl SessionManager {
             exited,
             exited_tx,
             sync,
+            db: self.db.clone(),
         });
         self.sessions
             .lock()
@@ -1379,14 +1481,31 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
                 ),
             };
 
+            let exited_at_ms = now_ms();
             {
                 let mut runtime = session.runtime.lock().unwrap();
                 runtime.state = SessionState::Exited;
                 runtime.exit_code = exit_code;
                 runtime.lost_reason = lost_reason;
-                runtime.exited_at_ms = Some(now_ms());
+                runtime.exited_at_ms = Some(exited_at_ms);
             }
             session.sync_log();
+            // The one terminal-state write a live `Session` ever makes --
+            // always `state='exited'`, never `'lost'` (that only happens via
+            // restart recovery, on a row with no live `Session` behind it --
+            // see persistence.rs's module doc). Best effort, same reasoning
+            // as `terminate()`'s write above.
+            if let Some(db) = &session.db {
+                if let Err(e) = db.mark_exited_blocking(
+                    &session.id.to_string(),
+                    exited_at_ms,
+                    exit_code,
+                    lost_reason.map(|r| r.as_str()),
+                    session.next_offset(),
+                ) {
+                    warn!(session_id = %session.id, error = %e, "persisting the exited transition failed");
+                }
+            }
             // `send` on a `watch` never fails as long as this `Sender` (owned
             // by `session`, which this thread also holds a strong ref to) is
             // alive -- it always is here.

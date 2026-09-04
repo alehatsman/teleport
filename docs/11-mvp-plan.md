@@ -445,6 +445,66 @@ input never reaches the PTY from a non-controller.
 
 ## M7 — SQLite metadata and recovery
 
+> **Delivered 2026-09-04** — `daemon/src/persistence.rs`: a single writer-actor thread
+> owning one `rusqlite::Connection` (WAL, `synchronous=NORMAL`, `busy_timeout=5000`), fed
+> by an `mpsc` command channel with `oneshot` replies; `_blocking` methods for
+> `session.rs` (entirely synchronous — `blocking_send`/`blocking_recv`), plain `async fn`s
+> for `api.rs`'s handlers, and fire-and-forget `note_*` methods (`try_send`, no reply) for
+> the one path reachable from the PTY reader thread, which must never wait on SQLite.
+> `PRAGMA user_version` migrations, one migration so far (the full schema from
+> [05](05-persistence.md#schema)). 106 daemon tests green (7 new persistence unit tests
+> plus one new black-box gate test), 0 clippy warnings.
+>
+> **Session/SessionManager wiring:** `SessionManager` takes an `Option<persistence::Db>`
+> (`with_db`, `None` in every pre-M7 test fixture — no unrelated test now needs SQLite).
+> `create()` inserts the row *after* `output.vt` opens, *before* `pty::spawn`
+> (docs/01-architecture.md#session-creation-sequence: the row must exist before the child
+> can produce a byte); `terminate()` marks `closing`; the exit-listener thread makes the
+> one terminal write a live session ever makes (always `state='exited'` — see below);
+> `resize()` and the reader-loop's publish closure fire-and-forget `cols`/`rows` and a
+> throttled (≤1/s) `output_bytes`, both via lock-free `try_send`, so SQLite never sits on
+> the PTY drain path. Every DB write from a live `Session` is best-effort (`warn!` on
+> failure, never fails the caller) — a lost metadata write degrades restart recovery, not
+> the live session.
+>
+> **A design decision the doc left implicit, resolved rather than silently picked:** a
+> recovered/historical row (`lost`, or `exited`-but-unpurged from a previous process) is
+> **not** reconstructed as a `crate::session::Session` — a `Session` always owns a live
+> `PtySession`, and there is no such thing as one with no PTY
+> (docs/01-architecture.md#the-crash-boundary: "SQLite can remember that a process used
+> to exist; it cannot recreate an OS PTY handle"). Instead `api.rs`'s `list_sessions` /
+> `get_session` / `get_log` / `delete_session` fall back to `persistence::Db` and
+> `log::LogReader::open`'s standalone-file path when a session id isn't held live by
+> `SessionManager` — `LogReader::read_range` already self-clamps to the real file length,
+> so this can't over-read regardless of what the DB row's `output_bytes` says. `GET
+> /api/v1/sessions` merges live + historical, live winning on a duplicate id (fresher —
+> `controller`/`subscribers` a DB row can't have, and a live row's own `output_bytes`
+> column can itself lag by up to a second).
+>
+> **Two scope cuts, recorded in `persistence.rs`'s module doc rather than made silently:**
+> (1) `session_events` only ever gets `created`/`exited`/`lost` rows — `resized`,
+> `control_granted`/`_revoked`, `subscriber_attached`/`_detached`, `slow_consumer`,
+> `bell`, `idle` would each need new plumbing through `ws.rs`/the control lease/the reader
+> loop, out of proportion to this milestone's gate; the schema already has the room. (2)
+> `sessions.log_capped_at` is never written — stays `NULL` even once a log actually caps
+> — purely informational (harmless: `read_range` self-clamps regardless), fixed by the
+> same `note_*` pattern whenever someone next touches capping.
+>
+> GC (directory-first-row-second, `retain_days` default 14, new `config.toml` field) runs
+> once at startup and every 6h via a detached `tokio::spawn` loop in `main.rs`.
+>
+> **Gate, verified two ways.** Unit-level (`persistence.rs`'s own tests): insert a
+> `running` row, write real bytes past the stored `output_bytes` directly to
+> `output.vt`, reopen the `Db` — asserts `state=lost`, `lost_reason=daemon_restart`,
+> `output_bytes` reconciled to the file (file-wins case), and separately a capped-log
+> case where the column stays ahead (column-wins case). Black-box
+> (`daemon/tests/restart_recovery.rs`, new — same style as `skeleton.rs`): spawns the
+> real `teleportd` binary, creates a session via a hand-rolled HTTP/1.1 client over a raw
+> `TcpStream` (no HTTP client dependency for one test file), lets it produce real output,
+> `SIGKILL`s the process, restarts it against the same data dir, and asserts over the real
+> API that the session reads back `lost`/`daemon_restart`, `output_bytes` matches the
+> file exactly, and `/log` serves the complete, untruncated log. Ran 5x with no flakes.
+
 **Deliver:** `persistence.rs` — schema, migrations via `user_version`, single writer
 actor, startup recovery.
 
@@ -456,6 +516,9 @@ actor, startup recovery.
 
 **Gate:** `SIGKILL` the daemon mid-session; on restart the session reads `lost`, the log
 is complete and readable, and `output_bytes` matches the file.
+
+**Met on Linux** — see the black-box `restart_recovery.rs` test in the delivered
+callout above.
 
 > Ordering note: M7 lands after M4–M6 deliberately. Sessions work in memory first;
 > persistence is added once the in-memory model is proven correct. If it's easier to
