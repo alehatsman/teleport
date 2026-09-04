@@ -22,7 +22,7 @@ backlog pretending to be a spec.
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
 | [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
-| [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
+| [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **open** — M9 measurement, deferred to user (needs real phone + tailnet) |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
@@ -596,6 +596,11 @@ only the first.
 ## N1 — Keystroke latency
 
 **Not blocking. Measure at M9.**
+
+**Status (2026-09-05): still unmeasured.** M9's config/docs half is verified
+([11-mvp-plan.md](11-mvp-plan.md#m9--tailscale-serve)), but this measurement needs a
+real phone on cellular and a real tailnet — deferred to the user; no numbers below are
+real yet.
 
 Every keystroke costs one full round trip before it appears: the daemon owns the PTY, so
 a character is not on screen until the child has processed it and the bytes have come
