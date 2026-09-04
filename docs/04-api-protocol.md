@@ -303,6 +303,12 @@ replay actually started and `truncated` says whether the daemon clamped it — s
 [Bounded attach](#bounded-attach). `log_capped_at` is non-null only for a log that hit
 its size cap ([05-persistence.md](05-persistence.md#size-cap)).
 
+**`exit`'s `final_offset` is not sent the instant the process exits.** The daemon waits
+(bounded, up to 200ms) for the reader thread to actually catch up before finalizing, so
+a fast-exiting process's last chunk is delivered as a binary frame ahead of `exit` rather
+than lost to a socket that closed before it arrived — see
+[15-open-questions.md#s2--eof-is-not-exit](15-open-questions.md#s2--eof-is-not-exit).
+
 **`cols` and `rows` are the PTY's current size, and every client needs them — observers
 most of all.** There is exactly one PTY geometry per session and only the controller
 sets it, so an observer that sizes its emulator to its own viewport renders output
