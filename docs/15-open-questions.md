@@ -84,6 +84,15 @@ only the graceful, self-initiated exit path never signals.
   spawned the identical `cmd.exe /c "exit 0"` with **no ConPTY at all**
   (`spike/src/bin/s0_control.rs`, plain `std::process::Command`) — `wait()` returned
   in 15ms with `exit_code=Some(0)`. ConPTY is specifically the variable.
+- **Not a `CommandBuilder` argv-quoting bug.** Hypothesis was that `portable-pty`'s
+  own Win32 command-line quoting (`CommandBuilder::cmdline()` /
+  `append_quoted()` in `src/cmdbuilder.rs`) might produce a different literal command
+  line than `s0_control.rs`'s plain `std::process::Command`, and that the resulting
+  string might hit one of `cmd.exe`'s well-known `/c`-quote-stripping quirks. Read
+  both: `append_quoted()` is the standard `ArgvQuote` Win32 algorithm (same one
+  Rust's own `std::process::Command` uses) — `"exit 0"` contains a space, so both
+  paths quote it identically to `cmd.exe /c "exit 0"`. Same literal command line,
+  different outcome. Ruled out.
 
 **Not yet found:** the actual root cause on the Windows/ConPTY side. A quick search
 turned up a family of known ConPTY process-lifecycle issues (e.g. microsoft/terminal
@@ -91,17 +100,37 @@ turned up a family of known ConPTY process-lifecycle issues (e.g. microsoft/term
 when all connected clients have been terminated," marked fixed for 22H2 — our build
 is newer than that fix, so if it's the same class of issue, either the fix doesn't
 cover this exact case or something else is at play) but nothing that's a confirmed
-match for this exact symptom. Plausible next steps, not yet tried:
+match for this exact symptom. Also checked `WinChild::is_complete()`/`wait()`
+directly (`src/win/mod.rs`): plain `GetExitCodeProcess`/`WaitForSingleObject` on
+`pi.hProcess`, textbook-correct, nothing ConPTY-specific in `portable-pty`'s own code
+that could explain this.
 
-- swap `cmd.exe` for a different Windows binary (a tiny custom "exits fast" `.exe`,
-  or `powershell.exe -Command exit`) to check whether this is `cmd.exe`-specific or
-  universal to every ConPTY child
+**In progress:**
+
+- **`s5_minimal` (built, cross-compiled, awaiting a Windows run)** — isolates
+  whether the hang is `cmd.exe`-specific or general to any ConPTY child that exits
+  on its own. Spawns `mini_exit(.exe)`, a trivial Rust binary with no shell and no
+  console API calls beyond std's implicit runtime init, that prints one line and
+  calls `std::process::exit(N)`. Same `exit0`/`exit7`/`sigkill` shape as S1, dedicated
+  blocking-wait thread. Run via `run-windows-spike.ps1` (now includes it) or directly:
+  `.\target\x86_64-pc-windows-gnu\debug\s5_minimal.exe exit0`.
+  - If `mini_exit` **also** hangs: general to ConPTY, not `cmd.exe` — points at
+    ConPTY/console-subsystem exit signaling itself.
+  - If `mini_exit` **reaps fine**: narrows this to something `cmd.exe` itself does on
+    exit while attached to a ConPTY (e.g. its own console-detach handling) — a much
+    more actionable, narrower finding.
+
+Other plausible next steps, not yet tried:
+
 - check whether a newer `portable-pty` (0.9.0 is what's pinned in
   [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` behaves
   differently
 - inspect the process in Process Explorer/`Get-Process` *while* it's supposedly
   hung, to see whether it's actually still running (not yet reached its own
-  `ExitProcess`) or a zombie the OS itself hasn't reaped
+  `ExitProcess`) or a zombie the OS itself hasn't reaped — if `s5_minimal` also
+  hangs, this is the next thing worth a live look, since std's `process::exit` path
+  is about as simple as it gets and there's little left to suspect but ConPTY/OS
+  state itself
 
 **Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
 *common* case — an agent process finishing normally — would never move a session to
