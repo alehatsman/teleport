@@ -7,12 +7,14 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use teleportd::log::LogLimits;
 use teleportd::pty::SpawnSpec;
-use teleportd::session::{Attach, AttachError, Replay, ReplayStep, Session, SessionManager};
+use teleportd::session::{AttachError, Session, SessionManager};
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -63,38 +65,6 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
         .expect("create session")
 }
 
-/// Drives a `Replay` to the live boundary the way M4's WS loop will: write
-/// each catch-up round out before asking for the next
-/// (docs/04-api-protocol.md#catch-up--register-late-not-early). These
-/// fixtures' "client" is a `Vec`, so it always outruns the producer and the
-/// loop always converges -- the non-converging path is covered by the unit
-/// tests in `session.rs`.
-///
-/// Returns every replayed byte, catch-up rounds and final stretch together,
-/// plus the live handover. Rounds are asserted contiguous with each other;
-/// the join onto `Attach::replay_from` is the caller's to check, because a
-/// cap can legitimately move it forward.
-fn catch_up(replay: Replay) -> (Vec<u8>, Attach) {
-    let mut acc = Vec::new();
-    let mut next = replay.replay_from;
-    let mut step = replay.next_round().expect("first catch-up round");
-    loop {
-        match step {
-            ReplayStep::History { offset, bytes, replay } => {
-                assert_eq!(offset, next, "catch-up rounds must be contiguous");
-                next = offset + bytes.len() as u64;
-                acc.extend_from_slice(&bytes);
-                step = replay.written(bytes).expect("catch-up round");
-            }
-            ReplayStep::Live(attach) => {
-                assert!(attach.caught_up, "a Vec of a client must never fail to catch up");
-                acc.extend_from_slice(&attach.replay);
-                return (acc, attach);
-            }
-        }
-    }
-}
-
 /// **The M3 gate.** Attach at 0, take live chunks, disconnect exactly
 /// between two of them, let output keep flowing with zero subscribers,
 /// reconnect at the recorded offset, and check byte-for-byte that
@@ -108,7 +78,7 @@ async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
     // First connection: replay whatever already exists, then go live.
     let first = session.attach(0).expect("attach at 0");
     assert_eq!(first.replay_from, 0, "attaching at 0 replays from the start");
-    let (mut acc, mut first) = catch_up(first);
+    let (mut acc, mut first, _) = support::catch_up(first, Duration::ZERO).await;
     let mut end = first.replay_to();
     assert_eq!(end, acc.len() as u64);
 
@@ -129,7 +99,7 @@ async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
 
     let second = session.attach(end).expect("re-attach at the recorded offset");
     assert_eq!(second.replay_from, end, "replay resumes at exactly the offset we held");
-    let (replayed, mut second) = catch_up(second);
+    let (replayed, mut second, _) = support::catch_up(second, Duration::ZERO).await;
     assert!(second.replay_to() > end, "output kept accumulating while nobody was attached");
     acc.extend_from_slice(&replayed);
     end = second.replay_to();
@@ -170,7 +140,7 @@ async fn repeated_attach_against_a_concurrent_writer_never_gaps() {
     for round in 0..200 {
         let replay = session.attach(end).unwrap_or_else(|e| panic!("attach round {round}: {e}"));
         assert_eq!(replay.replay_from, end, "round {round}: replay must start where we left off");
-        let (replayed, mut attach) = catch_up(replay);
+        let (replayed, mut attach, _) = support::catch_up(replay, Duration::ZERO).await;
         acc.extend_from_slice(&replayed);
         end = attach.replay_to();
         assert_eq!(end, acc.len() as u64, "round {round}: replay gapped or duplicated");
@@ -214,7 +184,7 @@ async fn attaching_past_next_offset_is_offset_ahead() {
     // Attaching *at* next_offset is legal and simply replays nothing.
     let replay = session.attach(session.next_offset()).expect("attach at the head");
     assert_eq!(replay.replay_from, replay.next_offset, "attaching at the head replays nothing");
-    let (replayed, attach) = catch_up(replay);
+    let (replayed, attach, _) = support::catch_up(replay, Duration::ZERO).await;
     assert!(replayed.is_empty(), "and the catch-up loop goes live on its first round");
     assert_eq!(attach.replay_from, attach.replay_to());
 
@@ -250,7 +220,7 @@ async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
     let from_start = session.attach(0).expect("attach at 0");
     assert_eq!(from_start.replay_from, 0);
     assert_eq!(from_start.log_capped_at, Some(CAP), "ready must carry the cap so a client can render the gap");
-    let (replayed, from_start) = catch_up(from_start);
+    let (replayed, from_start, _) = support::catch_up(from_start, Duration::ZERO).await;
     assert_eq!(from_start.replay_to(), CAP, "replay must clamp to log_capped_at");
     assert_eq!(replayed.len() as u64, CAP);
 
@@ -258,7 +228,7 @@ async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
     // where the live stream resumes rather than being served the wrong bytes.
     let past_cap = session.attach(CAP + 1024).expect("attach past the cap");
     assert_eq!(past_cap.replay_from, past_cap.next_offset, "replay_from must be next_offset past a cap");
-    let (replayed, mut past_cap) = catch_up(past_cap);
+    let (replayed, mut past_cap, _) = support::catch_up(past_cap, Duration::ZERO).await;
     assert!(replayed.is_empty(), "the bytes past a cap are gone, not served from the wrong position");
     assert_eq!(
         past_cap.replay_from, past_cap.next_offset,
