@@ -36,10 +36,22 @@
 //!
 //! **`exit_rx` is now consumed** by a dedicated thread per session
 //! (`spawn_exit_listener`), the same shape as `pty.rs`'s own reader/writer/
-//! reaper/control threads: block on a channel, never poll. `eof_rx` is still
-//! unconsumed -- nothing needs "the reader thread saw EOF" as a distinct
-//! signal from "the child exited" ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)),
-//! and the reader thread already keeps draining into `output.vt` on its own.
+//! reaper/control threads: block on a channel, never poll.
+//!
+//! **`eof_rx` is consumed too, as of the M4 review's exit-race fix below** --
+//! not for `SessionState` (which still derives from `exit_rx` alone, per
+//! [S2](../../docs/15-open-questions.md#s2--eof-is-not-exit): `output.vt`
+//! keeps growing after `exited` regardless, and always did). What changed is
+//! `ws.rs`'s live `exit` frame, which used to fire off `exited` alone and
+//! could race ahead of the reader thread: the reaper thread's `wait()` can
+//! return before the reader's next `read()` does, so a fast process's last
+//! chunk was sometimes still sitting unread when `next_offset()` was read for
+//! `final_offset` and the socket closed right after -- a real transcript gap
+//! for the live viewer (still recoverable from `output.vt` on reconnect, just
+//! not delivered to the connection that had just been told the session was
+//! over). `spawn_eof_listener` turns `eof_rx` into a `watch` so `ws.rs` can
+//! wait, bounded, for the reader to catch up before finalizing -- see its
+//! `EXIT_DRAIN_GRACE` comment.
 //!
 //! **A conflict this milestone surfaced and resolved (see the M4 commit):**
 //! the M2-era `terminate()` removed its session from the `SessionManager`
@@ -441,6 +453,17 @@ impl Subscription {
         self.budget.add_permits(chunk.bytes.len());
         Some(chunk)
     }
+
+    /// Non-blocking drain, used only when finalizing an `exit` frame: even
+    /// with the bounded eof/grace wait in `ws.rs`, a chunk can become ready
+    /// in the same poll that decides to finalize, so this mops it up before
+    /// `final_offset` is read. `None` covers both "nothing queued right now"
+    /// and "the fan-out is gone" -- finalizing treats them the same.
+    pub fn try_recv(&mut self) -> Option<Chunk> {
+        let chunk = self.rx.try_recv().ok()?;
+        self.budget.add_permits(chunk.bytes.len());
+        Some(chunk)
+    }
 }
 
 impl Drop for Subscription {
@@ -742,6 +765,14 @@ pub struct Session {
     /// Kept only so [`SessionManager::create`] can hand the matching
     /// `Sender` to the exit listener thread; no other code sends on it.
     exited_tx: watch::Sender<bool>,
+    /// `true` once the reader thread has observed real EOF on the pty
+    /// master. Not a `SessionState` signal ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit))
+    /// -- exists only so `ws.rs` can bound how long it waits for trailing
+    /// output after `exited` fires. See `spawn_eof_listener`.
+    eof: watch::Receiver<bool>,
+    /// Kept only so [`SessionManager::create`] can hand the matching
+    /// `Sender` to the eof listener thread; no other code sends on it.
+    eof_tx: watch::Sender<bool>,
     /// Flushes the log without touching `fanout`. Deliberately *not* reached
     /// through the lock: an `fsync` held under the mutex the reader thread
     /// takes would stall the PTY behind disk latency, which is the whole
@@ -1015,6 +1046,16 @@ impl Session {
     /// it across a `tokio::select!` loop rather than await it once.
     pub fn watch_exited(&self) -> watch::Receiver<bool> {
         self.exited.clone()
+    }
+
+    /// An owned `watch::Receiver` for a caller (`ws.rs`) that needs to hold
+    /// it across a `tokio::select!` loop. Distinct from [`watch_exited`],
+    /// and not a substitute for it: this says "the reader thread has drained
+    /// the pty to EOF," which `ws.rs` uses only to bound the `exit` frame's
+    /// drain grace after `exited` fires -- never for `SessionState`
+    /// ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)).
+    pub fn watch_eof(&self) -> watch::Receiver<bool> {
+        self.eof.clone()
     }
 
     /// A fresh receiver for [`SessionEvent`]s -- one per WS connection, so a
@@ -1500,6 +1541,7 @@ impl SessionManager {
         };
 
         let (exited_tx, exited) = watch::channel(false);
+        let (eof_tx, eof) = watch::channel(false);
         let pid = spawned.pid;
         let session = Arc::new(Session {
             id,
@@ -1521,6 +1563,8 @@ impl SessionManager {
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             exited,
             exited_tx,
+            eof,
+            eof_tx,
             sync,
             db: self.db.clone(),
             last_output_at_ms,
@@ -1532,6 +1576,7 @@ impl SessionManager {
             .unwrap()
             .insert(id, Arc::clone(&session));
         spawn_exit_listener(Arc::clone(&session), spawned.exit_rx);
+        spawn_eof_listener(Arc::clone(&session), spawned.eof_rx);
         Ok(session)
     }
 
@@ -1665,6 +1710,25 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
             let _ = session.exited_tx.send(true);
         })
         .expect("spawning session-exit thread");
+}
+
+/// Consumes `eof_rx` on its own thread -- same shape as
+/// [`spawn_exit_listener`]. Not a state-machine signal: this exists solely
+/// so `ws.rs`'s `exit`-frame finalization can tell "the reader thread has
+/// genuinely caught up" apart from "the reader thread just hasn't been
+/// scheduled yet" (the race described in this module's doc comment above).
+/// A closed channel with no message (the reader thread panicked before ever
+/// reaching EOF) is left as "eof never observed" -- `ws.rs`'s bounded grace
+/// timeout is exactly what keeps that from hanging a connection.
+fn spawn_eof_listener(session: Arc<Session>, eof_rx: std::sync::mpsc::Receiver<()>) {
+    std::thread::Builder::new()
+        .name("session-eof".into())
+        .spawn(move || {
+            if eof_rx.recv().is_ok() {
+                let _ = session.eof_tx.send(true);
+            }
+        })
+        .expect("spawning session-eof thread");
 }
 
 #[cfg(test)]

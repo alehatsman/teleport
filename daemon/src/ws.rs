@@ -16,12 +16,23 @@ use serde_json::json;
 
 use crate::api::AppState;
 use crate::auth::Principal;
-use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId};
+use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId, Subscription};
 
 /// Server sends a `Ping` on this cadence (docs/04-api-protocol.md#keepalive-and-reconnection).
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// Closes the connection if no `Pong` arrives within this long.
 const PONG_TIMEOUT: Duration = Duration::from_secs(60);
+/// Once `exited` fires, how long to wait for the reader thread to also
+/// reach EOF before finalizing the `exit` frame anyway. The reaper thread's
+/// `wait()` can return before the reader's next `read()` does (S1/S3 spike:
+/// normally a 0ms gap, but not guaranteed under load) -- without this, a
+/// fast process's last chunk can still be sitting unread when `final_offset`
+/// is captured and the socket closes right behind it. Bounded, not
+/// unbounded: a child that exits while a grandchild still holds the pty
+/// open can leave EOF arbitrarily far off
+/// (docs/15-open-questions.md#s2--eof-is-not-exit), and this connection must
+/// not hang on that.
+const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -232,6 +243,7 @@ async fn run(
 
     let mut subscription = attach.subscription;
     let mut exited_rx = session.watch_exited();
+    let mut eof_rx = session.watch_eof();
     let mut events_rx = session.subscribe_events();
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // the first tick fires immediately; consume it.
@@ -242,8 +254,20 @@ async fn run(
     // connection's `claim_control`, including one sharing this `client_id`)
     // is never missed (docs/04-api-protocol.md#control-lease).
     let mut is_controlling: Option<u64> = control_epoch;
+    // `Some(deadline)` from the moment `exited_rx` fires until this
+    // connection finalizes -- see `EXIT_DRAIN_GRACE`. `None` beforehand, and
+    // stays `None` for the entire connection in the overwhelmingly common
+    // case where `eof_rx` is already true the instant `exited_rx` fires.
+    let mut exit_deadline: Option<tokio::time::Instant> = None;
 
     loop {
+        let grace = async {
+            match exit_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             chunk = subscription.recv() => {
                 match chunk {
@@ -264,17 +288,35 @@ async fn run(
                 }
             }
 
-            _ = exited_rx.changed() => {
+            // `exited` is not sufficient by itself to finalize -- the reader
+            // thread may not have caught up yet (session.rs's module doc,
+            // `EXIT_DRAIN_GRACE` above). If it already has (`eof_rx` already
+            // true), finalize immediately with zero added latency; otherwise
+            // start the bounded wait.
+            _ = exited_rx.changed(), if exit_deadline.is_none() => {
                 if *exited_rx.borrow() {
-                    let exit = json!({
-                        "type": "exit",
-                        "code": session.exit_code(),
-                        "final_offset": session.next_offset(),
-                    });
-                    send_json(&mut socket, &exit).await;
-                    let _ = socket.send(close(1000, "session exited")).await;
+                    if *eof_rx.borrow() {
+                        finalize_exit(&session, &mut subscription, &mut socket).await;
+                        break;
+                    }
+                    exit_deadline = Some(tokio::time::Instant::now() + EXIT_DRAIN_GRACE);
+                }
+            }
+
+            // Only relevant once `exited` has fired -- see the guard.
+            _ = eof_rx.changed(), if exit_deadline.is_some() => {
+                if *eof_rx.borrow() {
+                    finalize_exit(&session, &mut subscription, &mut socket).await;
                     break;
                 }
+            }
+
+            // The reader never caught up within the grace window (e.g. a
+            // grandchild still holds the pty open, S2) -- finalize with
+            // whatever has actually been drained rather than hang.
+            _ = grace, if exit_deadline.is_some() => {
+                finalize_exit(&session, &mut subscription, &mut socket).await;
+                break;
             }
 
             event = events_rx.recv() => {
@@ -428,6 +470,29 @@ fn close(code: u16, reason: &'static str) -> Message {
         code,
         reason: reason.into(),
     }))
+}
+
+/// Sends the `exit` frame and closes the socket. Drains anything already
+/// queued on `subscription` first -- even with the bounded eof/grace wait
+/// this is called from, a chunk can become ready in the same poll that
+/// decides to finalize (`EXIT_DRAIN_GRACE`) -- so `final_offset` always
+/// reflects everything this connection actually delivered.
+async fn finalize_exit(session: &Session, subscription: &mut Subscription, socket: &mut WebSocket) {
+    while let Some(chunk) = subscription.try_recv() {
+        if send_binary(socket, chunk.offset, &chunk.bytes)
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let exit = json!({
+        "type": "exit",
+        "code": session.exit_code(),
+        "final_offset": session.next_offset(),
+    });
+    send_json(socket, &exit).await;
+    let _ = socket.send(close(1000, "session exited")).await;
 }
 
 /// Unwraps one `next_round`/`written` step, or closes the socket and reports
