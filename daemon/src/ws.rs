@@ -148,7 +148,7 @@ async fn run(
             let _ = socket.send(close(1008, "offset_ahead")).await;
             return;
         }
-        Err(AttachError::Io(e)) => {
+        Err(e) => {
             tracing::warn!(session_id = %session.id, error = %e, "opening replay");
             let _ = socket.send(close(1011, "internal error")).await;
             return;
@@ -156,23 +156,24 @@ async fn run(
     };
 
     // Drive the catch-up loop, writing each round before asking for the
-    // next -- the loop's own convergence measurement depends on that
-    // (docs/04-api-protocol.md#catch-up--register-late-not-early).
-    let mut replay = replay;
+    // next -- `HistoryReplay::written` takes this round's own bytes back to
+    // advance, so there is no path to the next round that skips writing them
+    // out first (docs/04-api-protocol.md#catch-up--register-late-not-early).
+    let Some(mut step) = replay_round_or_close(&mut socket, session.id, replay.next_round()).await else {
+        return;
+    };
     let attach = loop {
-        match replay.next_round() {
-            Ok(ReplayStep::History { offset, bytes, replay: rest }) => {
+        match step {
+            ReplayStep::History { offset, bytes, replay: rest } => {
                 if send_binary(&mut socket, offset, &bytes).await.is_err() {
                     return;
                 }
-                replay = rest;
+                let Some(next) = replay_round_or_close(&mut socket, session.id, rest.written(bytes)).await else {
+                    return;
+                };
+                step = next;
             }
-            Ok(ReplayStep::Live(attach)) => break attach,
-            Err(e) => {
-                tracing::warn!(session_id = %session.id, error = %e, "replay round failed");
-                let _ = socket.send(close(1011, "internal error")).await;
-                return;
-            }
+            ReplayStep::Live(attach) => break attach,
         }
     };
     truncated = truncated || !attach.caught_up;
@@ -383,6 +384,28 @@ async fn send_binary(socket: &mut WebSocket, offset: u64, bytes: &[u8]) -> Resul
 
 fn close(code: u16, reason: &'static str) -> Message {
     Message::Close(Some(CloseFrame { code, reason: reason.into() }))
+}
+
+/// Unwraps one `next_round`/`written` step, or closes the socket and reports
+/// `None` on failure -- shared so `run`'s catch-up loop does not repeat this
+/// handling once for the first round and once per round after.
+/// `AttachError::Open`/`Read` both close the same way here: the client sees
+/// a plain `internal error` and reconnects, which for `Read` resumes at
+/// exactly the offset the failed round carries
+/// (docs/04-api-protocol.md#catch-up--register-late-not-early).
+async fn replay_round_or_close(
+    socket: &mut WebSocket,
+    session_id: SessionId,
+    result: Result<ReplayStep, AttachError>,
+) -> Option<ReplayStep> {
+    match result {
+        Ok(step) => Some(step),
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, error = %e, "replay round failed");
+            let _ = socket.send(close(1011, "internal error")).await;
+            None
+        }
+    }
 }
 
 #[cfg(test)]

@@ -183,6 +183,13 @@ before registration, in bounded rounds off this mutex
 first and replaying afterwards spends the same 8 MiB twice, and makes every attach to a
 busy session fail.
 
+Each round briefly re-acquires the *same* mutex this section's reader thread locks on
+every `publish()` — traded deliberately for closing the far worse failure above, not
+unbounded: per client it is capped by the round floors
+([Convergence](04-api-protocol.md#catch-up--register-late-not-early)). What many
+simultaneous catch-ups do to reader-thread latency is unmeasured
+([N4](15-open-questions.md#n4--reconnect-storms-and-reader-thread-contention)).
+
 ## Resize
 
 `ResizePseudoConsole` (and `TIOCSWINSZ` on Unix) changes the *pseudoconsole's*
