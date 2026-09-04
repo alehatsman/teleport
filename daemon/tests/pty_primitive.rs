@@ -114,7 +114,15 @@ fn large_write_arrives_intact_and_in_order() {
     // \n -> \r\n surprises on the way back either. Same lesson the spike
     // already learned the hard way for S3
     // (docs/15-open-questions.md#s3--a-blocking-write-wedges-terminate).
-    let (spawned, out_rx) = spawn_sh("stty raw -echo; cat", 24, 80);
+    let (spawned, out_rx) = spawn_sh("stty raw -echo; printf READY; cat", 24, 80);
+
+    // `stty` runs, then the sentinel, then `cat` execs -- all sequential in
+    // the same shell script. Seeing "READY" come back proves raw mode is
+    // already active before we write; without this sync point the payload
+    // below can race the write against `stty` and land while the pty is
+    // still in cooked mode, so the driver mangles it (echo, erase, EOF char
+    // 0x04, ...) instead of passing it through untouched.
+    recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "READY"));
 
     let payload: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
     spawned.session.write(&payload).unwrap();
@@ -178,8 +186,17 @@ fn eof_and_exit_are_independent_signals() {
     // a few seconds after. wait() must not be blocked on that, and EOF must
     // not arrive early just because the child already exited
     // (docs/15-open-questions.md#s2--eof-is-not-exit, S2's verified recipe).
-    let (spawned, _out_rx) =
-        spawn_sh("trap '' HUP; setsid sh -c 'trap \"\" HUP; sleep 2' & exit 0", 24, 80);
+    //
+    // The recipe calls `setsid(2)` via perl rather than the `setsid(1)`
+    // binary: that binary is util-linux, present on Linux but not on stock
+    // macOS, and the grandchild silently never starting ("command not
+    // found") is exactly what makes EOF arrive early instead of ~2s later.
+    // Perl ships on both and gives the same syscall.
+    let (spawned, _out_rx) = spawn_sh(
+        "trap '' HUP; perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- sh -c 'trap \"\" HUP; sleep 2' & exit 0",
+        24,
+        80,
+    );
 
     let t0 = Instant::now();
     let exit = spawned.exit_rx.recv_timeout(DEFAULT_TIMEOUT).expect("exit_rx should fire promptly");
