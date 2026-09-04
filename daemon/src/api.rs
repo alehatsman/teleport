@@ -96,7 +96,17 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 pub enum ApiError {
     Auth(AuthError),
     NotFound,
+    /// A session id that's a valid, known row, but whose log GC has already
+    /// deleted (docs/05-persistence.md#garbage-collection: directory first,
+    /// row second) -- distinct from `NotFound`, which means no such id was
+    /// ever known at all.
+    Gone,
     BadRequest(String),
+    /// A `historical_row` lookup failed for a reason that isn't "no such
+    /// row" -- the db-writer thread is gone, or a real SQLite I/O error.
+    /// Kept distinct from `NotFound` so a persistence outage doesn't read as
+    /// an ordinary unknown id on monitoring built on this route's 404 rate.
+    Internal(String),
     Create(CreateError),
 }
 
@@ -130,7 +140,13 @@ impl IntoResponse for ApiError {
                 "not_found",
                 "session not found".to_string(),
             ),
+            ApiError::Gone => (
+                StatusCode::GONE,
+                "gone",
+                "session log no longer available (garbage collected)".to_string(),
+            ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", msg),
             // docs/04-api-protocol.md#post-apiv1sessions: 422 for a
             // resolvable-at-validation-time problem, 429 for max_sessions,
             // 500 for a spawn failure past that point. Never 404 -- the
@@ -501,14 +517,18 @@ async fn get_session(
 }
 
 /// The DB-fallback half of `get_session`/`get_log`/`delete_session`: a
-/// session id that isn't live falls back to SQLite; `404` either way if
-/// nothing knows about it (`db: None` included -- same as before M7).
+/// session id that isn't live falls back to SQLite; `404` if nothing knows
+/// about it (`db: None` included -- same as before M7, and a malformed id
+/// can't be a row by construction), `500` if the lookup itself failed (the
+/// db-writer thread is gone, or a genuine SQLite I/O error) -- that case
+/// must not read as an ordinary unknown id on monitoring built on this
+/// route's 404 rate.
 async fn historical_row(state: &AppState, id: &str) -> Result<persistence::SessionRow, ApiError> {
     let _: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     let db = state.db.as_ref().ok_or(ApiError::NotFound)?;
     db.get_session(id)
         .await
-        .map_err(|_| ApiError::NotFound)?
+        .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::NotFound)
 }
 
@@ -644,10 +664,18 @@ async fn get_log(
         // to go through).
         let row = historical_row(&state, &id).await?;
         let path = state.sessions.root().join(&row.id).join("output.vt");
-        (
-            row.output_bytes,
-            LogReader::open(&path).map_err(|e| ApiError::BadRequest(e.to_string()))?,
-        )
+        let reader = LogReader::open(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // The row is still there but GC already deleted the
+                // directory (docs/05-persistence.md#garbage-collection:
+                // directory first, row second) -- a request landing in that
+                // window finds a row that's real but a log that's gone.
+                ApiError::Gone
+            } else {
+                ApiError::BadRequest(e.to_string())
+            }
+        })?;
+        (row.output_bytes, reader)
     };
 
     let (from, to) = if q.from.is_some() || q.to.is_some() {
