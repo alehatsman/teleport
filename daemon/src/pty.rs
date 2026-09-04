@@ -146,6 +146,10 @@ pub struct SpawnedSession {
     pub session: PtySession,
     pub exit_rx: Receiver<PtyExit>,
     pub eof_rx: Receiver<()>,
+    /// The child's OS pid, for `GET`'s `pid` field
+    /// (docs/04-api-protocol.md#get-apiv1sessions). `None` only on a platform
+    /// where `portable_pty::Child::process_id()` itself returns `None`.
+    pub pid: Option<u32>,
 }
 
 /// Spawns `spec` behind a fresh pty and starts the four session threads.
@@ -222,6 +226,7 @@ pub fn spawn(
         session: PtySession { write_tx, control_tx, state },
         exit_rx,
         eof_rx,
+        pid,
     })
 }
 

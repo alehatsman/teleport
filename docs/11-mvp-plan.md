@@ -248,6 +248,70 @@ boundary as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempt
 
 ## M4 — HTTP + WebSocket API
 
+> **Delivered 2026-09-04** — `daemon/src/api.rs`, `ws.rs`, `auth.rs`, `config.rs`,
+> `presets.rs`, plus the M4 slice of `session.rs` (metadata, the `running`/`closing`/
+> `exited` state machine wired to `exit_rx`, and the control lease) and `device.rs`/
+> `main.rs` moving into the library so `api.rs` can reach them. `daemon/tests/http_api.rs`
+> (8 fixtures, in-process via `tower::oneshot`) and `daemon/tests/ws_protocol.rs` (14
+> fixtures, a real socket via `tokio-tungstenite`) plus unit tests in `auth.rs`,
+> `config.rs`, `presets.rs`, `session.rs` and `ws.rs`; 91/91 daemon tests green on Linux,
+> `cargo clippy --all-targets` clean.
+>
+> **A conflict with M2, found and resolved, not silently picked:** `Session::terminate()`
+> removed its session from `SessionManager`'s directory immediately, and a M2 test
+> asserted exactly that. This doc's own `DELETE` contract requires the opposite — a
+> terminated session stays listed as `exited` until an explicit `?purge=true`. Confirmed
+> with the user before changing shared behavior a prior, already-gated milestone depended
+> on: `terminate()` no longer self-removes (state still flips to `closing` immediately,
+> `exited` once the exit-listener thread observes the child's actual exit);
+> `SessionManager::purge` does the removal, called from `DELETE ?purge=true` after the
+> directory is deleted. The M2 test was rewritten to assert the new contract instead of
+> the old one.
+>
+> **Bounded attach lives in `ws.rs`, not `session.rs`** — `bound_attach` narrows the
+> requested `after`/`tail` against `default_tail`/`max_replay_bytes` *before* calling
+> `Session::attach`, exactly as M3 promised. `truncated` is true when that narrowing
+> actually moved `after` forward, or when the catch-up loop itself gave up
+> (`!attach.caught_up`); plain `tail`/default-tail replay is never flagged truncated —
+> it never promised more.
+>
+> **Not wired:** the short-lived `POST /api/v1/ws-ticket` mitigation for tokens in the
+> WS query string ([06](06-security.md#token-on-the-websocket-upgrade) lists it as
+> "add before the daemon is routinely reachable off-host", not required for the MVP);
+> a `?from=&to=`/`Range` implementation on `GET /log` exists but only the byte-range
+> subset, no multipart ranges. [N2](15-open-questions.md#n2--websocket-compression)
+> (WebSocket compression) is still open — flagged to investigate before this milestone
+> closes, not done here; picking it up is a half-day task, not a blocker for M5.
+> Windows: cross-compile-checked only, no fixtures run (same boundary as
+> [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted)).
+>
+> **Review pass (2026-09-04), before this milestone closed:** an independent code
+> review of this diff found ten correctness bugs, all fixed here rather than carried
+> into M5. Three shared one root cause — blocking work on the async runtime and an
+> unenforced cap: `create_session` and `DELETE ?purge=true` ran
+> `SessionManager::create`/`Session::terminate` (blocking `cwd`/`$PATH` checks, fork/exec,
+> up to ~7s to die) inline on the Tokio worker instead of `spawn_blocking`; and
+> `max_sessions` was checked, then the lock released, before the eventual `insert`, so
+> concurrent creates could all pass the cap before any of them landed. Fixed together: a
+> `reserve_slot`/`ReservationGuard` pair makes the check-and-reserve one atomic step, and
+> both paths now do their blocking work through `spawn_blocking`. Two more were a
+> control-lease race: `is_controller` then `write` were separate lock acquisitions (a
+> concurrent `claim_control` could land in the gap), and the lease was keyed on
+> `client_id` alone with no way to tell apart two simultaneous connections sharing one
+> (a reloaded tab racing its own not-yet-closed socket). Fixed with a lease `epoch`
+> bumped on every grant and checked alongside `client_id`, and `write_if_controller`,
+> which holds the lease lock across the check and the write. The rest, each independent:
+> `max_sessions` was counting `exited`-but-unpurged entries against the cap (now only
+> `Running`/`Closing` do — routine create/DELETE traffic without `?purge=true` could
+> otherwise wedge `create()` at `429` forever with nothing actually running);
+> `resolve_executable` checked a relative command path against the daemon's own cwd
+> instead of the session's requested `cwd` (what `pty::spawn` actually uses); a
+> malformed `Range` header's `end + 1` could overflow `u64::MAX`; an explicit `args: []`
+> was indistinguishable from an omitted field and silently got the preset's default args
+> substituted back in; and `presets.toml` was checked for valid TOML but never for a
+> duplicate id or an empty command. All ten have a regression test; 91/91 daemon tests
+> green, `cargo clippy --all-targets` clean.
+
 **Deliver:** `api.rs`, `ws.rs`, `auth.rs`. Full surface from
 [04-api-protocol.md](04-api-protocol.md).
 
@@ -278,6 +342,20 @@ reconnect at an offset, and terminate — with no gap or duplicate. A client sen
 `Origin`** but a valid credential is accepted. Attaching with no cursor to a 500 MB log
 transfers `default_tail`, not 500 MB. A second client reconnecting with `mode=control`
 does **not** take the lease from a client that claimed it in the meantime.
+
+**Met on Linux.** `ws_protocol.rs` covers: `ready` always first, correct/contiguous
+binary offsets, observer input/resize rejected, `claim_control` preempts and notifies
+the loser, `mode=control` never preempts, disconnect-grace resume for the same
+`client_id`, the ping-pong regression (a reconnect after someone else claims stays an
+observer), grace expiry with no auto-grant, `resized` broadcast to observers, the `exit`
+frame's `final_offset`, and bad/missing `Origin` handling. `http_api.rs` covers
+authenticated vs. unauthenticated `/health`, every route but `/health` rejecting a
+missing token, `422` (not `404`) with no row written for a bad executable, `429` at
+`max_sessions + 1` with the daemon still healthy, the full create→list→terminate→purge
+lifecycle, and `bad_origin` on a mutating request. `bound_attach`'s arithmetic (`tail`,
+default-tail, the `max_replay_bytes` clamp and its `truncated` flag) is unit-tested
+directly rather than through a socket. Not covered by an automated test: the 20 s/60 s
+Ping/Pong keepalive timing itself (implemented, not worth a real 60-second test run).
 
 ---
 

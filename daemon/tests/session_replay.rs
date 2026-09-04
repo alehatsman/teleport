@@ -36,7 +36,7 @@ fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Sess
     let cwd = std::env::temp_dir();
     let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}")];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 })
+        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
         .expect("create session")
 }
 
@@ -51,7 +51,7 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
         "stty raw -echo; while :; do yes | head -c 65536; sleep 0.05; done".to_string(),
     ];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 })
+        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
         .expect("create session")
 }
 

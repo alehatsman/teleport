@@ -1,20 +1,27 @@
 //! `teleportd` — CLI, config, startup sequence, graceful shutdown.
 //!
-//! M0 scope only: bind a listener, establish `<data_dir>`, generate device
-//! identity and the access token, and print the startup URL. No HTTP routes
-//! yet — those land in M4 (docs/11-mvp-plan.md#m4--http--websocket-api).
-
-mod device;
+//! M0 bound a listener and generated identity/token with no HTTP routes.
+//! **M4** adds the routes: loads `config.toml`/`presets.toml`, builds the
+//! `SessionManager` and `AppState`, and mounts `api.rs`'s router
+//! (docs/11-mvp-plan.md#m4--http--websocket-api).
 
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
+
+use teleportd::api::{build_router, AppState};
+use teleportd::auth::OriginPolicy;
+use teleportd::log::LogLimits;
+use teleportd::session::SessionManager;
+use teleportd::{config, presets};
 
 const DEFAULT_PORT: u16 = 7337;
 /// 256 bits, per docs/06-security.md#the-credential.
@@ -73,10 +80,13 @@ async fn main() -> Result<()> {
     create_data_dir(&data_dir)?;
     info!(path = %data_dir.display(), "data directory ready");
 
-    let device = device::load_or_create(&data_dir)?;
+    let device = teleportd::device::load_or_create(&data_dir)?;
     info!(device_id = %device.device_id, device_name = %device.device_name, "device identity");
 
     let token = load_or_create_token(&data_dir)?;
+
+    let config = config::Config::load(&data_dir)?;
+    let presets = presets::load_or_create(&data_dir)?;
 
     let listener = bind_with_fallback(cli.listen).await?;
     let bound_addr = listener.local_addr().context("reading bound local address")?;
@@ -85,9 +95,29 @@ async fn main() -> Result<()> {
 
     println!("http://{}:{}/?token={}", bound_addr.ip(), bound_addr.port(), token);
 
-    // No routes yet — api.rs / ws.rs land in M4. This is enough to prove the
-    // daemon binds, serves, and shuts down cleanly.
-    let app = axum::Router::new();
+    let log_limits = LogLimits {
+        warn_bytes: config.log_warn_bytes,
+        max_bytes: config.log_max_bytes,
+        ..LogLimits::default()
+    };
+    let sessions = SessionManager::with_limits(data_dir.join("sessions"), log_limits)
+        .with_max_sessions(config.max_sessions);
+    // The Vite dev origin is only ever legitimate against a debug build of
+    // this binary itself (docs/06-security.md#browser-origin-defense).
+    let origin_policy =
+        OriginPolicy::new(bound_addr.port(), cfg!(debug_assertions), &config.allowed_origins, &config.allowed_hosts);
+
+    let state = Arc::new(AppState {
+        sessions,
+        origin_policy,
+        token,
+        presets,
+        device,
+        config,
+        started_at: Instant::now(),
+        version: env!("CARGO_PKG_VERSION"),
+    });
+    let app = build_router(state);
 
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
