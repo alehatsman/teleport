@@ -18,6 +18,17 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+/// A throwaway `<data_dir>/sessions` root. Each session writes its
+/// `output.vt` under here (docs/05-persistence.md#layout); these tests only
+/// care that the log exists somewhere private to them.
+fn sessions_root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "teleportd-sessions-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ))
+}
+
 fn spec<'a>(args: &'a [String], cols: u16, rows: u16, cwd: &'a PathBuf) -> SpawnSpec<'a> {
     SpawnSpec { program: "/bin/sh", args, cwd, env: &[], cols, rows }
 }
@@ -27,7 +38,7 @@ fn spec<'a>(args: &'a [String], cols: u16, rows: u16, cwd: &'a PathBuf) -> Spawn
 /// drive it through write/resize/terminate with nobody ever subscribing.
 #[tokio::test]
 async fn zero_subscribers_session_survives() {
-    let manager = SessionManager::new();
+    let manager = SessionManager::new(sessions_root("zero-subs"));
     let cwd = temp_dir();
     let args = vec![];
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
@@ -44,7 +55,7 @@ async fn zero_subscribers_session_survives() {
 /// bounded policy (~7s) instead of queueing behind that stuck writer.
 #[tokio::test]
 async fn terminate_is_not_wedged_by_a_stuck_write() {
-    let manager = SessionManager::new();
+    let manager = SessionManager::new(sessions_root("stuck-write"));
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), "sleep 30".to_string()];
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
@@ -73,7 +84,7 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
 /// daemon.
 #[tokio::test]
 async fn terminate_removes_the_session_from_its_manager() {
-    let manager = SessionManager::new();
+    let manager = SessionManager::new(sessions_root("terminate-removes"));
     let cwd = temp_dir();
     let args = vec![];
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
@@ -99,7 +110,7 @@ async fn terminate_removes_the_session_from_its_manager() {
 /// M2 doesn't promise anything about.
 #[tokio::test]
 async fn subscriber_receives_output_in_order() {
-    let manager = SessionManager::new();
+    let manager = SessionManager::new(sessions_root("in-order"));
     let cwd = temp_dir();
     let args = vec![];
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
@@ -139,7 +150,7 @@ fn contains(acc: &[u8], needle: &str) -> bool {
 #[tokio::test]
 async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     const N: usize = 10 * 1024 * 1024; // 10 MiB, comfortably past the 8 MiB bound.
-    let manager = SessionManager::new();
+    let manager = SessionManager::new(sessions_root("slow-sub"));
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {N}")];
     let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");

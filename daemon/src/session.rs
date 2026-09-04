@@ -5,13 +5,21 @@
 //! implements, and docs/03-pty-layer.md#backpressure for the fan-out and
 //! queue-bound rules below.
 //!
-//! **M2 scope boundary:** this file owns in-memory session lifetime,
-//! subscriber fan-out, and the offset counter. It does **not** persist
-//! anything to disk -- `output.vt` and `log_capped_at` are `log.rs` (M3);
-//! SQLite metadata is `persistence.rs` (M7). `on_output` here only advances
-//! `next_offset` and fans out; the "persist first" half of
-//! docs/03-pty-layer.md#reader-loop's ordering lands when M3 wires a log
-//! writer into the same closure.
+//! **M3 update:** the offset counter is no longer a field here -- it moved
+//! into `log.rs`'s `OutputLog`, which this module keeps inside the same
+//! `Fanout` mutex. That is what makes docs/03-pty-layer.md#reader-loop's
+//! ordering -- **persist, then advance the offset, then fan out** -- one
+//! call (`OutputLog::append`) instead of three steps a later edit could
+//! reorder. The same mutex closes the attach race: [`Session::attach`]
+//! registers the subscriber *and* reads the replay boundary `N` under one
+//! acquisition, so every chunk that subscriber ever receives starts at or
+//! after `N` (docs/04-api-protocol.md#attach-race).
+//!
+//! **Still out of scope:** bounded attach (`tail`, `max_replay_bytes`,
+//! `truncated`) and the WS close code that distinguishes a slow consumer
+//! from a dropped one are M4; SQLite metadata, `session_events` and restart
+//! recovery are M7 -- the [`LogEvent`]s the log hands back here are traced,
+//! not stored.
 //!
 //! `exit_rx`/`eof_rx` from `pty::spawn` are intentionally left unconsumed --
 //! dropping them is safe (the sender threads see a closed channel and move
@@ -19,12 +27,15 @@
 //! them is M4/M7 API-surface work, not backpressure.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, Semaphore};
+use tracing::warn;
 use ulid::Ulid;
 
+use crate::log::{LogEvent, LogLimits, LogReader, OutputLog};
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 
 /// Queue bound per subscriber: whichever trips first
@@ -76,31 +87,37 @@ struct SubscriberSlot {
     budget: Arc<Semaphore>,
 }
 
-/// The `{next_offset, subscribers}` pair, guarded by one short-held mutex
+/// The `{output log, subscribers}` pair, guarded by one short-held mutex
 /// (docs/03-pty-layer.md#reader-loop: "steps 2-4 happen under one short
-/// mutex that also guards subscriber registration").
+/// mutex that also guards subscriber registration"). The log carries
+/// `next_offset`, so appending to the file and advancing the offset cannot
+/// drift apart, and neither can drift from subscriber registration.
 struct Fanout {
-    next_offset: u64,
+    log: OutputLog,
     subscribers: Vec<SubscriberSlot>,
     next_subscriber_id: u64,
 }
 
 impl Fanout {
-    fn new() -> Self {
-        Self { next_offset: 0, subscribers: Vec::new(), next_subscriber_id: 0 }
+    fn new(log: OutputLog) -> Self {
+        Self { log, subscribers: Vec::new(), next_subscriber_id: 0 }
     }
 
     /// Runs on the PTY reader thread via the `on_output` closure passed to
-    /// `pty::spawn`. Must never block: every send is `try_send`, budget
-    /// acquisition is `try_acquire`, and a subscriber that would exceed
-    /// either bound is dropped instead of waited on
+    /// `pty::spawn`. Must never block: the append is a `write_all` into the
+    /// page cache and never an `fsync` on this path, every send is
+    /// `try_send`, budget acquisition is `try_acquire`, and a subscriber
+    /// that would exceed either bound is dropped instead of waited on
     /// (docs/03-pty-layer.md#the-rule).
-    fn publish(&mut self, bytes: &[u8]) {
-        let start = self.next_offset;
-        self.next_offset += bytes.len() as u64;
+    ///
+    /// Returns whatever the log wants recorded; the caller traces it off the
+    /// hot path rather than this method reaching for a logger under the lock.
+    fn publish(&mut self, bytes: &[u8]) -> Vec<LogEvent> {
+        let appended = self.log.append(bytes);
+        let start = appended.start;
 
         if self.subscribers.is_empty() {
-            return; // docs/11-mvp-plan.md#m2: zero subscribers is fine, indefinitely.
+            return appended.events; // docs/11-mvp-plan.md#m2: zero subscribers is fine, indefinitely.
         }
 
         let payload: Arc<[u8]> = Arc::from(bytes);
@@ -124,6 +141,23 @@ impl Fanout {
                 Err(_) => false,
             }
         });
+
+        appended.events
+    }
+
+    /// Registers a subscriber slot. Split out of `Session::subscribe` so
+    /// [`Session::attach`] can register *and* read the replay boundary under
+    /// one acquisition of the lock -- that atomicity is the whole attach-race
+    /// fix (docs/04-api-protocol.md#attach-race).
+    fn register(&mut self, fanout: &Arc<Mutex<Fanout>>) -> Subscription {
+        let (tx, rx) = mpsc::channel(MAX_QUEUE_CHUNKS);
+        let budget = Arc::new(Semaphore::new(MAX_QUEUE_BYTES));
+
+        let id = SubscriberId(self.next_subscriber_id);
+        self.next_subscriber_id += 1;
+        self.subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
+
+        Subscription { id, rx, budget, fanout: Arc::clone(fanout) }
     }
 }
 
@@ -154,6 +188,35 @@ impl Drop for Subscription {
     }
 }
 
+/// A subscriber registered at the replay boundary. `replay_from..replay_to`
+/// is the byte range to serve out of `reader` before the first chunk from
+/// `subscription`; the two meet exactly once -- no gap, no duplicate.
+pub struct Attach {
+    /// Where replay actually starts. The requested offset, except for a
+    /// client attaching past a cap: there it is `next_offset` and the range
+    /// is empty (docs/05-persistence.md#size-cap).
+    pub replay_from: u64,
+    /// One past the last replayable byte: `min(N, readable_end)`.
+    pub replay_to: u64,
+    /// `N` -- the boundary. Every chunk from `subscription` starts here or
+    /// later, guaranteed by the single lock `attach` takes.
+    pub next_offset: u64,
+    pub log_capped_at: Option<u64>,
+    pub reader: LogReader,
+    pub subscription: Subscription,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    /// The client holds an offset the daemon never handed out -- a purged
+    /// log, or a stale client after a `lost` session. M4 renders this as the
+    /// `offset_ahead` error frame (docs/04-api-protocol.md#attach-race).
+    #[error("requested offset {requested} is ahead of next_offset {next_offset}")]
+    OffsetAhead { requested: u64, next_offset: u64 },
+    #[error("opening the log for replay: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
 
 /// One session: a PTY primitive plus the fan-out state layered on top of it.
@@ -176,22 +239,83 @@ pub struct Session {
 }
 
 impl Session {
-    /// Registers a new subscriber and returns its receive end. Bounded to
-    /// `MAX_QUEUE_CHUNKS` chunks / `MAX_QUEUE_BYTES` bytes, whichever trips
-    /// first (docs/03-pty-layer.md#backpressure); a subscriber that falls
-    /// behind is disconnected (`recv()` returns `None`), never blocks the
-    /// reader.
+    /// Registers a new subscriber and returns its receive end, with no
+    /// replay. Bounded to `MAX_QUEUE_CHUNKS` chunks / `MAX_QUEUE_BYTES`
+    /// bytes, whichever trips first (docs/03-pty-layer.md#backpressure); a
+    /// subscriber that falls behind is disconnected (`recv()` returns
+    /// `None`), never blocks the reader.
+    ///
+    /// Use [`attach`](Self::attach) for anything that needs history -- this
+    /// one has no defined starting offset, so what happened before the call
+    /// is simply lost to that subscriber.
     pub fn subscribe(&self) -> Subscription {
-        let (tx, rx) = mpsc::channel(MAX_QUEUE_CHUNKS);
-        let budget = Arc::new(Semaphore::new(MAX_QUEUE_BYTES));
-
         let mut fanout = self.fanout.lock().unwrap();
-        let id = SubscriberId(fanout.next_subscriber_id);
-        fanout.next_subscriber_id += 1;
-        fanout.subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
+        fanout.register(&self.fanout)
+    }
+
+    /// Subscribes *and* establishes the replay boundary atomically.
+    ///
+    /// Registration and the read of `N` happen under one lock -- the same one
+    /// the reader loop takes to append and fan out -- which is what
+    /// guarantees replay and live output meet exactly once
+    /// (docs/04-api-protocol.md#attach-race). Opening the read handle happens
+    /// under it too: cheap, and it saves the caller reasoning about the file
+    /// moving. Reading the bytes does not -- that is the caller's job, off
+    /// the lock, through `Attach::reader`.
+    ///
+    /// Replay here is unbounded by design; `tail` / `max_replay_bytes` are
+    /// M4's (docs/04-api-protocol.md#bounded-attach) and narrow `replay_from`
+    /// before the read. Keeping the bound above this line is what lets a VT
+    /// state snapshot replace a byte range later without a protocol change.
+    pub fn attach(&self, from: u64) -> Result<Attach, AttachError> {
+        let mut fanout = self.fanout.lock().unwrap();
+
+        let next_offset = fanout.log.next_offset();
+        if from > next_offset {
+            return Err(AttachError::OffsetAhead { requested: from, next_offset });
+        }
+        let log_capped_at = fanout.log.log_capped_at();
+        let readable_end = fanout.log.readable_end();
+        let reader = fanout.log.reader()?;
+
+        // Bytes between a cap and `next_offset` were streamed live and are
+        // gone. A client asking for them gets no replay and is told where the
+        // stream resumes, rather than being served whatever happens to sit at
+        // that file position (docs/05-persistence.md#size-cap).
+        let mut replay_from = from;
+        let mut replay_to = next_offset.min(readable_end);
+        if replay_from >= replay_to {
+            replay_from = next_offset;
+            replay_to = next_offset;
+        }
+
+        let subscription = fanout.register(&self.fanout);
         drop(fanout);
 
-        Subscription { id, rx, budget, fanout: Arc::clone(&self.fanout) }
+        Ok(Attach { replay_from, replay_to, next_offset, log_capped_at, reader, subscription })
+    }
+
+    /// The authoritative output offset: bytes below it have been handed out,
+    /// bytes at or above it do not exist yet.
+    pub fn next_offset(&self) -> u64 {
+        self.fanout.lock().unwrap().log.next_offset()
+    }
+
+    pub fn log_capped_at(&self) -> Option<u64> {
+        self.fanout.lock().unwrap().log.log_capped_at()
+    }
+
+    pub fn log_path(&self) -> PathBuf {
+        self.fanout.lock().unwrap().log.path().to_path_buf()
+    }
+
+    /// Flushes the log to disk. The periodic case lives inside the append
+    /// path; this is the close case (docs/05-persistence.md#output-log).
+    /// `terminate()` calls it for the user-initiated path; wiring it to a
+    /// child that exits on its own needs `exit_rx`, which is M4/M7.
+    pub fn sync_log(&self) {
+        let events = self.fanout.lock().unwrap().log.sync();
+        trace_log_events(self.id, &events);
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -210,10 +334,20 @@ impl Session {
     /// the daemon. Idempotent, same as the underlying `pty.terminate()`.
     pub fn terminate(&self) -> Result<()> {
         let result = self.pty.terminate();
+        self.sync_log();
         if let Some(directory) = self.directory.upgrade() {
             directory.lock().unwrap().remove(&self.id);
         }
         result
+    }
+}
+
+/// A cap, a warning threshold or a failed write is operator-visible now and a
+/// `session_events` row once M7 exists; nothing on the reader thread may
+/// touch SQLite, so the log hands these back and they get traced here.
+fn trace_log_events(id: SessionId, events: &[LogEvent]) {
+    for event in events {
+        warn!(session_id = %id, ?event, "output log event");
     }
 }
 
@@ -222,14 +356,23 @@ impl Session {
 /// a session never contends with another session's hot output path. Held
 /// behind an `Arc` (rather than plain `Mutex<..>`) so a `Session` can keep a
 /// `Weak` back-reference to it and self-remove on `terminate()`.
-#[derive(Default)]
 pub struct SessionManager {
+    /// `<data_dir>/sessions`. Each session's log is `<root>/<id>/output.vt`
+    /// (docs/05-persistence.md#layout).
+    root: PathBuf,
+    limits: LogLimits,
     sessions: Arc<SessionDirectory>,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(root: PathBuf) -> Self {
+        Self::with_limits(root, LogLimits::default())
+    }
+
+    /// Same, with non-default log thresholds -- how a test drives the cap
+    /// path without writing a gigabyte.
+    pub fn with_limits(root: PathBuf, limits: LogLimits) -> Self {
+        Self { root, limits, sessions: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Spawns `spec` behind a fresh PTY and registers the resulting session.
@@ -238,11 +381,17 @@ impl SessionManager {
     /// module doc on `pty.rs` both point at.
     pub fn create(&self, spec: SpawnSpec) -> Result<Arc<Session>> {
         let id = SessionId::new();
-        let fanout = Arc::new(Mutex::new(Fanout::new()));
+
+        // A brand-new session has no stored row; `None` is the fresh-start
+        // case of docs/05-persistence.md#restart-recovery, and M7 is what
+        // will pass `Some` for a recovered one.
+        let log = OutputLog::open(&self.root.join(id.to_string()), self.limits, None)?;
+        let fanout = Arc::new(Mutex::new(Fanout::new(log)));
 
         let publish_fanout = Arc::clone(&fanout);
         let spawned = pty::spawn(spec, move |bytes| {
-            publish_fanout.lock().unwrap().publish(bytes);
+            let events = publish_fanout.lock().unwrap().publish(bytes);
+            trace_log_events(id, &events);
         })?;
 
         let session = Arc::new(Session {
@@ -264,22 +413,70 @@ impl SessionManager {
 mod tests {
     use super::*;
 
+    /// A `Fanout` over a real log in a throwaway directory -- these tests
+    /// exercise fan-out mechanics, not PTY spawning.
+    fn scratch_fanout(dir: &std::path::Path) -> Arc<Mutex<Fanout>> {
+        let log = OutputLog::open(dir, LogLimits::default(), None).expect("open log");
+        Arc::new(Mutex::new(Fanout::new(log)))
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "teleportd-session-unit-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     /// Dropping a `Subscription` unregisters it immediately, not lazily on
     /// the next chunk -- an idle session must not accumulate dead slots.
     /// Needs `Fanout::subscribers` (private), so this lives here rather than
     /// in `daemon/tests/`.
     #[tokio::test]
     async fn dropped_subscription_is_unregistered_immediately() {
-        let fanout = Arc::new(Mutex::new(Fanout::new()));
+        let dir = scratch_dir("drop");
+        let fanout = scratch_fanout(&dir);
 
-        let (tx, rx) = mpsc::channel(MAX_QUEUE_CHUNKS);
-        let budget = Arc::new(Semaphore::new(MAX_QUEUE_BYTES));
-        let id = SubscriberId(0);
-        fanout.lock().unwrap().subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
-        let sub = Subscription { id, rx, budget, fanout: Arc::clone(&fanout) };
+        let sub = fanout.lock().unwrap().register(&fanout);
         assert_eq!(fanout.lock().unwrap().subscribers.len(), 1);
 
         drop(sub);
         assert_eq!(fanout.lock().unwrap().subscribers.len(), 0, "Drop must remove the slot without waiting for output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ordering rule, checked from the outside: by the time a chunk is
+    /// visible to a subscriber, its bytes are already readable at the offset
+    /// it was tagged with (docs/03-pty-layer.md#reader-loop). Needs private
+    /// `Fanout`, so it lives here.
+    #[tokio::test]
+    async fn a_published_offset_is_already_on_disk() {
+        let dir = scratch_dir("ordering");
+        let fanout = scratch_fanout(&dir);
+        let mut sub = fanout.lock().unwrap().register(&fanout);
+
+        fanout.lock().unwrap().publish(b"abc");
+        fanout.lock().unwrap().publish(b"defgh");
+
+        let path = dir.join(crate::log::LOG_FILE_NAME);
+        for expected_offset in [0u64, 3] {
+            let chunk = sub.recv().await.expect("chunk");
+            assert_eq!(chunk.offset, expected_offset);
+            let on_disk = std::fs::read(&path).expect("read log");
+            assert!(
+                on_disk.len() as u64 >= chunk.offset + chunk.bytes.len() as u64,
+                "chunk at offset {} is {} bytes, but only {} are on disk",
+                chunk.offset,
+                chunk.bytes.len(),
+                on_disk.len()
+            );
+            assert_eq!(&on_disk[chunk.offset as usize..][..chunk.bytes.len()], &*chunk.bytes);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

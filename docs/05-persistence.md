@@ -158,8 +158,14 @@ cap changes is only whether the bytes behind an offset are still on disk.
 
 **Writes:**
 
-- Buffered append; `write_all` per chunk.
-- `fsync` on session close, and on a 2-second timer while running.
+- Buffered append; `write_all` per chunk. **The buffer is the page cache, not a
+  userspace `BufWriter`** — replay reads through a separate handle, and a byte still
+  sitting in a userspace buffer is not visible to it, so buffering there would publish
+  offsets whose bytes a reconnect cannot read.
+- `fsync` on session close, and on a 2-second timer while running. The timer is checked
+  on the append path rather than driven by a thread of its own; a session that goes
+  quiet therefore holds its unsynced tail until close, which costs nothing given the
+  daemon-crash boundary ([01-architecture.md](01-architecture.md#the-crash-boundary)).
 - Never `fsync` per chunk — it would couple PTY drain rate to disk latency and put the
   reader thread at risk of falling behind under load.
 
@@ -178,6 +184,12 @@ loop). Policy:
 |---|---|
 | `log_warn_bytes` (default 256 MiB) | emit a `session_events` warning; UI shows a badge |
 | `log_max_bytes` (default 1 GiB) | stop appending; set `log_capped_at = next_offset`; **keep streaming live output** |
+
+A chunk that straddles `log_max_bytes` is written up to the limit and truncated there,
+so `log_capped_at == log_max_bytes` exactly for any log capped by growing. A log whose
+`next_offset` is ahead of its file for any *other* reason — an `io_error`, or a restart
+whose stored `output_bytes` exceeds the file length — reports `log_capped_at` at the
+file length, so "what is readable" has one answer and every read clamps to it.
 
 Never truncate from the head — that would invalidate every offset in flight.
 

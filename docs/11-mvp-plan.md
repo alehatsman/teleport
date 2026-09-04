@@ -149,6 +149,46 @@ session permanently unattachable. The attach ordering is correct; the budget is 
 
 ## M3 — Append-only replay
 
+> **Delivered 2026-09-04** — `daemon/src/log.rs` + `daemon/tests/output_log.rs`
+> (6 fixtures, platform-independent) + `daemon/tests/session_replay.rs` (4 fixtures,
+> `cfg(unix)`, the gate itself) and a second `#[cfg(test)]` unit test in `session.rs`;
+> 32/32 daemon tests green on Linux, `cargo clippy --all-targets -- -D warnings` clean,
+> cross-compile-checked for `x86_64-pc-windows-gnu`. `next_offset` **moved out of
+> `session.rs` into `OutputLog`**: the ordering rule above is only enforceable if
+> "append to the file" and "advance the offset" are one call, so `Fanout` now holds an
+> `OutputLog` behind the same mutex it already held the counter behind, and `publish()`
+> is `log.append()` followed by the fan-out. The identity is asserted after *every*
+> operation in `output_log.rs`, not just at the end. `Session::attach(from)` is the new
+> atomic attach: it reads the replay boundary `N`, opens a read handle, and registers
+> the subscriber under one lock acquisition, so every chunk that subscriber ever
+> receives starts at exactly `N` — that, not a dedup pass, is what closes
+> [the attach race](04-api-protocol.md#attach-race). `from > N` returns
+> `AttachError::OffsetAhead` (M4 renders it as the `offset_ahead` frame).
+>
+> Three resolutions the docs left open, recorded rather than silently picked:
+> **(1)** 05's "buffered append" is `write_all` straight to the file, not a userspace
+> `BufWriter` — a buffered byte is not visible to the separate read handle replay uses,
+> so buffering it would publish offsets whose bytes a reconnect cannot read. The page
+> cache is the buffer; `fsync` stays off the per-chunk path, on a 2 s throttle checked
+> inside `append` plus an explicit sync on `terminate()`. A session that goes *quiet*
+> holds its unsynced tail until close — acceptable, since a daemon crash loses the live
+> PTY anyway ([01](01-architecture.md#the-crash-boundary)). **(2)** A chunk straddling
+> `log_max_bytes` is written up to the limit and truncated there, so `log_capped_at`
+> is always exactly `log_max_bytes` for a log that got capped by growing. **(3)** After
+> a failed write the log stops persisting but keeps advancing offsets (05's `io_error`
+> rule); `readable_end()` is therefore the actual file length, which is what every read
+> clamps to — equal to `min(next_offset, log_capped_at)` in the normal and capped
+> cases, and honest in the degraded one. Reopening with a stored `output_bytes` ahead of
+> the file and no recorded cap reports the cap at the file length for the same reason.
+>
+> Not wired: `StoredState` is the M7 seam and `create()` always passes `None`, so
+> restart recovery is proven at the `log.rs` level, not yet end to end through SQLite.
+> `LogEvent`s (`Warned`/`Capped`/`IoError`) are returned by `append` and traced — the
+> `session_events` rows they become are M7. Bounded attach (`tail`, `max_replay_bytes`,
+> `truncated`) is deliberately still M4: `attach()` serves the full range and M4 narrows
+> `replay_from` before reading, which is what keeps a VT state snapshot substitutable
+> for a byte range later ([04](04-api-protocol.md#the-vt-state-caveat--read-this-before-implementing)).
+
 **Deliver:** `log.rs` — append writer, range reader, offset accounting.
 
 - persist **before** advancing the offset, advance **before** fan-out
@@ -162,6 +202,21 @@ session permanently unattachable. The attach ordering is correct; the budget is 
 and verify byte-for-byte that the union of replay + live output equals the log — **no
 gaps, no duplicates**. Fuzz the attach point against a concurrent writer. Then cap a log
 mid-stream, restart the daemon, and confirm `next_offset` did not move backwards.
+
+**Met on Linux, 4/4 + 6/6.** In order:
+`disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate` (2 MiB, drops the
+subscription between two `recv()`s, lets output accumulate with zero subscribers,
+re-attaches at the held offset, and compares the accumulated stream against `output.vt`
+byte for byte); `repeated_attach_against_a_concurrent_writer_never_gaps` (200 attach
+rounds against a live writer, each asserting the replay range starts where the last one
+stopped and the first live chunk starts at the boundary);
+`replay_across_a_cap_stops_at_the_cap_and_live_output_continues`; and
+`reopening_a_capped_log_does_not_rewind_next_offset` in `output_log.rs`. The restart leg
+is exercised as a reopen with a `StoredState`, not a daemon process restart — there is
+no SQLite to restart from until M7, and the `max()` rule the gate is really about lives
+in `OutputLog::open`. `output_log.rs` is not `cfg(unix)`-gated, so the offset model runs
+on the whole CI matrix; the four gate fixtures spawn `/bin/sh` and are Unix-only, same
+boundary as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted).
 
 ---
 

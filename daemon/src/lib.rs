@@ -4,5 +4,6 @@
 //! compiled binary (docs/11-mvp-plan.md#m1--pty-primitive: "drive it from
 //! integration tests").
 
+pub mod log;
 pub mod pty;
 pub mod session;
