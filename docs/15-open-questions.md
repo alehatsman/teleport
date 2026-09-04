@@ -14,7 +14,7 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **open, unresolved** — spike, Windows (2026-09-04) |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed, root cause still open** — general to ConPTY (not `cmd.exe`-specific), spike, Windows (2026-09-04) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
@@ -105,32 +105,57 @@ directly (`src/win/mod.rs`): plain `GetExitCodeProcess`/`WaitForSingleObject` on
 `pi.hProcess`, textbook-correct, nothing ConPTY-specific in `portable-pty`'s own code
 that could explain this.
 
-**In progress:**
+**Confirmed general to ConPTY, not `cmd.exe`-specific (2026-09-04, same machine).**
+`s5_minimal exit0`/`exit7` — spawning `mini_exit.exe`, a trivial Rust binary with no
+shell and no console API calls beyond std's implicit runtime init, under ConPTY
+instead of `cmd.exe` — **hung exactly the same way**: `wait()` never returned within
+the timeout. `s5_minimal sigkill` (external `taskkill`) reaped correctly in 75ms,
+same as every other externally-killed case. This rules out `cmd.exe`'s own
+console-detach handling as the cause: **any process attached to a ConPTY, that exits
+by simply returning from `main`/calling `ExitProcess`, is not observed as exited.**
+Only forced termination (`TerminateProcess`, which bypasses whatever cooperative
+shutdown path a graceful exit goes through) is observed. This is a property of
+ConPTY / the Windows console subsystem itself, not of any particular child program —
+narrows the search, but also means "swap the binary" is exhausted as an avenue.
 
-- **`s5_minimal` (built, cross-compiled, awaiting a Windows run)** — isolates
-  whether the hang is `cmd.exe`-specific or general to any ConPTY child that exits
-  on its own. Spawns `mini_exit(.exe)`, a trivial Rust binary with no shell and no
-  console API calls beyond std's implicit runtime init, that prints one line and
-  calls `std::process::exit(N)`. Same `exit0`/`exit7`/`sigkill` shape as S1, dedicated
-  blocking-wait thread. Run via `run-windows-spike.ps1` (now includes it) or directly:
-  `.\target\x86_64-pc-windows-gnu\debug\s5_minimal.exe exit0`.
-  - If `mini_exit` **also** hangs: general to ConPTY, not `cmd.exe` — points at
-    ConPTY/console-subsystem exit signaling itself.
-  - If `mini_exit` **reaps fine**: narrows this to something `cmd.exe` itself does on
-    exit while attached to a ConPTY (e.g. its own console-detach handling) — a much
-    more actionable, narrower finding.
+**Still open:** whether the child process is genuinely still resident (its own
+`ExitProcess` call itself blocked on some ConPTY-side cooperative shutdown/console
+handoff, so the OS legitimately still shows it as running) or the OS has already
+torn it down and this is a lost wakeup on `WaitForSingleObject`/`GetExitCodeProcess`
+against a stale handle. These have very different implications: the former means
+Windows is quietly holding the process open forever unless something forces it
+(possibly a resource leak beyond just "session shows as running"); the latter would
+be more surprising but narrower. Not yet tried:
 
-Other plausible next steps, not yet tried:
-
+- **Live inspection during a hang** — the most direct way to settle the question
+  above. Run `s5_minimal.exe exit0` in one window, and while it's hung (has ~8s),
+  check `Get-Process -Id <pid>` or Task Manager from another window/session: is
+  `mini_exit.exe` still listed as running? What does its CPU/thread state look like?
+- `s5_minimal` (as of this commit) also logs when its reader thread sees EOF on the
+  pty master, with a timestamp — a second, independent signal. If EOF arrives even
+  though `wait()` never does, that's a usable fallback signal for Windows exit
+  detection (reader EOF + a short confirmation poll) instead of relying on `wait()`
+  alone. Not yet run.
 - check whether a newer `portable-pty` (0.9.0 is what's pinned in
   [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` behaves
-  differently
-- inspect the process in Process Explorer/`Get-Process` *while* it's supposedly
-  hung, to see whether it's actually still running (not yet reached its own
-  `ExitProcess`) or a zombie the OS itself hasn't reaped — if `s5_minimal` also
-  hangs, this is the next thing worth a live look, since std's `process::exit` path
-  is about as simple as it gets and there's little left to suspect but ConPTY/OS
-  state itself
+  differently — lower priority now that the symptom is confirmed general to ConPTY
+  rather than a `portable-pty` wiring bug, but still worth a quick check since a
+  newer version might carry a workaround for exactly this.
+
+**Engineering implication if this doesn't resolve:** the existing termination
+policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a
+bounded wait regardless of whether the graceful signal was observed to work — so
+*user-initiated* terminate stays correct on Windows even with W1 unresolved, it just
+always takes the full timeout-then-kill path rather than reaping early. What W1
+actually breaks is the case nobody is terminating: an agent process that finishes
+**on its own**. That session would sit as `running` indefinitely with no forcing
+function. A fallback worth considering if the root cause doesn't resolve: treat
+sustained silence on the reader (no output for N seconds) plus no new writes as a
+trigger to actively probe (poll `try_wait()`, and if that also stays silent,
+consider a bounded confirmation kill) rather than trusting `wait()` to fire on its
+own. Not a decision yet — needs the live-inspection data point above first, since it
+determines whether this is "OS hasn't reaped it" (probe-based fallback is sound) or
+something stranger.
 
 **Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
 *common* case — an agent process finishing normally — would never move a session to

@@ -61,15 +61,26 @@ fn main() -> Result<()> {
     let pid = child.process_id();
     eprintln!("[s5] scenario={scenario} exe={mini_exit:?} pid={pid:?}");
 
-    // Drain output in the background, same hygiene as every other spike binary.
+    // Drain output in the background, same hygiene as every other spike binary --
+    // but also log EOF with a timestamp. Does the master ever see EOF for a
+    // voluntarily-exiting child even when wait() doesn't return? That's a second,
+    // independent exit signal we could fall back to if wait() alone can't be
+    // trusted on Windows.
+    let t0 = Instant::now();
     let mut reader = pair.master.try_clone_reader()?;
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    eprintln!("[s5] reader EOF at {}ms", t0.elapsed().as_millis());
+                    break;
+                }
                 Ok(_) => {}
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("[s5] reader error at {}ms: {e}", t0.elapsed().as_millis());
+                    break;
+                }
             }
         }
     });
@@ -89,8 +100,11 @@ fn main() -> Result<()> {
         if waiter.is_finished() {
             break;
         }
-        if start.elapsed() > Duration::from_secs(10) {
-            eprintln!("[s5] TIMEOUT after 10s -- wait() never returned");
+        if start.elapsed() > Duration::from_secs(8) {
+            eprintln!("[s5] TIMEOUT after 8s -- wait() never returned");
+            // Give the reader thread a few more seconds in case EOF shows up late,
+            // even though wait() itself gave up -- that's a separate signal.
+            std::thread::sleep(Duration::from_secs(4));
             std::process::exit(1);
         }
         std::thread::sleep(Duration::from_millis(75));
