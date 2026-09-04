@@ -120,6 +120,16 @@ jobs:
       - name: checksums
         working-directory: dist
         run: sha256sum * > checksums.txt
-      - env:
+      - name: publish
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+        run: |
+          # A semver prerelease suffix (v1.2.3-rc1, v0.0.0-dev) marks the tag
+          # -- a hyphen after the leading "v". Flag it so it doesn't become
+          # the repo's "latest" release: install.sh and the Releases page
+          # both resolve "latest" to the newest non-prerelease.
+          prerelease_flag=""
+          case "$GITHUB_REF_NAME" in
+            v*-*) prerelease_flag="--prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" dist/* --generate-notes $prerelease_flag
