@@ -141,6 +141,16 @@ shell prompt and a process stuck mid-`ExitProcess` look identical from the outsi
 (0.00 CPU, "Running" status, no output). Silence-based detection can't tell them
 apart, so that's not a viable fallback signal on its own.
 
+**Reader EOF checked too, and it doesn't arrive either.** Re-ran with the EOF
+logging added above: `s5_minimal exit0`/`exit7` produced **no** `[s5] reader EOF`
+line in a ~12s window (8s wait-timeout + 4s grace). So the master-side pipe doesn't
+close/EOF either — not just the process handle. Consistent with the S4 finding
+above (no EOF within 10s of dropping the master). This rules out reader-EOF as a
+fallback exit signal too: whatever is stuck is holding the whole ConPTY session
+open, not narrowly the process handle. There is currently no independent signal
+available, at the `portable-pty`/Win32-console-API level, that a gracefully-exiting
+child under ConPTY has actually finished.
+
 **Where this leaves root-cause digging:** further progress needs tooling this spike
 doesn't have budget for — WinDbg/ETW tracing of what `mini_exit.exe`'s threads are
 actually blocked on during the hang. Time-boxed here rather than pursued further;
