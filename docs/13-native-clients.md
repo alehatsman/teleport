@@ -123,6 +123,14 @@ Ranked by reliability:
 in `session.rs`, it costs nothing, and it means the notification feature later is
 "deliver existing events" rather than "add detection to the hot path."
 
+**Done in M8** — both signals land on the session-list payload
+([04-api-protocol.md](04-api-protocol.md#get-apiv1sessions):
+`last_bell_ms`/`idle_since_ms`), and `Sessions.svelte` shows a badge for a running
+session that needs attention. What's still open for M10: an actual OS tray
+notification reading these fields, and the idle threshold is a single hardcoded
+constant (`session::IDLE_THRESHOLD_MS`, 30s), not the per-preset knob this table
+calls for.
+
 Do **not** build an agent-protocol integration for this. Presets are metadata
 ([01-architecture.md](01-architecture.md#sessions-and-agents-are-the-same-thing)).
 

@@ -69,6 +69,26 @@ use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 /// second per session".
 const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
 
+/// D3 (docs/04-api-protocol.md#get-apiv1sessions): a BEL
+/// byte can repeat fast (a spinner, a broken script) -- throttle the
+/// `session_events` write the same way output_bytes is throttled. The
+/// in-memory `last_bell_ms` (what `GET` actually reports) always reflects the
+/// most recent bell regardless of this throttle.
+const BELL_PERSIST_INTERVAL_MS: i64 = 1000;
+
+/// How long a running session must produce no output before it counts as
+/// idle. Not specified numerically anywhere in the docs (docs/13-native-clients.md
+/// calls it "tunable per preset, noisy for long builds") -- picked here as a
+/// plain default, not a per-preset knob; revisit if it proves noisy. `pub`
+/// for the same reason as [`IDLE_SWEEP_INTERVAL_MS`]: `main.rs` needs it.
+pub const IDLE_THRESHOLD_MS: i64 = 30_000;
+
+/// How often [`Session::tick_idle`] should be polled -- `main.rs`'s sweep
+/// task reads this rather than hardcoding its own copy. `pub`, not
+/// `pub(crate)`: `main.rs` is a separate crate (the `teleportd` binary)
+/// linking against this lib crate, so `pub(crate)` would not reach it.
+pub const IDLE_SWEEP_INTERVAL_MS: u64 = 5_000;
+
 /// Queue bound per subscriber: whichever trips first
 /// (docs/03-pty-layer.md#backpressure).
 const MAX_QUEUE_CHUNKS: usize = 256;
@@ -731,6 +751,22 @@ pub struct Session {
     /// of the same name there. `terminate()` and the exit listener use this
     /// directly rather than going back through the manager.
     db: Option<persistence::Db>,
+    /// D3 attention signals (docs/04-api-protocol.md#get-apiv1sessions).
+    /// `Arc<AtomicI64>` rather than fields behind `runtime`'s `Mutex`: all
+    /// three are touched from the PTY reader thread's `on_output` closure
+    /// (`last_output_at_ms` and `last_bell_ms`) or a periodic sweep
+    /// (`idle_since_ms`), and must never contend with -- or wait behind --
+    /// anything the hot path already holds. The same `Arc`s are handed to
+    /// `pty::spawn`'s closure in `create()`, which is why they're `Arc`
+    /// rather than bare atomics: that closure is built before this `Session`
+    /// exists to hold them.
+    last_output_at_ms: Arc<AtomicI64>,
+    /// 0 = never rung.
+    last_bell_ms: Arc<AtomicI64>,
+    /// 0 = not idle; otherwise the `last_output_at_ms` reading at the moment
+    /// output stopped (not "when the threshold was crossed" -- "since when
+    /// has this been quiet" is the more useful number for a UI badge).
+    idle_since_ms: Arc<AtomicI64>,
 }
 
 impl Session {
@@ -913,6 +949,53 @@ impl Session {
     /// (docs/04-api-protocol.md#get-apiv1sessions).
     pub fn subscriber_count(&self) -> usize {
         self.fanout.lock().unwrap().subscribers.len()
+    }
+
+    /// `GET /api/v1/sessions`'s `last_bell_ms` (docs/04-api-protocol.md,
+    /// D3). `None` if a BEL byte has never appeared in this session's
+    /// output.
+    pub fn last_bell_ms(&self) -> Option<i64> {
+        match self.last_bell_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    /// `GET /api/v1/sessions`'s `idle_since_ms` (docs/04-api-protocol.md,
+    /// D3). `None` while output is flowing or the session isn't running;
+    /// otherwise the timestamp output last stopped.
+    pub fn idle_since_ms(&self) -> Option<i64> {
+        match self.idle_since_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    /// Called from `main.rs`'s idle-sweep task, once per session per tick
+    /// (docs/04-api-protocol.md#get-apiv1sessions). Not
+    /// on the PTY hot path -- `state()` and `note_event` are fine to touch
+    /// here even though they'd be wrong to touch from `on_output`.
+    ///
+    /// `threshold_ms` is a parameter rather than reading the `IDLE_THRESHOLD_MS`
+    /// constant directly so tests can drive this with synthetic clocks and a
+    /// short threshold instead of sleeping 30 real seconds; `main.rs` always
+    /// passes the constant.
+    pub fn tick_idle(&self, now_ms: i64, threshold_ms: i64) {
+        if self.state() != SessionState::Running {
+            return;
+        }
+        let last_output = self.last_output_at_ms.load(Ordering::Relaxed);
+        let was_idle = self.idle_since_ms.load(Ordering::Relaxed) != 0;
+        if now_ms - last_output >= threshold_ms {
+            if !was_idle {
+                self.idle_since_ms.store(last_output, Ordering::Relaxed);
+                if let Some(db) = &self.db {
+                    db.note_event(&self.id.to_string(), "idle");
+                }
+            }
+        } else if was_idle {
+            self.idle_since_ms.store(0, Ordering::Relaxed);
+        }
     }
 
     /// Resolves once the exit listener thread has recorded a final state.
@@ -1350,6 +1433,16 @@ impl SessionManager {
         let db_for_output = self.db.clone();
         let last_persist_ms = Arc::new(AtomicI64::new(0));
         let publish_fanout = Arc::clone(&fanout);
+        // D3 (docs/04-api-protocol.md#get-apiv1sessions):
+        // built here, before `Session` exists, same reason `last_persist_ms`
+        // above is -- the closure has to own its own handles to what it
+        // updates.
+        let last_output_at_ms = Arc::new(AtomicI64::new(created_at_ms));
+        let last_bell_ms = Arc::new(AtomicI64::new(0));
+        let idle_since_ms = Arc::new(AtomicI64::new(0));
+        let last_bell_persist_ms = Arc::new(AtomicI64::new(0));
+        let output_for_closure = Arc::clone(&last_output_at_ms);
+        let bell_for_closure = Arc::clone(&last_bell_ms);
         let spawned = pty::spawn(spec, move |bytes| {
             let (events, next_offset) = {
                 let mut fanout = publish_fanout.lock().unwrap();
@@ -1357,8 +1450,26 @@ impl SessionManager {
                 (events, fanout.log.next_offset())
             };
             trace_log_events(id, &events);
+            let now = now_ms();
+            output_for_closure.store(now, Ordering::Relaxed);
+            // BEL detection (docs/13-native-clients.md#detection-heuristics:
+            // "the reader loop already scans every byte"). Every occurrence
+            // updates the in-memory reading; the `session_events` write is
+            // throttled below so a spinner or broken script can't flood it.
+            if bytes.contains(&0x07) {
+                bell_for_closure.store(now, Ordering::Relaxed);
+                if let Some(db) = &db_for_output {
+                    let last = last_bell_persist_ms.load(Ordering::Relaxed);
+                    if now - last >= BELL_PERSIST_INTERVAL_MS
+                        && last_bell_persist_ms
+                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        db.note_event(&id.to_string(), "bell");
+                    }
+                }
+            }
             if let Some(db) = &db_for_output {
-                let now = now_ms();
                 let last = last_persist_ms.load(Ordering::Relaxed);
                 if now - last >= OUTPUT_BYTES_PERSIST_INTERVAL_MS
                     && last_persist_ms
@@ -1412,6 +1523,9 @@ impl SessionManager {
             exited_tx,
             sync,
             db: self.db.clone(),
+            last_output_at_ms,
+            last_bell_ms,
+            idle_since_ms,
         });
         self.sessions
             .lock()

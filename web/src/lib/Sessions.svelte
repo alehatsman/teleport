@@ -18,6 +18,19 @@
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  // D3 (docs/04-api-protocol.md#get-apiv1sessions):
+  // idle_since_ms is already a live signal (the daemon clears it the moment
+  // output resumes), but last_bell_ms never clears server-side -- one bell
+  // three hours ago shouldn't glow forever. Bound it to a recency window
+  // here instead of teaching the daemon an "acknowledged" concept for M8.
+  const BELL_RECENCY_MS = 2 * 60 * 1000;
+
+  function needsAttention(s: Session): boolean {
+    if (s.state !== "running") return false;
+    if (s.idle_since_ms !== null) return true;
+    return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS;
+  }
+
   // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
   // derived from the session list already on hand -- no new storage/endpoint.
   // Most-recent-use-first, deduped, capped so the dropdown stays scannable.
@@ -168,6 +181,9 @@
               class:exited={session.state === "exited"}
               class:lost={session.state === "lost"}
             ></span>
+            {#if needsAttention(session)}
+              <span class="attention" title="waiting for you">●</span>
+            {/if}
             <span class="command">{session.command}</span>
             <span class="cwd">{session.cwd}</span>
             {#if session.controller}
@@ -275,6 +291,11 @@
   }
   .state.lost {
     background: #c9a227;
+  }
+  .attention {
+    color: #f59e0b;
+    font-size: 0.7rem;
+    flex-shrink: 0;
   }
   .command {
     font-weight: 600;

@@ -144,13 +144,29 @@ UI can show why.
       "exit_code": null,
       "lost_reason": null,
       "controller": "aleh's laptop",
-      "subscribers": 2
+      "subscribers": 2,
+      "last_bell_ms": null,
+      "idle_since_ms": null
     }
   ]
 }
 ```
 
 Sort newest-first. `env` never appears.
+
+**`last_bell_ms` / `idle_since_ms`** (formerly docs/15-open-questions.md's D3;
+docs/13-native-clients.md#detection-heuristics): attention signals, both `null` unless
+`state == "running"` -- a closed session never needs you. `last_bell_ms` is the epoch-ms
+timestamp a BEL byte (`\x07`) was last seen in the output stream; it never clears on its
+own, so a client should treat it as stale after some short window (the reference UI uses
+two minutes), not display it forever. `idle_since_ms` is the epoch-ms timestamp output
+last stopped while the process stayed alive, `null` while output is flowing; the daemon
+clears it itself the moment output resumes, so a client can show it as-is with no client-
+side expiry. Both are computed in memory only (`session.rs`'s `last_bell_ms`/
+`idle_since_ms` on `Session`) and are `session_events` rows only for history --
+this endpoint never reads that table for them. Not on the WebSocket `ready`
+frame -- that's the session-list payload's job; a client watching one
+session already has its own output to judge liveness from.
 
 ### `DELETE /api/v1/sessions/{id}`
 
