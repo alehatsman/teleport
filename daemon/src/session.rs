@@ -386,7 +386,10 @@ impl Replay {
         let Some(subscription) = subscription else {
             let to = (self.cursor + REPLAY_ROUND_BYTES).min(end);
             let offset = self.cursor;
-            let bytes = self.reader.read_range(offset, to).map_err(AttachError::Read)?;
+            let bytes = self
+                .reader
+                .read_range(offset, to)
+                .map_err(|source| AttachError::Read { offset, source })?;
             // Advance by what was actually read, not by what was asked for: a
             // short read must not leave a hole the client is never told about.
             self.cursor += bytes.len() as u64;
@@ -418,7 +421,10 @@ impl Replay {
         // bytes and the first queued chunk are contiguous by construction:
         // this range ends at or before `end <= next_offset`, and every chunk
         // that subscription will ever see starts at or after `next_offset`.
-        let replay = self.reader.read_range(replay_from, end).map_err(AttachError::Read)?;
+        let replay = self
+            .reader
+            .read_range(replay_from, end)
+            .map_err(|source| AttachError::Read { offset: replay_from, source })?;
 
         Ok(ReplayStep::Live(Attach {
             replay_from,
@@ -446,8 +452,19 @@ pub enum AttachError {
     /// or the final post-registration stretch alike. Distinct from `Open` so
     /// an incident doesn't read a mid-walk read failure as though the
     /// initial open never succeeded (issue #1 finding 4).
-    #[error("reading a replay range: {0}")]
-    Read(std::io::Error),
+    ///
+    /// `offset` is where this round was about to read from -- nothing at or
+    /// past it was served. The `Replay` itself is gone (a transient failure
+    /// still drops the cursor, the stall counters and the open `LogReader`
+    /// along with the error, same as any other `?`), but `offset` is
+    /// everything `Session::attach` needs to pick the walk back up: a fresh
+    /// `attach(offset)` resumes exactly where this one left off, replaying
+    /// nothing twice, losing nothing before it (issue #1 finding 6). A
+    /// caller that already tracks how much it has written could derive this
+    /// itself from prior rounds, but only for a round that isn't the first;
+    /// carrying it here means that isn't a special case.
+    #[error("reading a replay range at offset {offset}: {source}")]
+    Read { offset: u64, source: std::io::Error },
 }
 
 type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
@@ -887,10 +904,32 @@ mod tests {
     fn open_and_read_failures_report_distinct_messages() {
         let boom = || std::io::Error::other("boom");
         let open = AttachError::Open(boom()).to_string();
-        let read = AttachError::Read(boom()).to_string();
+        let read = AttachError::Read { offset: 4096, source: boom() }.to_string();
         assert!(open.starts_with("opening the log for replay"), "got: {open}");
         assert!(read.starts_with("reading a replay range"), "got: {read}");
         assert_ne!(open, read);
+    }
+
+    /// Issue #1 finding 6: a `read_range` failure mid-catch-up used to drop
+    /// the whole `Replay` -- cursor, stall counters and open `LogReader`
+    /// alike -- along with the error, leaving no way to resume through the
+    /// session API except the caller reconstructing the offset from its own
+    /// bookkeeping (impossible on the very first round, which has no prior
+    /// successful round to derive it from). `AttachError::Read` now carries
+    /// that offset itself: `Session::attach(offset)` picks the walk back up
+    /// exactly there, so recovery doesn't depend on the caller having kept
+    /// count. Both `next_round` call sites (the per-round history read and
+    /// the final post-registration read) feed their own resume point in --
+    /// `self.cursor` and `replay_from` respectively -- this pins the
+    /// message shape so a future edit can't drop the offset again.
+    #[test]
+    fn read_failure_carries_the_offset_to_resume_at() {
+        let err = AttachError::Read { offset: 2 * 1024 * 1024, source: std::io::Error::other("boom") };
+        assert_eq!(
+            err.to_string(),
+            "reading a replay range at offset 2097152: boom",
+            "the resume offset must be in the message, not just the source error"
+        );
     }
 
     /// The ordering rule, checked from the outside: by the time a chunk is

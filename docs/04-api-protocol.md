@@ -460,6 +460,14 @@ stream under one set of offsets, so "I have consumed up to `ready.next_offset`" 
 means "I hold the session's full history as of the moment I attached", whichever side of
 the handover each byte arrived from.
 
+**A round that fails to read is not a reason to restart the walk.** A transient I/O
+error partway through catch-up (a large backlog, an unlucky disk hiccup) surfaces the
+offset that round was about to read from, not just the underlying error. Re-attaching
+there resumes exactly where the failed round left off — nothing already served needs
+replaying, nothing behind that offset is lost. This is the same recovery path a normal
+reconnect uses, not a special case: the daemon does not need to remember the failed
+`Replay` for a client to continue.
+
 If `after > N`, the client is ahead of the daemon (log was purged, or a stale client
 after a `lost` session): reply `error` with code `offset_ahead` and `next_offset`, and
 let the client restart from `0`.
