@@ -4,7 +4,11 @@
 // "version skew" is a native-app concern, not a browser-SPA one).
 
 export type SessionKind = "shell" | "agent" | "command";
-export type SessionState = "running" | "closing" | "exited";
+// "lost" (docs/05-persistence.md#restart-recovery): a session that was
+// running/closing when the daemon last stopped, recovered as terminal on
+// the next startup with no clean exit code -- a historical row only, never
+// a live Session's own state.
+export type SessionState = "running" | "closing" | "exited" | "lost";
 
 export interface Session {
   id: string;
