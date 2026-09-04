@@ -47,8 +47,9 @@ Any change that violates one of these is wrong, regardless of how convenient it 
    cursor; there is no per-chunk database row.
 5. **The daemon never trusts the network it sits on.** Reachability is a transport
    concern (loopback → tailnet → relay); authorization is a `Principal` the daemon
-   resolves for itself. In the MVP that means binding loopback only — but no handler
-   may ever depend on *how* a connection arrived.
+   resolves for itself. Binding loopback is not authentication — every request carries a
+   credential, including on `127.0.0.1`, and no handler may ever depend on *how* a
+   connection arrived.
 
 ## Where this is going
 

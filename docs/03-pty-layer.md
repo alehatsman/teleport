@@ -111,7 +111,9 @@ loop {
     let start = next_offset;
     next_offset += n as u64;
 
-    // 3. Optional short RAM replay cache.
+    // 3. Optional short RAM replay cache — not in the MVP.
+    //    Correctness never depends on it; the file is authoritative.
+    //    See 05-persistence.md#in-memory-ring-optional.
     ring.push(start, &buffer[..n]);
 
     // 4. Fan out without ever waiting on a slow subscriber.

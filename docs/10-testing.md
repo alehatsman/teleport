@@ -42,7 +42,8 @@ equivalents chosen per platform.
 
 ### 2. Session/offset unit tests
 
-- `output_bytes == len(output.vt)` after every operation
+- `len(output.vt) == min(next_offset, log_capped_at)` after every operation — the
+  uncapped form `output_bytes == len(output.vt)` is only a special case
 - replay of `[a, b)` returns exactly the bytes the live stream delivered for that range
 - attach with `after=N` produces **no gap and no duplicate** — this is the one to
   fuzz hardest
@@ -55,6 +56,12 @@ equivalents chosen per platform.
 - `tail=N` starts at exactly `max(0, next_offset - N)`
 - subscriber queue overflow → subscriber disconnected, **reader unaffected**, offsets
   still monotonic
+- log hits `log_max_bytes` → `log_capped_at` set, file stops growing, `next_offset`
+  keeps advancing, live streaming continues
+- replay across a cap boundary stops at `log_capped_at`; `after >= log_capped_at`
+  replays nothing and `ready` reports `replay_from == next_offset`
+- **restart a capped session → `next_offset` does not move backwards** (this is the one
+  that silently corrupts every attached client if `max()` is written as file-wins)
 
 ### 3. Protocol tests
 
@@ -63,7 +70,15 @@ equivalents chosen per platform.
 - input from an observer is rejected with `not_controller` and never reaches the PTY
 - resize from an observer is rejected
 - `claim_control` preempts; the old controller gets `control_revoked`
-- controller disconnect releases the lease; no auto-grant to an observer
+- **`mode=control` on attach does not preempt** — a second client attaching with
+  `mode=control` while someone holds the lease gets `control:false`
+- controller drops, reconnects within `control_grace_ms` with the same `client_id` →
+  resumes the lease
+- controller drops, another client claims, the original reconnects with `mode=control`
+  → original stays an observer (the ping-pong regression test)
+- grace window expires with no reconnect → lease free; no auto-grant to an observer
+- `ready` carries the current `cols`/`rows`; a `resize` from the controller reaches
+  observers as `resized`
 - `exit` frame carries the final offset and matches `output_bytes`
 - bad `Origin` → upgrade rejected
 - bad `Host` → upgrade rejected
@@ -73,6 +88,11 @@ equivalents chosen per platform.
 - `Authorization: Bearer` accepted on the WS upgrade, not just `?token=`
 - unauthenticated `/health` omits `device_id`/`device_name`; authenticated includes them
 - `/health` advertises `api_versions` and `capabilities`
+- **every `/api/v1` route except `/health` rejects a request with no token**, including
+  one arriving on loopback
+- token compare is constant-time (assert the implementation, not the timing)
+- `POST /sessions` with a nonexistent executable → `422`, not `404`
+- `max_sessions + 1` concurrent spawns → `429`, daemon healthy
 
 ### 4. Persistence / restart tests
 
@@ -81,7 +101,7 @@ equivalents chosen per platform.
 - log survives restart and `/log` still serves the full range
 - GC deletes the directory before the row; a crash mid-GC leaves a row without a log,
   not a log without a row
-- log cap reached → appending stops, `log_capped` set, live streaming continues
+- log cap reached → appending stops, `log_capped_at` recorded, live streaming continues
 
 ## Failure-injection checklist
 
@@ -101,7 +121,11 @@ Every one of these must produce a defined, tested state — not an exception tra
 | Restart the daemon while a client is attached | client gets a clean close; reconnect shows `lost` state |
 | Fill the disk | append fails → session marked with `io_error`, daemon stays up |
 | `cwd` deleted after spawn | child's problem, not a daemon crash |
-| Spawn a nonexistent executable | `404`, row recorded with `spawn_failed`, no orphan directory |
+| Spawn a nonexistent executable | `422`, row recorded with `spawn_failed`, no orphan directory |
+| Second daemon started as another OS user | binds an ephemeral port; neither daemon can read the other's token |
+| Port 7337 already taken | ephemeral fallback; `<data_dir>/port` names the real one |
+| Update the daemon with sessions running | refused/deferred; sessions keep running ([08](08-packaging.md#updates-must-not-kill-sessions)) |
+| Log hits the size cap mid-run | appending stops, live stream continues, offsets keep advancing |
 
 ## Load sanity
 
@@ -120,6 +144,8 @@ Run on all three OSes:
 1. Launch a shell session, type, resize the window, exit cleanly.
 2. Launch an agent preset, let it run, close the browser, reopen, verify replay.
 3. Attach the phone over Tailscale Serve, take control, type, hand control back.
+   Put the desktop to sleep while it holds control, take control on the phone, wake the
+   desktop — the phone must keep control.
 4. Reboot the host; confirm Tailscale `--bg` sharing resumes and old sessions show
    `lost` with readable logs.
 5. Kill `teleportd`; restart; confirm the UI states the truth about what was lost.

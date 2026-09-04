@@ -34,6 +34,10 @@ three platforms.
 - `web/` Vite + Svelte + TS project
 - CLI: `--listen`, `--data-dir`, `--log-level`
 - `tracing` initialized; data dir resolution + creation with owner-only permissions
+- first-run generation of `device.json`, and `token` (256-bit, `0600`)
+- bind with ephemeral-port fallback; write `<data_dir>/port` (`0600`), remove on clean
+  shutdown ([08](08-packaging.md#port-discovery--do-not-hardcode-7337))
+- print the `http://127.0.0.1:<port>/?token=…` URL at startup
 - CI matrix: Linux / macOS / Windows, `cargo build` + `cargo test` + `cargo clippy -- -D warnings`
 
 **Gate:** green CI on all three platforms. Nothing else.
@@ -81,13 +85,16 @@ memory stays flat. Verified under 1 MB/s sustained output.
 **Deliver:** `log.rs` — append writer, range reader, offset accounting.
 
 - persist **before** advancing the offset, advance **before** fan-out
-- `file_length == next_offset` holds at all times
-- range reads clamp to `next_offset`
-- size cap + `log_capped` handling
+- `file_length == min(next_offset, log_capped_at)` holds at all times — the capped case
+  is the whole reason `log_capped_at` exists ([05](05-persistence.md#size-cap))
+- range reads clamp to `min(next_offset, log_capped_at)`
+- offsets **never rewind**, including across a restart of a capped session:
+  `output_bytes = max(len(output.vt), stored output_bytes)`
 
 **Gate:** disconnect exactly between output chunks, reconnect at the recorded offset,
 and verify byte-for-byte that the union of replay + live output equals the log — **no
-gaps, no duplicates**. Fuzz the attach point against a concurrent writer.
+gaps, no duplicates**. Fuzz the attach point against a concurrent writer. Then cap a log
+mid-stream, restart the daemon, and confirm `next_offset` did not move backwards.
 
 ---
 
@@ -107,12 +114,20 @@ gaps, no duplicates**. Fuzz the attach point against a concurrent writer.
 - Origin allowlist when `Origin` is present; credential when it is absent; Host
   allowlist always
 - `Authorization: Bearer` accepted on the WS upgrade as well as `?token=`
+- **token required by default**, including on loopback; constant-time compare
+  ([06](06-security.md#loopback-is-not-a-user-boundary))
+- `client_id` / `client_name` on attach; `ready` carries `cols`, `rows`,
+  `log_capped_at`, `controller`
+- **`mode=control` resumes, `claim_control` preempts**; `control_grace_ms` lease hold
+  across a controller's disconnect ([04](04-api-protocol.md#why-attach-must-not-preempt))
+- `max_sessions` enforced before spawn (`429`); `422` for an unresolvable executable
 - server Ping every 20 s, close on 60 s without Pong
 
 **Gate:** protocol tests pass. A scripted client can create a session, stream, drop,
 reconnect at an offset, and terminate — with no gap or duplicate. A client sending **no
 `Origin`** but a valid credential is accepted. Attaching with no cursor to a 500 MB log
-transfers `default_tail`, not 500 MB.
+transfers `default_tail`, not 500 MB. A second client reconnecting with `mode=control`
+does **not** take the lease from a client that claimed it in the meantime.
 
 ---
 
@@ -126,7 +141,13 @@ transfers `default_tail`, not 500 MB.
 - daemon serves `web/dist` with SPA fallback
 
 **Gate:** close the tab mid-agent-run, reopen, and the terminal shows a correct
-continuous transcript. Same behavior on a phone browser over the LAN.
+continuous transcript.
+
+> **Not** "the same on a phone over the LAN" — the daemon binds loopback and refuses
+> anything else without `--i-know-what-im-doing` ([06](06-security.md#listener)), and
+> Tailscale does not arrive until M9. Test a second *local* browser here; the phone is
+> the M9 gate. If you want the phone earlier, use the escape-hatch flag deliberately and
+> never let it become the development default.
 
 ---
 
@@ -229,6 +250,14 @@ where noted.
 | Addition | Milestone | Cost | Why now |
 |---|---|---|---|
 | Bounded attach (`tail`, `max_replay_bytes`) | M4 | ~half a day | Fixes a real bug — `after=0` on a large log replays everything. Mandatory for mobile. |
+| **Token on by default** + startup URL | M0/M4 | ~2 hours | A loopback socket is open to every OS user on the host. This is the one item that is a live security hole, not a seam. |
+| `log_capped_at` column + clamped reads | M3 | ~2 hours | Without it the cap breaks `file_length == next_offset` and a restart rewinds offsets clients already hold. |
+| `client_id` / `client_name` on attach | M4 | ~an hour | Required to name a controller and to let a dropped one resume. Unbuildable UI without it. |
+| Attach-never-preempts + lease grace | M4 | ~2 hours | Otherwise a reconnecting desktop silently steals control from a phone, and ping-pongs on a flaky link. |
+| `cols`/`rows` in `ready`, observers letterbox | M4/M5 | ~an hour | One PTY geometry; an observer fitting to its own viewport renders mis-wrapped output. |
+| Port file + ephemeral fallback | M0 | ~an hour | 7337 is not a guarantee; without it a second OS user's shell probes the wrong daemon. |
+| `max_sessions` cap | M4 | ~30 min | Nothing else stops a loop from creating ten thousand PTYs. |
+| Updater refuses to restart under load | M10 | ~an hour | Shipping an update is a daemon restart — the crash boundary on a schedule we control. |
 | `Principal` seam in `auth.rs` | M4 | ~an hour | Accounts become additive instead of an auth rewrite. |
 | Origin-optional for credentialed clients | M4 | ~an hour | Requiring `Origin` blocks every native client, permanently. |
 | `/health` `api_versions` + `capabilities` | M4 | ~an hour | App-store builds lag daemons; version skew is unavoidable. |
@@ -237,6 +266,9 @@ where noted.
 | Recent-cwd list in the launcher | M8 | ~half a day | Phone launching is unusable without it. |
 
 Everything else in docs 12–14 is **documentation only** and adds no MVP work.
+
+Total: roughly **two days**, and the first row is not optional — it closes a hole that
+exists the moment the daemon starts on any machine with more than one OS account.
 
 ## Definition of done
 
@@ -317,6 +349,9 @@ redoing pairing and key distribution for every enrolled device
 |---|---|---|---|
 | ConPTY shutdown deadlock on Win < 24H2 | Medium | High | Bounded waits on the control thread; nightly CI on an older Windows image; M1 gate covers close-under-load |
 | Offset gap/duplicate on reconnect | Medium | High | Single mutex over `{next_offset, subscribers}`; M3 fuzz gate |
+| Offsets rewind after a capped log restarts | Medium | High | `log_capped_at`; `max()` on recovery; M3 gate |
+| Local privilege escalation via the loopback port | High if unguarded | Critical | Token on by default, `0600`; M4 gate |
+| Control ping-pong between reconnecting clients | High if unguarded | Medium | Attach never preempts; lease grace; M4 gate |
 | `spawn_blocking` misuse starving Tokio | Medium | High | Dedicated threads only; grep the tree for `spawn_blocking` in review |
 | Slow phone backpressuring the PTY | High if unguarded | High | Bounded queues + disconnect; M2 gate |
 | Log disk exhaustion | Medium | Medium | Per-session cap + GC |

@@ -13,7 +13,8 @@ Two stores, because there are two data shapes: **relational metadata** and a
 ├── config.toml
 ├── presets.toml
 ├── device.json        # stable device_id / device_name, generated on first run
-├── token              # 0600, only when auth_token is enabled
+├── token              # 0600, the local access credential — generated on first run
+├── port               # 0600, the TCP port actually bound (see 08-packaging)
 └── sessions/
     ├── 01K4N4ZP6C5GJ17G6X47K0VJX3/
     │   └── output.vt
@@ -55,6 +56,7 @@ CREATE TABLE sessions (
     rows            INTEGER NOT NULL,
 
     output_bytes    INTEGER NOT NULL DEFAULT 0,
+    log_capped_at   INTEGER,
 
     created_at_ms   INTEGER NOT NULL,
     started_at_ms   INTEGER,
@@ -80,6 +82,14 @@ CREATE INDEX idx_events_session   ON session_events(session_id, event_id);
 
 `lost_reason` ∈ `daemon_restart | spawn_failed | kill_timeout | io_error` (null
 otherwise).
+
+`io_error` is the one reason that can be set **while the child is still alive** — a
+failed append does not kill the process. The session stays `running` with
+`lost_reason='io_error'` and stops persisting output; it transitions to `exited` or
+`lost` normally. Every other reason accompanies a terminal state.
+
+`log_capped_at` is null until the log hits `log_max_bytes`, then holds the offset at
+which persistence stopped. See [Size cap](#size-cap).
 
 `event_type` ∈ `created | started | resized | control_granted | control_revoked |
 subscriber_attached | subscriber_detached | slow_consumer | terminate_requested |
@@ -136,6 +146,16 @@ If read latency ever becomes measurable, add read-only connections then — not 
 `output.vt` is raw PTY bytes, appended, never rewritten. No framing, no headers, no
 escaping. `file_length == next_offset`. That identity is the entire replay index.
 
+There is exactly one exception — a capped log — and it is the reason `log_capped_at`
+exists. The general form of the invariant, which is the one to assert in tests:
+
+```text
+file_length == min(next_offset, log_capped_at)      # log_capped_at = ∞ when null
+```
+
+Offsets are handed out by the reader loop and **never rewind**, capped or not. What a
+cap changes is only whether the bytes behind an offset are still on disk.
+
 **Writes:**
 
 - Buffered append; `write_all` per chunk.
@@ -157,11 +177,24 @@ loop). Policy:
 | Threshold | Behavior |
 |---|---|
 | `log_warn_bytes` (default 256 MiB) | emit a `session_events` warning; UI shows a badge |
-| `log_max_bytes` (default 1 GiB) | stop appending; set `log_capped = 1`; **keep streaming live output** |
+| `log_max_bytes` (default 1 GiB) | stop appending; set `log_capped_at = next_offset`; **keep streaming live output** |
 
-Offsets stay monotonic forever. Replay works normally up to the cap point; beyond it,
-the daemon reports a gap in `ready` rather than silently serving wrong bytes. Never
-truncate from the head — that would invalidate every offset in flight.
+Never truncate from the head — that would invalidate every offset in flight.
+
+Once `log_capped_at` is set, the file stops growing while `next_offset` keeps
+advancing. Everything that reads the log must respect that:
+
+```text
+replay range          → clamped to [from, min(to, log_capped_at))
+after >= capped_at    → no replay at all; ready reports replay_from = next_offset
+/log                  → serves up to log_capped_at, then stops
+ready                 → carries log_capped_at so the client can render the gap
+```
+
+The bytes between `log_capped_at` and `next_offset` were streamed live to whoever was
+attached and are **gone**. That is a real hole in history, and the API says so rather
+than serving whatever happens to be at that file position
+([04-api-protocol.md](04-api-protocol.md#bounded-attach)).
 
 ### Garbage collection
 
@@ -191,11 +224,18 @@ for each row where state IN ('running','closing'):
         append session_events(lost)
     ↓
 for every session directory:
-        output_bytes = actual length of output.vt      ← file wins
+        output_bytes = max(len(output.vt), stored output_bytes)
 ```
 
-**Trust the file's real length over a possibly-stale `output_bytes` column.** The
-column is updated periodically and can lag a crash by seconds; the file cannot lie.
+**Take the larger of the two.** For a normal log the column lags a crash by seconds and
+the file wins — the file cannot lie about bytes it holds. For a *capped* log the file
+stopped growing while the column kept counting, so the column wins. Taking the file
+length unconditionally would rewind `next_offset` below offsets already handed to live
+clients, which turns every reconnecting client into an `offset_ahead` error and makes
+the daemon hand out offsets it has already used.
+
+A recovered session is `lost` and will never produce another byte, so the few seconds
+of column lag on a capped session cost nothing.
 
 There is no PTY reattachment in MVP. See
 [01-architecture.md](01-architecture.md#the-crash-boundary) for what would change that

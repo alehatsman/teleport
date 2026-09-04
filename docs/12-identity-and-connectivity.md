@@ -16,8 +16,8 @@ Get that right in M4 and stages 2 and 3 are additive. Get it wrong and auth is a
 |---|---|---|---|
 | **Ships in** | MVP (M0–M8) | MVP (M9) | v2 |
 | **Reachability** | `127.0.0.1` only | Tailscale Serve / Cloudflare Tunnel | Outbound relay |
-| **Who can connect** | anyone on the host | tailnet members / Access-approved | account members |
-| **Credential** | none (loopback is the boundary) | transport identity, optional bearer token | account session + device credential |
+| **Who can connect** | any OS user on the host who holds the token | tailnet members / Access-approved | account members |
+| **Credential** | bearer token, `0600` in the data dir | same token + transport identity | account session + device credential |
 | **Principal** | `LocalUser` | `LocalUser` or `DeviceToken` | `Account { user, device }` |
 | **Cloud needed** | no | no (user's own Tailscale/CF) | yes ([14-cloud-backend.md](14-cloud-backend.md)) |
 | **Native apps work** | on-host only | yes, over the tailnet | yes, anywhere |
@@ -30,7 +30,9 @@ enterprise policy), not a legacy path.
 
 ```rust
 enum Principal {
-    /// Connection arrived on loopback. The OS user boundary is the auth boundary.
+    /// Presented the local token from <data_dir>/token, which only the owning
+    /// OS user can read. That file permission — not the loopback bind — is the
+    /// user boundary. See 06-security.md#loopback-is-not-a-user-boundary.
     LocalUser,
 
     /// Presented a valid bearer token from <data_dir>/token.
@@ -72,10 +74,16 @@ The correct rule, replacing "missing Origin is rejected":
 
 ```text
 if Origin present  → must be in the allowlist (a browser is talking; enforce it)
-if Origin absent   → must present a credential (not a browser; loopback alone is
-                     sufficient only in stage 1)
+if Origin absent   → must present a credential (not a browser)
 always             → Host must be in the allowlist
 ```
+
+> An earlier draft of this rule said loopback alone was sufficient in stage 1. It is
+> not — a loopback socket is open to every OS user on the machine, so "arrived on
+> loopback" proves nothing about *who* is calling
+> ([06-security.md](06-security.md#loopback-is-not-a-user-boundary)). Stage 1 requires
+> the token like every other stage; what changes across stages is only how a client
+> obtains one.
 
 A missing `Origin` is not suspicious. A missing `Origin` **and** a missing credential
 is. See [06-security.md](06-security.md#browser-origin-defense).

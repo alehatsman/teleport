@@ -37,14 +37,20 @@ type StreamState = "connecting" | "replaying" | "live" | "reconnecting" | "close
 class SessionStream {
   private nextOffset = 0;          // bytes consumed so far — the reconnect cursor
   private backoff = 250;           // ms, →8000 with jitter
+  private wantControl = false;     // sticky user intent, not connection state
 
-  connect(mode: "control" | "observe") {
+  connect() {
     // With a cursor, resume exactly. Without one, take a bounded tail —
     // never after=0, which asks for the entire log.
     const cursor = this.hasCursor ? `after=${this.nextOffset}` : `tail=${DEFAULT_TAIL}`;
 
+    // mode=control asks to *resume* a lease; it never preempts. Safe on reconnect.
+    const mode = this.wantControl ? "control" : "observe";
+
     const ws = new WebSocket(
-      `${wsBase}/api/v1/sessions/${this.id}/stream?${cursor}&mode=${mode}`
+      `${wsBase}/api/v1/sessions/${this.id}/stream` +
+        `?${cursor}&mode=${mode}&client_id=${CLIENT_ID}` +
+        `&client_name=${encodeURIComponent(CLIENT_NAME)}&token=${TOKEN}`
     );
     ws.binaryType = "arraybuffer";
     // ...
@@ -53,7 +59,15 @@ class SessionStream {
   private onReady(msg: ReadyFrame) {
     this.nextOffset = msg.replay_from;   // trust the server's replay start
     this.hasCursor = true;
+    this.hasControl = msg.control;       // may be false even when we asked
+    this.setPtySize(msg.cols, msg.rows); // observers letterbox to this
     if (msg.truncated) this.onTruncated(); // → term.reset() before the first chunk
+  }
+
+  // Explicit user action only. This is the one call that preempts.
+  takeControl() {
+    this.wantControl = true;
+    this.send({ type: "claim_control" });
   }
 
   private onBinary(buf: ArrayBuffer) {
@@ -87,6 +101,44 @@ Rules:
   sequence. Reset fixes the state and costs at most one garbled line. Show a
   "scrollback truncated" marker with a link to the full `/log`.
 - On `slow_consumer` (close 1013), reconnect normally — it is an expected event.
+- **Reconnect never preempts.** `mode=control` on attach asks the server to give back a
+  lease that is still ours during the grace window; if someone else took control while
+  we were offline, `ready` comes back `control:false` and we render as an observer.
+  Never auto-send `claim_control` on reconnect — that steals the terminal back from
+  whoever is using it ([04-api-protocol.md](04-api-protocol.md#why-attach-must-not-preempt)).
+- `wantControl` is **user intent** and survives reconnects; `hasControl` is what the
+  server last told us. Never conflate them.
+
+## Client identity and token
+
+```ts
+// generated once, persisted forever
+const CLIENT_ID   = localStorage.getItem("client_id") ?? crypto.randomUUID();
+const CLIENT_NAME = localStorage.getItem("client_name") ?? defaultName();  // "Chrome on macOS"
+```
+
+`client_id` is what lets a dropped controller resume its own lease and what names the
+controller in everyone else's UI. It is **not** a credential.
+
+The token is. The daemon prints a `?token=…` URL at startup; on first load the SPA
+stores the token and **strips it from the address bar** (`history.replaceState`) so it
+does not sit in the URL or leak through `Referer`
+([06-security.md](06-security.md#token-on-the-websocket-upgrade)).
+
+## Geometry
+
+There is exactly one PTY size per session and only the controller sets it. Observers
+must render *that* size, not their own viewport:
+
+| Role | Behavior |
+|---|---|
+| Controller | `fitAddon.fit()` to the viewport, then send `resize`, debounced 150 ms |
+| Observer | **do not fit.** Set the terminal to `ready`'s `cols`/`rows` and scale/letterbox the container to fit |
+
+`ready` carries the current `cols`/`rows`, and `resized` carries every change. An
+observer that fits to its own viewport renders output that was wrapped for a different
+width — a 160-column desktop watching a phone-sized PTY looks broken, and it is the
+first thing anyone notices when two devices watch one session.
 
 ## `Terminal.svelte`
 
@@ -96,6 +148,8 @@ Rules:
 - `term.onData(d => stream.sendInput(d))` — only when this client holds the lease.
 - Resize: `fitAddon.fit()` on container resize, then send
   `{"type":"resize",...}` **only if this client is the controller**. Debounce 150 ms.
+  An observer resizes its terminal to the PTY's `cols`/`rows` instead — see
+  [Geometry](#geometry).
 - Cap scrollback (`scrollback: 10000`). Deep history lives in `/log`, not in RAM.
 - Dispose the terminal and close the WebSocket on component destroy.
 
@@ -108,7 +162,8 @@ visible, never ambiguous:
 |---|---|
 | This client controls | normal cursor, input enabled, badge "Controlling" |
 | Observing | input disabled, dimmed cursor, prominent **Take control** button |
-| Control revoked | toast "Control taken by <client>", switch to observing, no data loss |
+| Control revoked | toast "Control taken by <client_name>", switch to observing, no data loss |
+| Asked for control, didn't get it | attach succeeded as observer; no toast, just the Take control button |
 
 Claims are preemptive — one tap, no negotiation, no confirmation dialog. That is the
 point: grabbing a runaway agent from a phone must be instant.
@@ -118,8 +173,10 @@ point: grabbing a runaway agent from a phone must be instant.
 The phone uses the **same SPA**. No separate mobile API, no native app.
 
 - Responsive layout: session list collapses to a sheet; terminal is full-bleed.
-- The terminal is small on a phone. Resize only when controlling, and expect the
-  desktop to reclaim control and resize back — that is correct behavior, not a bug.
+- The terminal is small on a phone. Resize only when controlling; when the desktop
+  deliberately takes control back it resizes to its own geometry and the phone
+  letterboxes to it ([Geometry](#geometry)). What must *not* happen is the desktop
+  reclaiming control merely by reconnecting.
 - Provide a key bar for what a soft keyboard cannot send: `Esc`, `Tab`, `Ctrl`, arrows,
   `Ctrl-C`.
 - Handle `visibilitychange`: on resume, the socket is likely dead — reconnect

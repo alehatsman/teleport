@@ -115,7 +115,9 @@ Response `201`:
 }
 ```
 
-Errors: `400` validation, `404` executable/cwd not found, `500` spawn failure.
+Errors: `400` malformed body, `422` executable not found on `PATH` / `cwd` is not a
+directory, `500` spawn failure. **Not `404`** — the collection exists; the request is
+unprocessable. Reserve `404` for an unknown session id.
 Spawn failure still records a row (`state=exited`, `lost_reason="spawn_failed"`) so the
 UI can show why.
 
@@ -141,7 +143,7 @@ UI can show why.
       "exited_at_ms": null,
       "exit_code": null,
       "lost_reason": null,
-      "controller": "desktop-a1b2",
+      "controller": "aleh's laptop",
       "subscribers": 2
     }
   ]
@@ -192,9 +194,23 @@ GET /api/v1/sessions/{id}/stream?after=<u64>|tail=<bytes>&mode=control|observe
 |---|---|---|
 | `after` | — | byte offset the client has already consumed; replay starts here |
 | `tail` | `1048576` | replay only the last N bytes; used when the client has no cursor |
-| `mode` | `observe` | `control` requests the input/resize lease |
+| `mode` | `observe` | `control` requests the lease **without preempting** — see [Control lease](#control-lease) |
+| `client_id` | — | stable opaque id for this client install; required |
+| `client_name` | `client_id` prefix | human label shown in the UI (`"aleh's phone"`) |
 
 `after` and `tail` are mutually exclusive. Supplying neither means `tail=1 MiB`.
+
+### Client identity
+
+`client_id` is generated **by the client** on first run and persisted (localStorage in
+the browser, keychain/preferences on native) — a ULID or UUID, opaque to the daemon. It
+is not a credential and grants nothing; authentication is separate
+([06-security.md](06-security.md#authentication)).
+
+It exists because two things need it and neither works without it: naming the current
+controller in the UI (`"Control taken by aleh's phone"`), and letting a controller that
+dropped off Wi-Fi resume its own lease instead of racing for it. A client that omits it
+gets a per-connection ephemeral id and loses lease resumption.
 See [Bounded attach](#bounded-attach) — an unbounded default here is a bug, not a
 convenience.
 
@@ -235,14 +251,18 @@ Server → client:
   "replay_from":183296,
   "next_offset":184221,
   "truncated":false,
-  "control":true
+  "log_capped_at":null,
+  "cols":120,
+  "rows":36,
+  "control":true,
+  "controller":"aleh's phone"
 }
 ```
 ```json
 {"type":"control_granted"}
 ```
 ```json
-{"type":"control_revoked","to":"phone-9f3c"}
+{"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}
 ```
 ```json
 {"type":"resized","cols":120,"rows":36}
@@ -257,7 +277,15 @@ Server → client:
 `ready` is always the first frame after upgrade. `next_offset` tells the client where
 the live stream begins, so it can detect that replay is complete. `replay_from` is where
 replay actually started and `truncated` says whether the daemon clamped it — see
-[Bounded attach](#bounded-attach).
+[Bounded attach](#bounded-attach). `log_capped_at` is non-null only for a log that hit
+its size cap ([05-persistence.md](05-persistence.md#size-cap)).
+
+**`cols` and `rows` are the PTY's current size, and every client needs them — observers
+most of all.** There is exactly one PTY geometry per session and only the controller
+sets it, so an observer that sizes its emulator to its own viewport renders output
+wrapped for a different width. Observers letterbox to the PTY size instead
+([09-frontend.md](09-frontend.md#geometry)). The same values arrive in `resized`
+whenever the controller changes them.
 
 ## Offsets are the replay index
 
@@ -360,15 +388,49 @@ let the client restart from `0`.
 ## Control lease
 
 - Exactly one controller per session, or none.
-- `mode=control` on attach requests the lease; `claim_control` requests it later.
-- **Claims are preemptive** — the newest claimant wins. The previous controller receives
-  `control_revoked` and silently becomes an observer. This keeps "Take control" on a
-  phone a one-tap action with no negotiation round trip.
+- **`claim_control` preempts. `mode=control` on attach does not.** That distinction is
+  the whole design; see below.
 - Input or resize from a non-controller is dropped with an `error` frame. It is never
   buffered and never applied later.
-- When the controller disconnects, the lease is released. It is **not** auto-granted to
-  another observer; the next attach with `mode=control` or an explicit `claim_control`
-  takes it.
+
+### Why attach must not preempt
+
+`claim_control` is an explicit human action — a tap on "Take control" — and it wins
+immediately. The previous controller receives `control_revoked` and silently becomes an
+observer. No negotiation, no confirmation dialog: grabbing a runaway agent from a phone
+has to be one tap.
+
+Attaching is **not** a human action. Clients reconnect on their own, constantly, after
+every sleep and tunnel drop. If `mode=control` preempted, this would happen:
+
+```text
+desktop holds control → laptop sleeps → socket dies
+phone taps "Take control"              → phone is controller
+laptop wakes, reconnects mode=control  → silently steals it back, mid-keystroke
+```
+
+On a flaky link that ping-pongs indefinitely, and it is exactly the multi-device
+scenario the product exists for. So `mode=control` means *"give me the lease if it is
+mine to take"*, and grants only when:
+
+```text
+the lease is free and unheld by a grace holder, or
+the grace holder is this client_id
+```
+
+Otherwise the attach succeeds as an observer with `control:false`, and the user can tap
+to preempt deliberately.
+
+### Disconnect grace
+
+When a controller's socket drops, the lease is **not** released immediately. It is held
+for `control_grace_ms` (config, default 15000) against that `client_id`, so an ordinary
+reconnect resumes control rather than racing for it.
+
+During the grace window the lease is still preemptible — `claim_control` from any other
+client takes it instantly, and the grace holder loses its claim permanently. Grace only
+protects against nobody else wanting it. When the window expires with no reconnect, the
+lease goes free; it is **never** auto-granted to a waiting observer.
 
 ## Full lifecycle
 
@@ -438,3 +500,4 @@ error.
 | `session_closing` | input during termination | disable input |
 | `slow_consumer` | queue overflow (WS close 1013) | reconnect with backoff from last offset |
 | `bad_origin` | Origin/Host rejected | hard failure, do not retry |
+| `unauthorized` | missing or invalid credential | prompt for the token / re-pair |

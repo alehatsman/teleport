@@ -11,6 +11,8 @@ teleportd never runs as root / Administrator
              +
 loopback-only listener
              +
+a credential on every request — including on loopback
+             +
 authenticated remote transport
              +
 strict browser Origin allowlist
@@ -22,7 +24,7 @@ no shell-command string concatenation
 logs and config readable only by owning OS user
 ```
 
-All seven. None is optional, and none substitutes for another.
+All eight. None is optional, and none substitutes for another.
 
 ## Listener
 
@@ -34,6 +36,29 @@ Remote reachability comes from Tailscale Serve or Cloudflare Tunnel
 ([07-remote-access.md](07-remote-access.md)), never from widening the bind. This also
 matters for identity headers: forwarded-identity headers are only trustworthy when the
 backend is loopback-bound, because otherwise a direct caller can forge them.
+
+## Loopback is not a user boundary
+
+**A TCP listener on `127.0.0.1` is reachable by every OS user on the host, not just the
+one who started the daemon.** There is no `SO_PEERCRED` on it, no ACL, nothing. On a
+shared workstation, a build box, a Mac with a second account, or any machine with an
+unprivileged service account, "loopback-only" means *any local user gets arbitrary code
+execution as you*.
+
+This is why the credential above is not optional and not a remote-access feature. The
+file permission on `<data_dir>/token` (`0600`) **is** the OS user boundary. The listener
+is not.
+
+Two ways to enforce it. The MVP takes the first:
+
+| Approach | Enforcement | Cost |
+|---|---|---|
+| **Bearer token, on by default** | `0600` file only the owning user can read | ~2h, no new listener code |
+| Unix socket + `SO_PEERCRED` / named pipe | kernel-verified peer uid | correct, but a second listener type and no browser support |
+
+A Unix domain socket is the stronger answer and stays available later. It cannot be the
+only path, because browsers cannot open one — so the token is required regardless, and
+building both for the MVP buys nothing.
 
 ## Privilege
 
@@ -92,18 +117,44 @@ allowlist explicit and small.
 > "Identity belongs to the transport" is true of **stages 1 and 2**, not forever. Write
 > it as a stage, not a principle.
 
-MVP: loopback binding + Origin/Host checks + an authenticated transport for remote
-access. That is the documented baseline.
+MVP baseline: loopback binding + Origin/Host checks + **a bearer token that is on by
+default**, including on loopback ([Loopback is not a user
+boundary](#loopback-is-not-a-user-boundary)).
 
-Optional and recommended once the daemon is reachable beyond loopback — a **bearer
-token**:
-
-- Generated on first run into `<data_dir>/token`, mode `0600`.
+- Generated on first run into `<data_dir>/token`, mode `0600`. 256 bits from the OS
+  CSPRNG.
+- Required on every `/api/v1` request except unauthenticated `/health`, which exists
+  precisely so the desktop shell can probe before it holds a credential
+  ([04-api-protocol.md](04-api-protocol.md#get-apiv1health)).
 - Sent as `Authorization: Bearer <token>` on HTTP **and on the WebSocket upgrade**.
-  Accept `?token=` on the upgrade as well, because the browser `WebSocket` API cannot
-  set headers — but native clients can and should use the header. Support both.
 - Compared in **constant time**. A naive `==` on a secret is a timing oracle.
-- Enabled by `--auth-token` or `config.toml`; off by default for pure-loopback use.
+- `auth_token = false` disables it. Document it as a single-user-machine convenience and
+  warn loudly at startup; do not make it the default it used to be.
+
+**How each client gets the token:**
+
+| Client | Path |
+|---|---|
+| Local browser | daemon prints `http://127.0.0.1:<port>/?token=…` at startup; the SPA stores it and strips it from the URL |
+| Tauri shell | reads `<data_dir>/token` directly — same OS user, same file permission |
+| Remote browser | the startup URL, copied once; thereafter the transport (Tailscale/Access) is the outer gate |
+| Native app (v2) | pairing, never a copied token ([12-identity-and-connectivity.md](12-identity-and-connectivity.md#stage-3-pairing)) |
+
+### `?token=` on the WebSocket upgrade
+
+The browser `WebSocket` API cannot set headers, so a query parameter is the only way a
+browser can authenticate an upgrade. Accept it — and know what it costs: query strings
+land in proxy logs, browser history, and `Referer` headers.
+
+Mitigations, in order of preference:
+
+1. **Native clients must use the header.** They have no excuse.
+2. **Short-lived ticket.** `POST /api/v1/ws-ticket` with the bearer header returns a
+   single-use, 30-second token; the browser puts *that* in the query string. The
+   long-lived secret never enters a URL. Cheap, and the right shape for v2 anyway.
+3. Long-lived token in the query string — acceptable only for a purely local origin.
+
+Ship 1 and 3 in the MVP; add 2 before the daemon is routinely reachable off-host.
 
 A custom username/password system is explicitly out of scope for the MVP
 ([11-mvp-plan.md](11-mvp-plan.md#out-of-scope)). When accounts arrive they come from the
@@ -117,9 +168,13 @@ cloud backend — passkeys or OAuth, never hand-rolled passwords
 - A shell may legitimately be the `command` when the user explicitly asks for shell
   parsing. That is a user choice expressed in `command`, not a daemon behavior.
 - Validate `cwd` exists and is a directory before spawning. Do not create it.
-- Validate the executable resolves. Report "not found" as a clean `404`, not a spawn
-  panic.
+- Validate the executable resolves. Report "not found" as a clean `422`, not a spawn
+  panic ([04-api-protocol.md](04-api-protocol.md#post-apiv1sessions)).
 - Reject `cols`/`rows` outside `1..=1000`.
+- Enforce `max_sessions` (config, default 50) before spawning. The product runs
+  arbitrary commands by design, but nothing about that requires letting a loop create
+  ten thousand PTYs; each one costs a thread pair, a file handle and a directory.
+  Refuse with `429` and a clear message rather than discovering the limit as an OOM.
 
 There is no allowlist of runnable commands. The product's purpose is running arbitrary
 commands; a bypassable allowlist would be security theater. The real boundary is *who
@@ -157,6 +212,10 @@ print by accident. Therefore:
 | Malicious web page hits `127.0.0.1` | Origin allowlist on mutating HTTP + all WS upgrades (browser clients) |
 | Non-browser client bypassing the Origin check | Credential required whenever `Origin` is absent |
 | DNS rebinding | Host header allowlist |
+| **Another OS user on the same host** | **Bearer token on by default; `0600` token file** |
+| Token leaked via URL/proxy logs | Header for native clients; short-lived WS ticket |
+| PTY exhaustion / fork storm via the API | `max_sessions` cap, refused with `429` |
+| Control-lease theft by a reconnecting client | Attach never preempts; only explicit `claim_control` does ([04](04-api-protocol.md#why-attach-must-not-preempt)) |
 | Internet-wide exposure | Loopback bind; Tailscale Serve (tailnet-only) as default remote path |
 | Forged identity headers | Trust forwarded identity only because the listener is loopback-only |
 | Token theft via timing | Constant-time comparison |

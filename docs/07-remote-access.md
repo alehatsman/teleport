@@ -117,7 +117,9 @@ not build tooling for it.
 listen          = "127.0.0.1:7337"
 allowed_origins = ["https://desktop.tail1234.ts.net"]
 allowed_hosts   = ["desktop.tail1234.ts.net"]
-auth_token      = false        # true enables bearer-token auth
+auth_token      = true         # ON by default — loopback is not a user boundary
+max_sessions    = 50           # refuse further spawns with 429
+control_grace_ms = 15000       # a dropped controller may resume its lease this long
 retain_days     = 14
 default_tail    = 1048576      # 1 MiB — replay when a client has no cursor
 max_replay_bytes = 8388608     # 8 MiB — hard cap on any replay

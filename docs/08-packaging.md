@@ -42,22 +42,59 @@ Startup logic in the shell:
 ```text
 app launches
     ↓
-GET http://127.0.0.1:7337/api/v1/health
+read <data_dir>/port and <data_dir>/token
     ↓
-├── 200 OK  → attach to the existing daemon, open the UI
+GET http://127.0.0.1:<port>/api/v1/health   (unauthenticated shape)
+    ↓
+├── 200 + matching device_id → attach to the existing daemon, open the UI
 │
-└── refused → start teleportd detached
-                 (not as a child that dies with the GUI)
-                 ↓
-              poll /health for up to 10 s
-                 ↓
-              ├── ok    → open the UI
-              └── fail  → show the daemon log, offer a retry
+└── refused / no port file   → start teleportd detached
+                                 (not as a child that dies with the GUI)
+                                 ↓
+                              poll for the port file, then /health, up to 10 s
+                                 ↓
+                              ├── ok    → open the UI
+                              └── fail  → show the daemon log, offer a retry
 ```
 
 On quit, the shell closes its window. **It does not stop the daemon.** Stopping the
 daemon is an explicit user action in the tray menu, with a confirmation naming how many
 sessions will be lost.
+
+### Port discovery — do not hardcode 7337
+
+`7337` is the default, not a guarantee. Two OS users on one machine both want it, and
+so does whatever else happens to be listening. The daemon:
+
+1. tries the configured port;
+2. on `EADDRINUSE`, falls back to an ephemeral port (`127.0.0.1:0`);
+3. writes the port it actually bound to `<data_dir>/port`, mode `0600`, and removes the
+   file on clean shutdown.
+
+Clients read that file rather than assuming. This matters beyond convenience: with a
+hardcoded port, a shell whose own daemon failed to bind would happily health-check and
+attach to **a different OS user's daemon**
+([06-security.md](06-security.md#loopback-is-not-a-user-boundary)). The token check
+stops it from doing damage; the port file stops it from trying.
+
+### Updates must not kill sessions
+
+The crash boundary ([01-architecture.md](01-architecture.md#the-crash-boundary)) is
+usually discussed as though crashes were the only way to lose a session. They are not.
+**Shipping an update is a daemon restart**, and it is the one that happens on a schedule
+we control — the updater replaces the `teleportd` sidecar, the daemon restarts, and
+every running agent dies.
+
+Rules for the updater:
+
+- Never restart the daemon while sessions are `running`. Stage the new binary and apply
+  it on the next start when no session is live.
+- If the user asks to update now, use the tray-quit confirmation: name the session count
+  and make them confirm.
+- Updating the **shell** alone is always safe — the WebView is disposable, which is the
+  entire point of keeping the daemon out of the GUI process.
+- A daemon that must restart marks its sessions `lost` / `daemon_restart` like any other
+  restart. The UI states the truth; it never pretends a session survived.
 
 ### Autostart at login
 
@@ -102,8 +139,8 @@ behavior.
 | Windows | Authenticode certificate; unsigned installers trip SmartScreen |
 | Linux | No mandatory signing; sign the repo/AppImage if distributing one |
 
-Set up signing infrastructure at M8, not at release. It routinely takes longer than the
-feature work it gates.
+Set up signing infrastructure at the start of M10 (the Tauri milestone), not at
+release. It routinely takes longer than the feature work it gates.
 
 ## Electron, if the stack ever changes
 

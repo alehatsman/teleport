@@ -253,7 +253,12 @@ tied to `HPCON` and its streams, and explicit closure has process-tree effects.
 | Desktop UI quits | survives | survives | survives |
 | Tailscale restarts (`--bg`) | survives | survives | survives |
 | `teleportd` crashes | **lost** | survives | survives |
+| `teleportd` **updated** | **lost** | survives | survives |
 | Host reboots | **lost** | survives | survives |
+
+The update row is the one that bites in practice. A crash is rare; shipping a new
+version is routine, and it has the same blast radius. The updater therefore refuses to
+restart a daemon with running sessions ([08-packaging.md](08-packaging.md#updates-must-not-kill-sessions)).
 
 On restart, any session still marked `running` with no live PTY becomes:
 
