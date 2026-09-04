@@ -31,6 +31,9 @@ pub const DEFAULT_CONTROL_GRACE_MS: u64 = 15_000;
 /// Refuse further spawns past this many concurrent sessions
 /// (docs/06-security.md#process-spawning).
 pub const DEFAULT_MAX_SESSIONS: usize = 50;
+/// GC deletes an `exited`/`lost` session's directory + row once its
+/// `exited_at_ms` is this many days old (docs/05-persistence.md#garbage-collection).
+pub const DEFAULT_RETAIN_DAYS: u64 = 14;
 
 /// The on-disk shape. Every field optional so a partial file is valid;
 /// [`Config::load`] layers it onto [`Config::default`].
@@ -45,6 +48,7 @@ struct ConfigFile {
     max_replay_bytes: Option<u64>,
     log_warn_bytes: Option<u64>,
     log_max_bytes: Option<u64>,
+    retain_days: Option<u64>,
 }
 
 /// The resolved configuration every other module reads from -- no `Option`s,
@@ -68,6 +72,8 @@ pub struct Config {
     pub max_replay_bytes: u64,
     pub log_warn_bytes: u64,
     pub log_max_bytes: u64,
+    /// GC threshold, in days since `exited_at_ms` (docs/05-persistence.md#garbage-collection).
+    pub retain_days: u64,
 }
 
 impl Default for Config {
@@ -82,6 +88,7 @@ impl Default for Config {
             max_replay_bytes: DEFAULT_MAX_REPLAY_BYTES,
             log_warn_bytes: DEFAULT_LOG_WARN_BYTES,
             log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            retain_days: DEFAULT_RETAIN_DAYS,
         }
     }
 }
@@ -110,6 +117,7 @@ impl Config {
             max_replay_bytes: file.max_replay_bytes.unwrap_or(defaults.max_replay_bytes),
             log_warn_bytes: file.log_warn_bytes.unwrap_or(defaults.log_warn_bytes),
             log_max_bytes: file.log_max_bytes.unwrap_or(defaults.log_max_bytes),
+            retain_days: file.retain_days.unwrap_or(defaults.retain_days),
         })
     }
 }

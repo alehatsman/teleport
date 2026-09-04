@@ -10,7 +10,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -95,6 +95,20 @@ async fn main() -> Result<()> {
     let config = config::Config::load(&data_dir)?;
     let presets = presets::load_or_create(&data_dir)?;
 
+    let sessions_root = data_dir.join("sessions");
+    // docs/01-architecture.md#startup-sequence: open SQLite, run migrations,
+    // mark stale sessions lost, reconcile output_bytes -- all before binding,
+    // so nothing can attach to a session the daemon hasn't finished
+    // recovering yet.
+    let (db, recovery) =
+        teleportd::persistence::Db::open(&data_dir.join("state.db"), &sessions_root)?;
+    if recovery.recovered_lost > 0 {
+        warn!(
+            count = recovery.recovered_lost,
+            "sessions recovered as lost after a restart"
+        );
+    }
+
     let listener = bind_with_fallback(cli.listen).await?;
     let bound_addr = listener
         .local_addr()
@@ -114,8 +128,10 @@ async fn main() -> Result<()> {
         max_bytes: config.log_max_bytes,
         ..LogLimits::default()
     };
-    let sessions = SessionManager::with_limits(data_dir.join("sessions"), log_limits)
-        .with_max_sessions(config.max_sessions);
+    let sessions = SessionManager::with_limits(sessions_root.clone(), log_limits)
+        .with_max_sessions(config.max_sessions)
+        .with_db(db.clone());
+    spawn_gc_task(db.clone(), sessions_root, config.retain_days);
     // The Vite dev origin is only ever legitimate against a debug build of
     // this binary itself (docs/06-security.md#browser-origin-defense).
     let origin_policy = OriginPolicy::new(
@@ -135,6 +151,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         sessions,
+        db: Some(db),
         origin_policy,
         token,
         presets,
@@ -259,6 +276,52 @@ fn remove_port_file(data_dir: &Path) -> Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
     }
+}
+
+/// Runs once at startup and then every 6 hours for the life of the process
+/// (docs/05-persistence.md#garbage-collection): every `exited`/`lost` row
+/// whose `exited_at_ms` is older than `retain_days` has its directory
+/// deleted, then its row -- directory first, so a crash mid-GC leaves a row
+/// with no log rather than a log with no row. Detached (`tokio::spawn`, not
+/// awaited) -- GC is background housekeeping, not on any request path.
+fn spawn_gc_task(db: teleportd::persistence::Db, sessions_root: PathBuf, retain_days: u64) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        loop {
+            interval.tick().await;
+            run_gc_pass(&db, &sessions_root, retain_days).await;
+        }
+    });
+}
+
+async fn run_gc_pass(db: &teleportd::persistence::Db, sessions_root: &Path, retain_days: u64) {
+    let cutoff_ms = now_ms() - retain_days as i64 * 24 * 60 * 60 * 1000;
+    let candidates = match db.gc_candidates(cutoff_ms).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "listing GC candidates failed");
+            return;
+        }
+    };
+    for row in candidates {
+        let dir = sessions_root.join(&row.id);
+        if let Err(e) = fs::remove_dir_all(&dir) {
+            if e.kind() != io::ErrorKind::NotFound {
+                warn!(session_id = %row.id, error = %e, "GC: removing session directory failed");
+                continue; // row stays -- retried next pass, never deleted without its directory gone first.
+            }
+        }
+        if let Err(e) = db.delete_session(&row.id).await {
+            warn!(session_id = %row.id, error = %e, "GC: deleting session row failed");
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_millis() as i64
 }
 
 /// Resolves once Ctrl+C or (Unix only) SIGTERM is received.

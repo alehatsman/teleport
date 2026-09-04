@@ -152,6 +152,7 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
     );
     let state = Arc::new(AppState {
         sessions,
+        db: None,
         origin_policy,
         token: TOKEN.to_string(),
         presets: vec![],
