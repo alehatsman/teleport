@@ -118,42 +118,60 @@ shutdown path a graceful exit goes through) is observed. This is a property of
 ConPTY / the Windows console subsystem itself, not of any particular child program —
 narrows the search, but also means "swap the binary" is exhausted as an avenue.
 
-**Still open:** whether the child process is genuinely still resident (its own
-`ExitProcess` call itself blocked on some ConPTY-side cooperative shutdown/console
-handoff, so the OS legitimately still shows it as running) or the OS has already
-torn it down and this is a lost wakeup on `WaitForSingleObject`/`GetExitCodeProcess`
-against a stale handle. These have very different implications: the former means
-Windows is quietly holding the process open forever unless something forces it
-(possibly a resource leak beyond just "session shows as running"); the latter would
-be more surprising but narrower. Not yet tried:
+**Resolved: the process is genuinely still resident, not a lost wakeup
+(2026-09-04).** While `s5_minimal.exe exit0` was hung, `Get-Process -Name
+mini_exit` from a separate PowerShell session showed it alive and idle:
 
-- **Live inspection during a hang** — the most direct way to settle the question
-  above. Run `s5_minimal.exe exit0` in one window, and while it's hung (has ~8s),
-  check `Get-Process -Id <pid>` or Task Manager from another window/session: is
-  `mini_exit.exe` still listed as running? What does its CPU/thread state look like?
-- `s5_minimal` (as of this commit) also logs when its reader thread sees EOF on the
-  pty master, with a timestamp — a second, independent signal. If EOF arrives even
-  though `wait()` never does, that's a usable fallback signal for Windows exit
-  detection (reader EOF + a short confirmation poll) instead of relying on `wait()`
-  alone. Not yet run.
+```
+Handles  NPM(K)    PM(K)      WS(K)     CPU(s)     Id  SI ProcessName
+-------  ------    -----      -----     ------     --  -- -----------
+     24       6      452       2596       0.00  21040   1 mini_exit
+```
+
+`0.00` CPU seconds — not spinning, not doing work, just alive. So this is not a
+stale-handle/lost-signal bug in `WaitForSingleObject`; the OS itself has not torn
+the process down. Its own `ExitProcess` call (from `std::process::exit(0)`, nothing
+fancier) is genuinely blocked somewhere before the process is allowed to fully die
+— almost certainly on some cooperative console-detach handshake with ConPTY's
+internal host that the reachable APIs (`portable-pty`, or anything built on
+`GetExitCodeProcess`/`WaitForSingleObject`) can't see into or unblock.
+
+This also **rules out CPU-idle as a heuristic**: a process legitimately idle at a
+shell prompt and a process stuck mid-`ExitProcess` look identical from the outside
+(0.00 CPU, "Running" status, no output). Silence-based detection can't tell them
+apart, so that's not a viable fallback signal on its own.
+
+**Where this leaves root-cause digging:** further progress needs tooling this spike
+doesn't have budget for — WinDbg/ETW tracing of what `mini_exit.exe`'s threads are
+actually blocked on during the hang. Time-boxed here rather than pursued further;
+this was a one-day spike and is now well past that. Two remaining leads, in
+decreasing priority:
+
+- **Job Objects + an I/O completion port**, instead of `wait()`/`try_wait()` on the
+  process handle. `JOB_OBJECT_MSG_EXIT_PROCESS`/`_ACTIVE_PROCESS_ZERO` notifications
+  come from the kernel's job-object accounting, a different code path than
+  `GetExitCodeProcess`/`WaitForSingleObject` — worth trying since it's independent
+  of whatever ConPTY-side handshake is stuck, though if the process truly hasn't
+  finished dying at the kernel level, this may not fire either. This is how several
+  other tools (containerd, Docker) track Windows process lifecycle robustly, so
+  there's precedent — but it's a real implementation, not a quick spike script, and
+  a scope decision, not just a technical one.
 - check whether a newer `portable-pty` (0.9.0 is what's pinned in
-  [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` behaves
-  differently — lower priority now that the symptom is confirmed general to ConPTY
-  rather than a `portable-pty` wiring bug, but still worth a quick check since a
-  newer version might carry a workaround for exactly this.
+  [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` carries
+  a workaround for exactly this — lower priority now that the symptom is confirmed
+  general to ConPTY rather than a `portable-pty` wiring bug, but cheap to check.
 
-**Engineering implication if this doesn't resolve:** the existing termination
+**Engineering implication if root cause is never found:** the existing termination
 policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a
-bounded wait regardless of whether the graceful signal was observed to work — so
-*user-initiated* terminate stays correct on Windows even with W1 unresolved, it just
-always takes the full timeout-then-kill path rather than reaping early. What W1
-actually breaks is the case nobody is terminating: an agent process that finishes
-**on its own**. That session would sit as `running` indefinitely with no forcing
-function. A fallback worth considering if the root cause doesn't resolve: treat
-sustained silence on the reader (no output for N seconds) plus no new writes as a
-trigger to actively probe (poll `try_wait()`, and if that also stays silent,
-consider a bounded confirmation kill) rather than trusting `wait()` to fire on its
-own. Not a decision yet — needs the live-inspection data point above first, since it
+bounded wait regardless of whether the graceful signal worked — so *user-initiated*
+terminate stays correct on Windows even with W1 unresolved, it just always takes the
+full timeout-then-kill path rather than reaping early. What W1 actually breaks is
+the case nobody is terminating: an agent process that finishes **on its own**. That
+session would sit as `running` indefinitely with no forcing function, and — per the
+finding above — there is no cheap heuristic (CPU, silence) to distinguish "finished
+but stuck exiting" from "legitimately idle and still running." Closing this gap for
+real needs either the root cause, or the Job Object path above; there is no cheap
+heuristic-based shortcut available given what's been ruled out so far.
 determines whether this is "OS hasn't reaped it" (probe-based fallback is sound) or
 something stranger.
 
