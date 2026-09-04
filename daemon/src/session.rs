@@ -357,7 +357,7 @@ impl Replay {
         let Some(subscription) = subscription else {
             let to = (self.cursor + REPLAY_ROUND_BYTES).min(end);
             let offset = self.cursor;
-            let bytes = self.reader.read_range(offset, to)?;
+            let bytes = self.reader.read_range(offset, to).map_err(AttachError::Read)?;
             // Advance by what was actually read, not by what was asked for: a
             // short read must not leave a hole the client is never told about.
             self.cursor += bytes.len() as u64;
@@ -384,7 +384,7 @@ impl Replay {
         // bytes and the first queued chunk are contiguous by construction:
         // this range ends at or before `end <= next_offset`, and every chunk
         // that subscription will ever see starts at or after `next_offset`.
-        let replay = self.reader.read_range(replay_from, end)?;
+        let replay = self.reader.read_range(replay_from, end).map_err(AttachError::Read)?;
 
         Ok(ReplayStep::Live(Attach {
             replay_from,
@@ -404,8 +404,16 @@ pub enum AttachError {
     /// `offset_ahead` error frame (docs/04-api-protocol.md#attach-race).
     #[error("requested offset {requested} is ahead of next_offset {next_offset}")]
     OffsetAhead { requested: u64, next_offset: u64 },
+    /// `Session::attach`'s own `fanout.log.reader()` call failed before any
+    /// round ever ran.
     #[error("opening the log for replay: {0}")]
-    Io(#[from] std::io::Error),
+    Open(std::io::Error),
+    /// A `read_range` call failed partway through catch-up -- history-round
+    /// or the final post-registration stretch alike. Distinct from `Open` so
+    /// an incident doesn't read a mid-walk read failure as though the
+    /// initial open never succeeded (issue #1 finding 4).
+    #[error("reading a replay range: {0}")]
+    Read(std::io::Error),
 }
 
 type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
@@ -479,7 +487,7 @@ impl Session {
         }
         let log_capped_at = fanout.log.log_capped_at();
         let readable_end = fanout.log.readable_end();
-        let reader = fanout.log.reader()?;
+        let reader = fanout.log.reader().map_err(AttachError::Open)?;
         drop(fanout);
 
         // Bytes between a cap and `next_offset` were streamed live and are
@@ -803,6 +811,22 @@ mod tests {
             should_register(gap, 0, MAX_CATCHUP_ROUNDS),
             "a client that never stalls must still be bounded by total rounds"
         );
+    }
+
+    /// Issue #1 finding 4: `Open` (the initial `fanout.log.reader()` call)
+    /// and `Read` (any `read_range` during catch-up) used to be one `Io`
+    /// variant with a message hardcoded to the open case, so a read failure
+    /// several rounds into a large backlog read as though the daemon had
+    /// never managed to open the log at all. Guards against the two
+    /// collapsing back into one variant, or trading messages.
+    #[test]
+    fn open_and_read_failures_report_distinct_messages() {
+        let boom = || std::io::Error::other("boom");
+        let open = AttachError::Open(boom()).to_string();
+        let read = AttachError::Read(boom()).to_string();
+        assert!(open.starts_with("opening the log for replay"), "got: {open}");
+        assert!(read.starts_with("reading a replay range"), "got: {read}");
+        assert_ne!(open, read);
     }
 
     /// The ordering rule, checked from the outside: by the time a chunk is
