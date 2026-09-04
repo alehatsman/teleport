@@ -1,0 +1,9 @@
+# dex indexing config. Indexing is opt-in: only paths matching an
+# include pattern below are indexed; everything else is skipped.
+# Patterns use gitignore grammar — a trailing slash matches a directory
+# subtree, "*.md" matches at any depth.
+index:
+  include:
+    - docs/
+    - "*.md"
+  ignore: []
