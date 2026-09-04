@@ -95,10 +95,11 @@
 
 <div class="session-view">
   <header>
-    <button class="back" onclick={onBack}>&larr;</button>
-    <span class="title">{session?.command ?? sessionId}</span>
+    <button class="back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
+    <h1 class="title">{session?.command ?? sessionId}</h1>
     <span
       class="status-dot"
+      aria-hidden="true"
       class:live={connectionState === "live"}
       class:reconnecting={connectionState === "reconnecting" || connectionState === "connecting"}
     ></span>
@@ -117,28 +118,28 @@
     <div class="notice">
       Scrollback truncated.
       <a href={`/api/v1/sessions/${sessionId}/log`} target="_blank" rel="noreferrer">View full log</a>
-      <button class="dismiss" onclick={() => (truncatedNotice = false)}>&times;</button>
+      <button class="dismiss" onclick={() => (truncatedNotice = false)} aria-label="Dismiss">&times;</button>
     </div>
   {/if}
 
   {#if toast}
-    <div class="toast">{toast}</div>
+    <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
   {/if}
 
-  <div class="terminal-area" class:dimmed={!hasControl}>
+  <main class="terminal-area" class:dimmed={!hasControl}>
     {#if stream}
       <Terminal bind:this={terminalRef} {stream} isController={hasControl} />
     {/if}
-  </div>
+  </main>
 
   <div class="key-bar">
     <button onclick={() => sendKey("\x1b")}>Esc</button>
     <button onclick={() => sendKey("\t")}>Tab</button>
     <button onclick={() => sendKey("\x03")}>Ctrl-C</button>
-    <button onclick={() => sendKey("\x1b[A")}>↑</button>
-    <button onclick={() => sendKey("\x1b[B")}>↓</button>
-    <button onclick={() => sendKey("\x1b[D")}>←</button>
-    <button onclick={() => sendKey("\x1b[C")}>→</button>
+    <button onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
+    <button onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
+    <button onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
+    <button onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
   </div>
 </div>
 
@@ -153,22 +154,24 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #2a2a2a;
+    border-bottom: 1px solid var(--border);
   }
   .title {
+    font-size: inherit;
     font-weight: 600;
+    margin: 0;
   }
   .status-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #666;
+    background: var(--muted);
   }
   .status-dot.live {
-    background: #3ecf6a;
+    background: var(--success);
   }
   .status-dot.reconnecting {
-    background: #e0a72c;
+    background: var(--warning-strong);
   }
   .status-label {
     font-size: 0.75rem;
@@ -180,22 +183,22 @@
   }
   .badge.controlling {
     font-size: 0.75rem;
-    background: #14532d;
-    color: #bbf7d0;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
     padding: 0.2rem 0.5rem;
     border-radius: 4px;
   }
   .take-control {
-    background: #2563eb;
-    color: white;
+    background: var(--accent);
+    color: var(--accent-fg);
     border: none;
     border-radius: 4px;
     padding: 0.3rem 0.6rem;
     cursor: pointer;
   }
   .notice {
-    background: #3a2f0e;
-    color: #ffd98a;
+    background: var(--notice-bg);
+    color: var(--notice-fg);
     padding: 0.4rem 0.75rem;
     display: flex;
     align-items: center;
@@ -216,8 +219,8 @@
     position: absolute;
     top: 3rem;
     right: 1rem;
-    background: #1e1e1e;
-    border: 1px solid #333;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-strong);
     padding: 0.5rem 0.75rem;
     border-radius: 6px;
     font-size: 0.85rem;
@@ -234,13 +237,13 @@
     display: none;
     gap: 0.25rem;
     padding: 0.4rem;
-    border-top: 1px solid #2a2a2a;
+    border-top: 1px solid var(--border);
   }
   .key-bar button {
     flex: 1;
-    background: #1e1e1e;
+    background: var(--surface-raised);
     color: inherit;
-    border: 1px solid #333;
+    border: 1px solid var(--border-strong);
     border-radius: 4px;
     padding: 0.5rem 0;
   }
