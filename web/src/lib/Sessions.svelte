@@ -139,14 +139,19 @@
       {#each sessions as session (session.id)}
         <li class="session-row">
           <button class="open" onclick={() => onOpen(session.id)}>
-            <span class="state" class:running={session.state === "running"} class:exited={session.state === "exited"}></span>
+            <span
+              class="state"
+              class:running={session.state === "running"}
+              class:exited={session.state === "exited"}
+              class:lost={session.state === "lost"}
+            ></span>
             <span class="command">{session.command}</span>
             <span class="cwd">{session.cwd}</span>
             {#if session.controller}
               <span class="controller">controlled by {session.controller}</span>
             {/if}
           </button>
-          {#if session.state === "exited"}
+          {#if session.state === "exited" || session.state === "lost"}
             <button class="danger" onclick={() => purge(session.id)}>Delete</button>
           {:else}
             <button onclick={() => terminate(session.id)}>Terminate</button>
@@ -244,6 +249,9 @@
   }
   .state.exited {
     background: #666;
+  }
+  .state.lost {
+    background: #c9a227;
   }
   .command {
     font-weight: 600;
