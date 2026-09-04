@@ -208,6 +208,15 @@ Resize handling:
 
 ## Termination
 
+> **Unresolved blocker (2026-09-04):** a ConPTY child that exits gracefully — not
+> killed — has not been observed to actually signal exited via `wait()`/`try_wait()`
+> in testing on Windows 11 build 26200, on real hardware, from a real interactive
+> session. Externally-killed children work correctly through the same code path.
+> This affects the reap/exit-status half of everything below on Windows; the Unix
+> side is unaffected. Do not implement the Windows exit-status path against this
+> doc until [15-open-questions.md#w1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+> is resolved.
+
 `ClosePseudoConsole` sends `CTRL_CLOSE_EVENT` to connected clients, and applications
 may still emit output during shutdown. Microsoft advises either closing the output pipe
 first or continuing to drain output around closure. Ending the pseudoconsole terminates

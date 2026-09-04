@@ -14,10 +14,11 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
-| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04) |
-| [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux (2026-09-04) |
-| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows blocked on tooling, see below |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **open, unresolved** — spike, Windows (2026-09-04) |
+| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
+| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
+| [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
+| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
 | [D1](#d1--replay-must-not-share-the-live-subscriber-budget) | Replay shares the live subscriber budget | M4 | design change + test |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [D3](#d3--attention-signals-in-the-mvp-ui) | Are `bell` / `idle` surfaced in the MVP? | M8 | decision |
@@ -25,8 +26,10 @@ backlog pretending to be a spec.
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 
-S1–S4 and D1 are **blocking**. The rest are decisions that must be *made* before their
-milestone, not necessarily *built*.
+W1, S1–S4, and D1 are **blocking**. The rest are decisions that must be *made* before
+their milestone, not necessarily *built*. **W1 is the one that matters most right now**:
+until it's understood, no Windows result from S1/S2/S4 can be trusted, because all three
+depend on observing a ConPTY child exit on its own.
 
 ---
 
@@ -43,6 +46,72 @@ The spike exists because [Thread model](03-pty-layer.md#thread-model) specifies 
 threads per session while the design has **three** blocking concerns: `read()`, `write()`,
 and waiting on the child. That arithmetic does not work, and every question below is a
 consequence of it.
+
+## W1 — ConPTY children are never observed as exited on Windows
+
+**Not one of the original four questions.** Found while running S1/S2/S4 for real on
+Windows (2026-09-04, Windows 11 build 26200, ≥24H2, `portable-pty` 0.9.0, run from a
+real interactive PowerShell session — not through WSL interop, ruled out separately
+below). It supersedes and explains every Windows "TIMEOUT" result recorded under
+S1/S2/S4: they are not four separate mysteries, they are one.
+
+**Finding:** a child spawned under a ConPTY that exits **on its own** — `cmd.exe /c
+"exit 0"`, `cmd.exe /c "exit 7"`, `cmd.exe /c "echo hi"`, and a quick-exiting parent
+in the grandchild case — is **never** observed as exited by `child.wait()` or
+`child.try_wait()`. Every one of these hung past a 10-20s test timeout. A child that
+is **externally killed** (`taskkill /F`, matching what our own `terminate()` would
+do) *is* observed correctly and near-instantly, every time, through the exact same
+`wait()`/`try_wait()` call. So this is not a broken reaping mechanism in general —
+only the graceful, self-initiated exit path never signals.
+
+**Ruled out:**
+
+- **Not the WSL bridge.** First seen when driving Windows through WSL process
+  interop (`cmd.exe`/`powershell.exe` launching the spike `.exe` from inside WSL),
+  which was already suspected as an unreliable bridge (no real console/window-station
+  context). Re-ran identically from a genuinely interactive Windows Terminal /
+  PowerShell session on the user's own machine — same result. This is real Windows
+  behavior, not a bridge artifact.
+- **Not `portable-pty` wiring the wrong handle.** `WinChild::wait()` is a plain
+  `WaitForSingleObject`/`GetExitCodeProcess` on `proc: Mutex<OwnedHandle>`
+  ([`src/win/mod.rs`](https://github.com/wezterm/wezterm/blob/main/pty/src/win/mod.rs)),
+  and that handle is wired directly from `pi.hProcess` in `CreateProcessW`'s own
+  `PROCESS_INFORMATION` in [`src/win/psuedocon.rs`](https://github.com/wezterm/wezterm/blob/main/pty/src/win/psuedocon.rs)
+  — no indirection, no wrong handle. And the *exact same* `wait()` call correctly
+  observes an externally-killed child, proving `WaitForSingleObject` on this handle
+  does signal when the process is genuinely gone.
+- **Not `cmd.exe`/this machine failing to reap in general.** Control test:
+  spawned the identical `cmd.exe /c "exit 0"` with **no ConPTY at all**
+  (`spike/src/bin/s0_control.rs`, plain `std::process::Command`) — `wait()` returned
+  in 15ms with `exit_code=Some(0)`. ConPTY is specifically the variable.
+
+**Not yet found:** the actual root cause on the Windows/ConPTY side. A quick search
+turned up a family of known ConPTY process-lifecycle issues (e.g. microsoft/terminal
+[#4564](https://github.com/microsoft/terminal/issues/4564), "ConPTY host lingers
+when all connected clients have been terminated," marked fixed for 22H2 — our build
+is newer than that fix, so if it's the same class of issue, either the fix doesn't
+cover this exact case or something else is at play) but nothing that's a confirmed
+match for this exact symptom. Plausible next steps, not yet tried:
+
+- swap `cmd.exe` for a different Windows binary (a tiny custom "exits fast" `.exe`,
+  or `powershell.exe -Command exit`) to check whether this is `cmd.exe`-specific or
+  universal to every ConPTY child
+- check whether a newer `portable-pty` (0.9.0 is what's pinned in
+  [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` behaves
+  differently
+- inspect the process in Process Explorer/`Get-Process` *while* it's supposedly
+  hung, to see whether it's actually still running (not yet reached its own
+  `ExitProcess`) or a zombie the OS itself hasn't reaped
+
+**Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
+*common* case — an agent process finishing normally — would never move a session to
+`exited` on Windows at all. That's a direct hit on session-list accuracy, the
+product's stated front page, and it's worse than anything the original four
+questions anticipated: S1 assumed reaping just needed the right thread/mechanism;
+this says the mechanism doesn't see the event at all, on this build, for this
+spawn path. **Do not write the Windows leg of `pty.rs`'s reap/exit-status path
+against the current design until W1 is understood.** The Unix leg (S1-S4, fully
+closed on Linux) is unaffected and can proceed.
 
 ## S1 — Who reaps the child?
 
@@ -80,18 +149,27 @@ number. Don't build any UI or log line that expects to distinguish "exited 1" fr
 "killed by signal" through this API; if that distinction ever matters, it has to
 come from a Unix-specific path around `portable-pty`, not through it.
 
-On Windows (11, build 26200 / ≥24H2, cross-compiled `x86_64-pc-windows-gnu`,
-executed directly — see the Windows section under S4 for why "directly" matters
-here): the `SIGKILL`-equivalent case (spawn a child that never exits on its own,
-`taskkill /F` it externally) reproduces cleanly — exit code observed at ~0 ms via
-both `poll` and `blocking wait()`, same as Linux. **Decision: dedicated blocking
-`wait()` thread**, one per session. It is the simplest option, meets the <100 ms
-pass criterion with room to spare, and — combined with [S3](#s3)'s separate writer
-thread — never sits behind a pending `write`/`terminate`. Reject polling: it adds
-a tick-latency tradeoff for no benefit once a dedicated thread is already paid for
-by S3. This sets the per-session thread count to **four**: reader, writer, control
-(`resize`/`terminate`), reaper (`wait()`). See [03-pty-layer.md#thread-model](03-pty-layer.md#thread-model),
-now updated.
+**Decision (mechanism): dedicated blocking `wait()` thread**, one per session. It is
+the simplest option, meets the <100 ms pass criterion with room to spare on Linux,
+and — combined with [S3](#s3)'s separate writer thread — never sits behind a pending
+`write`/`terminate`. Reject polling: it adds a tick-latency tradeoff for no benefit
+once a dedicated thread is already paid for by S3. This sets the per-session thread
+count to **four**: reader, writer, control (`resize`/`terminate`), reaper (`wait()`).
+See [03-pty-layer.md#thread-model](03-pty-layer.md#thread-model), now updated.
+
+**Windows (11, build 26200 / ≥24H2, cross-compiled `x86_64-pc-windows-gnu`, run from
+a real interactive session): partial, and the incomplete half matters more than the
+working half.** The externally-killed case (`taskkill /F` an unresponsive child)
+reproduces cleanly — exit code observed at ~0 ms via both `poll` and `blocking
+wait()`, same as Linux, confirming the *mechanism* (dedicated `wait()` thread) works
+correctly when the OS actually signals the process as gone. But a child that exits
+**on its own** — `exit0`, `exit7`, and the quick-exiting parent in `grandchild` — was
+**never observed as exited at all**, every case timing out. This is
+[W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), not a gap in
+this decision: the dedicated-thread mechanism is still the right one, it just has
+nothing to observe on Windows for the graceful-exit path until W1 is understood.
+**The per-session thread count and mechanism decision above stands for both
+platforms; S1's Windows *exit detection* does not close until W1 does.**
 
 ## S2 — EOF is not exit
 
@@ -168,6 +246,11 @@ or the session is GC'd. Needs a decision recorded in
 [03-pty-layer.md#state-machine](03-pty-layer.md#state-machine) before M2's
 `SessionManager` is built around it.
 
+**Windows:** not run — every S2 scenario needs the parent to exit gracefully
+(`basic`, `grandchild`, `midburst` all end with the shell exiting on its own), which
+is exactly what [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)
+says never gets observed. Re-run once W1 has an answer.
+
 ## S3 — A blocking write wedges `terminate`
 
 **Claimed:** [Thread model](03-pty-layer.md#thread-model) puts `write`, `resize` and
@@ -230,6 +313,20 @@ own thread — never allowed to hold up `resize` or `terminate`; whether to also
 a bounded input queue with drop-on-overflow (the second candidate) is a
 can-defer, not required to close S3.
 
+**Windows confirmation (2026-09-04, build 26200, real interactive session):** both
+modes ran to completion — unlike S1/S2/S4, this test's `terminate` is an external
+`taskkill`, not a graceful exit, so it isn't touched by
+[W1](#w1--conpty-children-are-never-observed-as-exited-on-windows). `separate`:
+terminate in 73 ms regardless of the pending write. `shared`: write blocked for
+757 ms, then terminate followed at 826 ms total — notably *not* an indefinite hang
+the way the Linux raw-mode repro was. ConPTY's input buffering apparently doesn't
+block as persistently as a raw Unix pty with nothing reading it; the wedge is still
+structurally present (terminate is still queued behind the write and pays its full
+duration), it's just naturally bounded here to under a second in this one test. That
+difference is exactly why the fix should not lean on "the write will unblock soon
+enough" — separate writer thread is the decision on both platforms, confirmed
+directly on both. **S3 fully closed, Linux and Windows.**
+
 ## S4 — Does dropping the master close the pseudoconsole?
 
 **Claimed:** [Termination](03-pty-layer.md#termination) step 2 gives the Windows graceful
@@ -272,27 +369,26 @@ Rely solely on the primary path already documented there — `killpg(pgid, SIGHU
 then `SIGTERM` — and only drop the master/reader/writer handles as post-reap
 cleanup, never as the mechanism that makes termination happen. Done below.
 
-**Windows — still open, blocked on tooling, not on Windows itself.** Cross-compiled
-the same spike (`x86_64-pc-windows-gnu`) and ran it against the real Windows 11 host
-underneath this WSL2 sandbox (build 26200, confirmed ≥24H2) via WSL's process
-interop (`cmd.exe`/`powershell.exe` invoking the `.exe` directly — no Windows Rust
-toolchain was installed, so this was the only path available here). Partial result:
-external termination works identically to Linux — `SIGKILL`-equivalent
-(`taskkill /F`) on a hung child is observed via `wait()` at ~0 ms, both via polling
-and a dedicated thread ([S1](#s1-who-reaps-the-child)'s Windows leg came from this
-run. But **every test requiring a child to exit or produce output on its own — not
-externally killed — hung indefinitely**: `cmd /c "exit 0"`, `cmd /c "echo hi"`, and
-the S4 drop-master case itself never completed, identically whether launched via
-`cmd.exe` or `powershell.exe`. This reproduced identically on both launchers, which
-rules out a `cmd.exe`-quoting explanation; the likely cause is that WSL-interop
-launches processes without a real interactive window station/console session,
-which `ConPTY`'s console host may depend on — i.e. this looks like a limitation of
-*driving Windows through the WSL bridge*, not a finding about ConPTY itself. **This
-needs re-running from an actual interactive Windows session** (Windows Terminal or
-a plain console, on the same machine, not through WSL interop) before S4's Windows
-half and the corresponding Windows legs of S1/S2 can be marked closed. The spike
-binaries are already built for `x86_64-pc-windows-gnu`; re-running them just needs
-a normal Windows terminal — see `spike/` on the `m1-pty-spike` branch.
+**Windows — result obtained, but confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), not usable as-is.**
+First attempt drove Windows through WSL process interop (`cmd.exe`/`powershell.exe`
+invoking the cross-compiled `.exe` from inside WSL) and every non-externally-killed
+test hung — at the time this looked like a WSL-bridge limitation (no real console/
+window-station context) rather than a ConPTY finding. Re-ran identically from a
+genuine interactive Windows Terminal / PowerShell session on the user's own machine
+(build 26200, ≥24H2) — **same hang**. That ruled out the bridge as the explanation
+and led directly to [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows):
+ConPTY children that exit gracefully are never observed as exited on this build,
+full stop, regardless of how they're launched.
+
+Concretely: `drop(master)` itself is fast (~0 ms, both `plain` and `grandchild`
+scenarios) and no EOF arrived within the 10 s window either time — consistent with
+the Unix finding (dropping master alone doesn't close anything while reader/writer
+clones live). But this test's `child.wait()` at the end also never returns, which
+given W1 doesn't prove anything about whether the pseudoconsole itself closed —
+it's the same underlying symptom masking the result. **S4's Windows half stays
+open until W1 is understood**; re-run this specific test once W1 has an answer or a
+workaround, since `drop(master)` returning fast is the only part of this result not
+already explained by W1.
 
 ---
 
