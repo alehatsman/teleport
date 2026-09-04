@@ -54,7 +54,7 @@ fn spawn_backlog_then_trickle(manager: &SessionManager) -> std::sync::Arc<telepo
         format!("stty raw -echo; yes | head -c {BACKLOG}; while :; do printf 'tick\\n'; sleep 0.01; done"),
     ];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 })
+        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
         .expect("create session")
 }
 
