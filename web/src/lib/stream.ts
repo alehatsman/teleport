@@ -116,10 +116,22 @@ export class SessionStream {
     this.send({ type: "resize", cols, rows });
   }
 
-  /** Raw input bytes -- no framing, forwarded verbatim to the PTY writer. */
-  sendInput(data: Uint8Array | string): void {
+  /**
+   * Raw input bytes -- no framing, forwarded verbatim to the PTY writer.
+   * `WebSocket.send()` picks the frame type from the JS type it's given: a
+   * `string` always goes out as a *text* frame, which the server's mixed
+   * framing (docs/04-api-protocol.md#framing) would then try to parse as a
+   * JSON control message and reject as `bad_request`. `term.onData` always
+   * hands us a string, so this must encode it before sending -- otherwise
+   * every keystroke is silently dropped, not forwarded to the PTY.
+   */
+  sendInput(data: BufferSource | string): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.ws.send(data as BufferSource | string);
+    if (typeof data === "string") {
+      this.ws.send(new TextEncoder().encode(data));
+    } else {
+      this.ws.send(data);
+    }
   }
 
   private send(message: ClientMessage): void {

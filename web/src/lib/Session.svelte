@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import Terminal from "./Terminal.svelte";
   import { SessionStream } from "./stream";
+  import { setControlling, wasControlling } from "./identity";
   import * as api from "./api";
   import type { Session as SessionData, StreamState } from "./types";
 
@@ -25,28 +26,37 @@
   }
 
   onMount(() => {
-    const s = new SessionStream(sessionId, {
-      onState: (state) => (connectionState = state),
-      onOutput: (bytes) => terminalRef?.write(bytes),
-      onGeometry: (cols, rows) => terminalRef?.setGeometry(cols, rows),
-      onControlChange: (has, name) => {
-        const wasControlling = hasControl;
-        hasControl = has;
-        controllerName = name;
-        if (wasControlling && !has && name) showToast(`Control taken by ${name}`);
+    const s = new SessionStream(
+      sessionId,
+      {
+        onState: (state) => (connectionState = state),
+        onOutput: (bytes) => terminalRef?.write(bytes),
+        onGeometry: (cols, rows) => terminalRef?.setGeometry(cols, rows),
+        onControlChange: (has, name) => {
+          const wasHolding = hasControl;
+          hasControl = has;
+          controllerName = name;
+          setControlling(sessionId, has);
+          if (wasHolding && !has && name) showToast(`Control taken by ${name}`);
+        },
+        onTruncated: () => {
+          terminalRef?.reset();
+          truncatedNotice = true;
+        },
+        onExit: (code) => {
+          showToast(code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`);
+        },
+        onError: (code, message) => {
+          if (code === "not_controller") return; // expected when input races a lease change
+          showToast(message ?? code);
+        },
       },
-      onTruncated: () => {
-        terminalRef?.reset();
-        truncatedNotice = true;
-      },
-      onExit: (code) => {
-        showToast(code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`);
-      },
-      onError: (code, message) => {
-        if (code === "not_controller") return; // expected when input races a lease change
-        showToast(message ?? code);
-      },
-    });
+      // A reopened tab (or a WS drop) resumes control instead of silently
+      // dropping to observer -- mode=control never preempts, so this is
+      // always safe even if someone else took over in the meantime (the
+      // `ready` frame would then just come back control:false).
+      { requestControl: wasControlling(sessionId) },
+    );
     stream = s;
     s.connect();
 

@@ -49,6 +49,33 @@ export function getToken(): string | null {
   }
 }
 
+/**
+ * Did this client last hold the control lease on this session? Checked on
+ * mount so a reopened tab asks to *resume* control (`mode=control`, which
+ * never preempts -- docs/09-frontend.md#streamts) instead of silently
+ * dropping back to observer just because the page reloaded and a fresh
+ * `SessionStream`'s `wantControl` starts false. Cleared the moment the
+ * server says otherwise, so a stale flag can't outlive the grace window by
+ * much or survive someone else taking over.
+ */
+export function wasControlling(sessionId: string): boolean {
+  try {
+    return localStorage.getItem(`teleport.controlling.${sessionId}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setControlling(sessionId: string, controlling: boolean): void {
+  try {
+    if (controlling) localStorage.setItem(`teleport.controlling.${sessionId}`, "1");
+    else localStorage.removeItem(`teleport.controlling.${sessionId}`);
+  } catch {
+    // Best-effort only -- worst case a reopened tab asks to resume control
+    // it no longer needs to, which is a harmless no-op server-side.
+  }
+}
+
 export function setToken(token: string): void {
   try {
     localStorage.setItem(TOKEN_KEY, token);
