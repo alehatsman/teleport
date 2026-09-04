@@ -177,7 +177,7 @@ async fn run(
     };
     truncated = truncated || !attach.caught_up;
 
-    let control = if requested_control { session.attach_control(&client_id, &client_name) } else { false };
+    let control_epoch = if requested_control { session.attach_control(&client_id, &client_name) } else { None };
     let (cols, rows) = session.size();
 
     let ready = json!({
@@ -189,7 +189,7 @@ async fn run(
         "log_capped_at": attach.log_capped_at,
         "cols": cols,
         "rows": rows,
-        "control": control,
+        "control": control_epoch.is_some(),
         "controller": session.controller_name(),
     });
     send_json(&mut socket, &ready).await;
@@ -203,7 +203,12 @@ async fn run(
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // the first tick fires immediately; consume it.
     let mut last_pong = Instant::now();
-    let mut is_controlling = control;
+    // `Some(epoch)` while this connection holds the control lease -- the
+    // epoch it was granted, re-checked against the authoritative lease on
+    // every write/resize so a lease moved out from under it (another
+    // connection's `claim_control`, including one sharing this `client_id`)
+    // is never missed (docs/04-api-protocol.md#control-lease).
+    let mut is_controlling: Option<u64> = control_epoch;
 
     loop {
         tokio::select! {
@@ -246,7 +251,7 @@ async fn run(
                     }
                     Ok(SessionEvent::ControlRevoked { lost_by, new_controller_id, new_controller_name }) => {
                         if lost_by == client_id {
-                            is_controlling = false;
+                            is_controlling = None;
                             send_json(&mut socket, &json!({ "type": "control_revoked", "to": new_controller_name, "client_id": new_controller_id })).await;
                         }
                     }
@@ -272,13 +277,23 @@ async fn run(
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if session.is_controller(&client_id) {
-                            if let Err(e) = session.write(&bytes) {
+                        // `write_if_controller` checks the lease and writes under
+                        // one lock, so a `claim_control` racing this check (M4
+                        // review) can never land in between (Err(None) covers both
+                        // "never had control" and "lost it just now").
+                        let result = match is_controlling {
+                            Some(epoch) => session.write_if_controller(&client_id, epoch, &bytes),
+                            None => Err(None),
+                        };
+                        match result {
+                            Ok(()) => {}
+                            Err(Some(e)) => {
                                 tracing::debug!(session_id = %session.id, error = %e, "write rejected");
                                 send_json(&mut socket, &json!({ "type": "error", "code": "session_closing", "message": "input rejected: session is closing" })).await;
                             }
-                        } else {
-                            send_json(&mut socket, &json!({ "type": "error", "code": "not_controller", "message": "input rejected: observer mode" })).await;
+                            Err(None) => {
+                                send_json(&mut socket, &json!({ "type": "error", "code": "not_controller", "message": "input rejected: observer mode" })).await;
+                            }
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
@@ -294,8 +309,8 @@ async fn run(
         }
     }
 
-    if is_controlling {
-        session.begin_control_grace(client_id, control_grace_ms);
+    if let Some(epoch) = is_controlling {
+        session.begin_control_grace(client_id, epoch, control_grace_ms);
     } else {
         // An observer that never held control has nothing to release; an
         // explicit `release_control` already cleared it if it applied.
@@ -307,7 +322,7 @@ async fn handle_control_message(
     session: &Arc<Session>,
     client_id: &str,
     client_name: &str,
-    is_controlling: &mut bool,
+    is_controlling: &mut Option<u64>,
     socket: &mut WebSocket,
 ) {
     #[derive(Deserialize)]
@@ -328,7 +343,8 @@ async fn handle_control_message(
 
     match message {
         ClientMessage::Resize { cols, rows } => {
-            if session.is_controller(client_id) {
+            let controller = is_controlling.is_some_and(|epoch| session.is_controller(client_id, epoch));
+            if controller {
                 if let Err(e) = session.resize(cols, rows) {
                     tracing::debug!(session_id = %session.id, error = %e, "resize rejected");
                 }
@@ -337,13 +353,14 @@ async fn handle_control_message(
             }
         }
         ClientMessage::ClaimControl => {
-            session.claim_control(client_id, client_name);
-            *is_controlling = true;
+            let epoch = session.claim_control(client_id, client_name);
+            *is_controlling = Some(epoch);
             send_json(socket, &json!({ "type": "control_granted" })).await;
         }
         ClientMessage::ReleaseControl => {
-            session.release_control(client_id);
-            *is_controlling = false;
+            if let Some(epoch) = is_controlling.take() {
+                session.release_control(client_id, epoch);
+            }
         }
     }
 }

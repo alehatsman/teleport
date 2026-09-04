@@ -217,11 +217,22 @@ struct Runtime {
 /// grace window -- both are still "the holder" for `is_controller` and
 /// `claim_control` purposes, only `attach_control`'s passive-resume check
 /// treats them differently (docs/04-api-protocol.md#disconnect-grace).
+///
+/// `epoch` bumps on every grant (`attach_control` or `claim_control`), and
+/// each granted WS connection remembers the epoch *it* was given. That's
+/// what tells apart two simultaneous connections sharing one `client_id` --
+/// e.g. the same browser tab reloaded before the old socket closed, or two
+/// tabs racing a reconnect -- which `holder` alone can't (M4 review: keying
+/// the lease purely on `client_id` let both connections pass `is_controller`
+/// and write concurrently). Only the connection holding the *current* epoch
+/// counts as the controller; an older connection with a stale epoch is
+/// treated the same as one that never held control at all.
 #[derive(Debug, Clone, Default)]
 struct ControlLease {
     holder: Option<String>,
     holder_name: Option<String>,
     grace: bool,
+    epoch: u64,
 }
 
 /// Asynchronous, out-of-band notifications a WS connection needs beyond raw
@@ -770,31 +781,36 @@ impl Session {
     /// `mode=control` on attach. Grants the lease only when it is free or
     /// already held (actively or within grace) by `client_id` -- attach must
     /// never preempt (docs/04-api-protocol.md#why-attach-must-not-preempt).
-    /// Returns whether control was granted.
-    pub fn attach_control(&self, client_id: &str, client_name: &str) -> bool {
+    /// Returns the epoch this connection now holds (the caller must present
+    /// it back to [`Self::write_if_controller`]/[`Self::release_control`]/
+    /// [`Self::begin_control_grace`]), or `None` if control was not granted.
+    pub fn attach_control(&self, client_id: &str, client_name: &str) -> Option<u64> {
         let mut lease = self.control.lock().unwrap();
         match lease.holder.as_deref() {
             None => {
                 lease.holder = Some(client_id.to_string());
                 lease.holder_name = Some(client_name.to_string());
                 lease.grace = false;
-                true
+                lease.epoch += 1;
+                Some(lease.epoch)
             }
             Some(holder) if holder == client_id => {
                 lease.holder_name = Some(client_name.to_string());
                 lease.grace = false;
-                true
+                lease.epoch += 1;
+                Some(lease.epoch)
             }
-            Some(_) => false,
+            Some(_) => None,
         }
     }
 
     /// `claim_control`. Always preempts, including during another holder's
     /// grace window (docs/04-api-protocol.md#disconnect-grace: "the lease is
     /// still preemptible"). Notifies the previous holder, if any and if
-    /// different, via `control_revoked`.
-    pub fn claim_control(&self, client_id: &str, client_name: &str) {
-        let previous = {
+    /// different, via `control_revoked`. Returns the epoch this connection
+    /// now holds.
+    pub fn claim_control(&self, client_id: &str, client_name: &str) -> u64 {
+        let (previous, epoch) = {
             let mut lease = self.control.lock().unwrap();
             let previous = match (lease.holder.take(), lease.holder_name.take()) {
                 (Some(holder), Some(name)) if holder != client_id => Some((holder, name)),
@@ -803,7 +819,8 @@ impl Session {
             lease.holder = Some(client_id.to_string());
             lease.holder_name = Some(client_name.to_string());
             lease.grace = false;
-            previous
+            lease.epoch += 1;
+            (previous, lease.epoch)
         };
         if let Some((lost_by, _lost_name)) = previous {
             let _ = self.events.send(SessionEvent::ControlRevoked {
@@ -812,38 +829,64 @@ impl Session {
                 new_controller_name: client_name.to_string(),
             });
         }
+        epoch
     }
 
-    /// Explicit `release_control`. A no-op unless `client_id` is the current
-    /// holder -- a stale release from a client that already lost the lease
-    /// must not clear whoever holds it now.
-    pub fn release_control(&self, client_id: &str) {
+    /// Explicit `release_control`. A no-op unless `client_id` still holds
+    /// `epoch` -- a stale release from a connection that already lost the
+    /// lease (superseded by a reconnect or a `claim_control`, both of which
+    /// bump the epoch) must not clear whoever holds it now.
+    pub fn release_control(&self, client_id: &str, epoch: u64) {
         let mut lease = self.control.lock().unwrap();
-        if lease.holder.as_deref() == Some(client_id) {
+        if lease.holder.as_deref() == Some(client_id) && lease.epoch == epoch {
             lease.holder = None;
             lease.holder_name = None;
             lease.grace = false;
         }
     }
 
-    pub fn is_controller(&self, client_id: &str) -> bool {
-        self.control.lock().unwrap().holder.as_deref() == Some(client_id)
+    /// Whether `client_id`'s connection holding `epoch` is still the
+    /// controller. Checking `epoch` alongside `client_id` is what tells
+    /// apart two simultaneous connections that happen to share a
+    /// `client_id` -- only the one holding the *current* epoch (the most
+    /// recent `attach_control`/`claim_control` grant) counts.
+    pub fn is_controller(&self, client_id: &str, epoch: u64) -> bool {
+        let lease = self.control.lock().unwrap();
+        lease.holder.as_deref() == Some(client_id) && lease.epoch == epoch
+    }
+
+    /// Atomically checks `is_controller` and writes, holding the lease lock
+    /// across both. Checking and writing as two separate calls left a window
+    /// where a concurrent `claim_control` could move the lease in between,
+    /// so a just-preempted connection's input could still reach the PTY (M4
+    /// review). `Err(None)` means "not the controller"; `Err(Some(e))` means
+    /// the write itself failed (session closing).
+    pub fn write_if_controller(&self, client_id: &str, epoch: u64, bytes: &[u8]) -> Result<(), Option<anyhow::Error>> {
+        let lease = self.control.lock().unwrap();
+        if lease.holder.as_deref() != Some(client_id) || lease.epoch != epoch {
+            return Err(None);
+        }
+        // Still holding `lease`: a concurrent `claim_control`/`attach_control`
+        // blocks on the same mutex and cannot move the holder until this
+        // write has gone out.
+        self.write(bytes).map_err(Some)
     }
 
     pub fn controller_name(&self) -> Option<String> {
         self.control.lock().unwrap().holder_name.clone()
     }
 
-    /// Starts `client_id`'s disconnect grace window, if it is still the
-    /// holder at the moment its WS connection ends. A background task frees
-    /// the lease after `grace_ms` unless the same `client_id` reclaims it
-    /// first via [`attach_control`](Self::attach_control) (which clears
-    /// `grace`) -- the lease is **never** auto-granted to anyone else when
-    /// the window expires (docs/04-api-protocol.md#disconnect-grace).
-    pub fn begin_control_grace(self: &Arc<Self>, client_id: String, grace_ms: u64) {
+    /// Starts `client_id`'s disconnect grace window, if the connection
+    /// holding `epoch` is still the lease holder at the moment its WS
+    /// connection ends. A background task frees the lease after `grace_ms`
+    /// unless the same `client_id` reclaims it first via
+    /// [`attach_control`](Self::attach_control) (which bumps `epoch` and
+    /// clears `grace`) -- the lease is **never** auto-granted to anyone else
+    /// when the window expires (docs/04-api-protocol.md#disconnect-grace).
+    pub fn begin_control_grace(self: &Arc<Self>, client_id: String, epoch: u64, grace_ms: u64) {
         {
             let mut lease = self.control.lock().unwrap();
-            if lease.holder.as_deref() != Some(client_id.as_str()) {
+            if lease.holder.as_deref() != Some(client_id.as_str()) || lease.epoch != epoch {
                 return; // already lost the lease before disconnecting; nothing to hold.
             }
             lease.grace = true;
@@ -852,10 +895,11 @@ impl Session {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(grace_ms)).await;
             let mut lease = session.control.lock().unwrap();
-            // Only free it if grace is still what's protecting this holder --
-            // a reconnect clears `grace`, and a `claim_control` from someone
-            // else already replaced `holder` entirely.
-            if lease.grace && lease.holder.as_deref() == Some(client_id.as_str()) {
+            // Only free it if grace is still what's protecting this same
+            // epoch -- a reconnect bumps `epoch` and clears `grace`, and a
+            // `claim_control` from someone else already replaced `holder`
+            // (and `epoch`) entirely.
+            if lease.grace && lease.holder.as_deref() == Some(client_id.as_str()) && lease.epoch == epoch {
                 lease.holder = None;
                 lease.holder_name = None;
                 lease.grace = false;
@@ -918,6 +962,21 @@ pub enum CreateError {
     Spawn(#[from] anyhow::Error),
 }
 
+/// Holds one `SessionManager::reserve_slot` reservation for the lifetime of
+/// a `create()` call. Releases it on every exit path -- an early `?`/`return
+/// Err`, or `create()`'s final `insert` -- so a slot is never leaked, and
+/// never double-counted once the session it reserved for is itself in
+/// `sessions` and counted by `reserve_slot`'s own scan.
+struct ReservationGuard<'a> {
+    reserved: &'a Mutex<usize>,
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        *self.reserved.lock().unwrap() -= 1;
+    }
+}
+
 /// Owns every live session. One lock for the session directory itself,
 /// separate from each `Session`'s own `fanout` lock -- creating or looking up
 /// a session never contends with another session's hot output path.
@@ -934,6 +993,12 @@ pub struct SessionManager {
     /// never do one. Dropped with the manager, which flushes a last time.
     syncer: LogSyncer,
     sessions: Arc<SessionDirectory>,
+    /// In-flight `create()` calls that passed the cap check but haven't
+    /// inserted into `sessions` yet (still validating `cwd`/`command` or
+    /// mid-`fork`/`exec`). Counted alongside live sessions so concurrent
+    /// creates can't all pass the check before any of them inserts (M4
+    /// review: the cap wasn't enforced atomically).
+    reserved: Mutex<usize>,
 }
 
 impl SessionManager {
@@ -950,6 +1015,7 @@ impl SessionManager {
             max_sessions: DEFAULT_MAX_SESSIONS,
             syncer: LogSyncer::new(limits.sync_interval),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            reserved: Mutex::new(0),
         }
     }
 
@@ -960,6 +1026,29 @@ impl SessionManager {
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
+    }
+
+    /// Atomically checks `max_sessions` against live sessions (`Running` or
+    /// `Closing` -- an `exited`-but-unpurged entry holds no PTY or child
+    /// process, so it doesn't count against the cap; otherwise routine
+    /// create/DELETE traffic with no `?purge=true` would eventually wedge
+    /// `create()` at 429 forever even with nothing actually running) plus
+    /// any other `create()` call already past this check but not yet
+    /// inserted, and reserves a slot if there's room. Both locks are held
+    /// together for the whole check-then-increment so no second caller can
+    /// slip in between.
+    fn reserve_slot(&self) -> Result<ReservationGuard<'_>, CreateError> {
+        let sessions = self.sessions.lock().unwrap();
+        let mut reserved = self.reserved.lock().unwrap();
+        let live = sessions
+            .values()
+            .filter(|s| s.runtime.lock().unwrap().state != SessionState::Exited)
+            .count();
+        if live + *reserved >= self.max_sessions {
+            return Err(CreateError::MaxSessions(self.max_sessions));
+        }
+        *reserved += 1;
+        Ok(ReservationGuard { reserved: &self.reserved })
     }
 
     /// Spawns `spec` behind a fresh PTY and registers the resulting session,
@@ -980,13 +1069,16 @@ impl SessionManager {
         kind: impl Into<String>,
         preset: Option<String>,
     ) -> Result<Arc<Session>, CreateError> {
-        if self.sessions.lock().unwrap().len() >= self.max_sessions {
-            return Err(CreateError::MaxSessions(self.max_sessions));
-        }
+        // Reserve a slot before doing anything else, so two concurrent
+        // creates can't both pass the cap check before either inserts. The
+        // guard's Drop decrements `reserved` on every exit path (an early
+        // `?`/`return Err` here, or the final `insert` below), so the slot
+        // is never leaked or double-counted.
+        let _reservation = self.reserve_slot()?;
         if !spec.cwd.is_dir() {
             return Err(CreateError::InvalidCwd(spec.cwd.to_path_buf()));
         }
-        if !resolve_executable(spec.program) {
+        if !resolve_executable(spec.program, spec.cwd) {
             return Err(CreateError::ExecutableNotFound(spec.program.to_string()));
         }
 
@@ -1074,10 +1166,16 @@ impl SessionManager {
 /// bits beyond "the executable bit is set on Unix" are not checked -- the
 /// exec call itself is the authoritative check for anything subtler, same as
 /// every shell's own `$PATH` lookup.
-fn resolve_executable(command: &str) -> bool {
+fn resolve_executable(command: &str, cwd: &Path) -> bool {
     let path = Path::new(command);
     if path.components().count() > 1 {
-        return is_executable_file(path);
+        // A literal path (contains a separator). A relative one resolves
+        // against the session's `cwd` -- what `pty::spawn` actually spawns
+        // in -- not the daemon's own cwd (M4 review: checking against the
+        // daemon's cwd could wrongly 422 a command that would have spawned
+        // fine, e.g. `./run.sh` with `cwd` pointing at its directory).
+        let resolved = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+        return is_executable_file(&resolved);
     }
     let Some(path_var) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)))
@@ -1326,6 +1424,30 @@ mod tests {
             );
             assert_eq!(&on_disk[chunk.offset as usize..][..chunk.bytes.len()], &*chunk.bytes);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M4 review: a relative literal path (contains a separator) used to be
+    /// checked against the daemon's own cwd, not the session's requested
+    /// `cwd` -- what `pty::spawn` actually spawns in -- so a valid
+    /// `./relative/script` could be wrongly rejected with 422.
+    #[test]
+    fn resolve_executable_checks_a_relative_command_against_the_session_cwd() {
+        let dir = scratch_dir("resolve-executable");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Relative to the daemon's own (irrelevant) cwd, "./run.sh" resolves
+        // to nothing -- only resolving against the session's `cwd` finds it.
+        assert!(!resolve_executable("./run.sh", &std::env::temp_dir().join("not-the-right-place")));
+        assert!(resolve_executable("./run.sh", &dir));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

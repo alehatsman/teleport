@@ -137,6 +137,40 @@ async fn claim_control_preempts_and_notifies_the_loser() {
     assert_eq!(revoked["client_id"], "b");
 }
 
+/// M4 review: the control lease used to be keyed purely on `client_id`, with
+/// no way to tell apart two simultaneous connections that happen to share
+/// one -- e.g. a reloaded tab racing its own not-yet-closed old socket. Both
+/// used to pass as controller and could write concurrently. Now each grant
+/// carries an epoch, and only the connection holding the *current* one
+/// counts: the older of two same-`client_id` connections must be treated as
+/// having lost control the moment the newer one attaches.
+#[tokio::test]
+async fn a_second_connection_sharing_a_client_id_supersedes_the_first() {
+    let daemon = support::spawn(support::default_config()).await;
+    let id = support::create_shell_session(&daemon, vec![]);
+
+    let mut first = connect(&daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=a&mode=control")), Some(support::TOKEN), None)
+        .await
+        .expect("connect first");
+    let ready1 = next_json(&mut first).await;
+    assert_eq!(ready1["control"], true);
+
+    // Same client_id, a second connection -- attach_control's
+    // already-held-by-this-client_id branch grants it too.
+    let mut second = connect(&daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=a&mode=control")), Some(support::TOKEN), None)
+        .await
+        .expect("connect second");
+    let ready2 = next_json(&mut second).await;
+    assert_eq!(ready2["control"], true);
+
+    // The first connection's grant is now stale: its input must be rejected,
+    // not silently reach the PTY alongside the second connection's.
+    first.send(Message::Binary(b"echo hi\n".to_vec().into())).await.expect("send input");
+    let error = next_json(&mut first).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["code"], "not_controller", "a superseded same-client_id connection must not still be able to write");
+}
+
 /// Input from an observer never reaches the PTY -- rejected with
 /// `not_controller` instead (docs/10-testing.md#3-protocol-tests).
 #[tokio::test]
