@@ -41,9 +41,19 @@ function Run-Spike {
     $stdoutFile = Join-Path $env:TEMP "spike_stdout_$PID.txt"
     Remove-Item $stderrFile, $stdoutFile -ErrorAction SilentlyContinue
 
-    $p = Start-Process -FilePath (Join-Path $exeDir $Exe) -ArgumentList $ExeArgs `
-        -NoNewWindow -PassThru `
-        -RedirectStandardError $stderrFile -RedirectStandardOutput $stdoutFile
+    # Start-Process's -ArgumentList rejects an empty array (null/empty validation),
+    # so only pass it when there's actually something to pass.
+    $startArgs = @{
+        FilePath              = Join-Path $exeDir $Exe
+        NoNewWindow            = $true
+        PassThru               = $true
+        RedirectStandardError  = $stderrFile
+        RedirectStandardOutput = $stdoutFile
+    }
+    if ($ExeArgs.Count -gt 0) {
+        $startArgs.ArgumentList = $ExeArgs
+    }
+    $p = Start-Process @startArgs
 
     $finished = $p.WaitForExit($TimeoutSec * 1000)
     if (-not $finished) {
