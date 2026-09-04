@@ -26,11 +26,19 @@
 //! `started` moment to record: `started_at_ms == created_at_ms` always in
 //! this codebase, so a `started` event would be a pure duplicate of
 //! `created`). `resized`, `control_granted`, `control_revoked`,
-//! `subscriber_attached`, `subscriber_detached`, `slow_consumer`, `bell` and
-//! `idle` would each need new plumbing through `ws.rs` / the control lease /
-//! the reader loop -- out of proportion to this milestone's gate (a
-//! SIGKILL-and-restart test, docs/11-mvp-plan.md#m7). The table already has
-//! the room; wiring the rest is future work, not a design dead end.
+//! `subscriber_attached`, `subscriber_detached` and `slow_consumer` would
+//! each need new plumbing through `ws.rs` / the control lease -- out of
+//! proportion to M7's gate (a SIGKILL-and-restart test,
+//! docs/11-mvp-plan.md#m7). The table already has the room; wiring the rest
+//! is future work, not a design dead end.
+//!
+//! **`bell` and `idle` are the exception -- wired in M8**
+//! (formerly docs/15-open-questions.md's D3, resolved and folded into
+//! docs/04-api-protocol.md#get-apiv1sessions): `session.rs::create`'s
+//! `on_output` closure scans every chunk for a BEL byte, and a periodic
+//! sweep task in `main.rs` (`Session::tick_idle`) detects output going
+//! quiet while the process is alive. Both write through this same
+//! `note_event`; no `persistence.rs` change was needed to add them.
 //!
 //! **A second scope cut in the same spirit:** `sessions.log_capped_at` is
 //! never written by this module -- it stays `NULL` forever, even once a live

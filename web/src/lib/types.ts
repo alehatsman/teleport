@@ -29,6 +29,9 @@ export interface Session {
   lost_reason: string | null;
   controller: string | null;
   subscribers: number;
+  /** D3 (docs/04-api-protocol.md#get-apiv1sessions). */
+  last_bell_ms: number | null;
+  idle_since_ms: number | null;
 }
 
 export interface SessionsResponse {

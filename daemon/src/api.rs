@@ -408,6 +408,9 @@ struct SessionView {
     lost_reason: Option<String>,
     controller: Option<String>,
     subscribers: usize,
+    /// D3 (docs/04-api-protocol.md#get-apiv1sessions).
+    last_bell_ms: Option<i64>,
+    idle_since_ms: Option<i64>,
 }
 
 impl SessionView {
@@ -432,13 +435,17 @@ impl SessionView {
             lost_reason: session.lost_reason().map(|r| r.as_str().to_string()),
             controller: session.controller_name(),
             subscribers: session.subscriber_count(),
+            last_bell_ms: session.last_bell_ms(),
+            idle_since_ms: session.idle_since_ms(),
         }
     }
 
     /// A DB-only historical row -- no live `Session` behind it, so
     /// `controller`/`subscribers` are always the "nobody's here" values
     /// (docs/05-persistence.md; persistence.rs's module doc on why a
-    /// recovered row is never a `Session`).
+    /// recovered row is never a `Session`). Same reasoning for
+    /// `last_bell_ms`/`idle_since_ms`: attention signals are "does this
+    /// running session need you," which a closed session never does.
     fn from_row(row: &persistence::SessionRow) -> Self {
         SessionView {
             id: row.id.clone(),
@@ -459,6 +466,8 @@ impl SessionView {
             lost_reason: row.lost_reason.clone(),
             controller: None,
             subscribers: 0,
+            last_bell_ms: None,
+            idle_since_ms: None,
         }
     }
 }

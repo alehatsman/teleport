@@ -22,7 +22,6 @@ backlog pretending to be a spec.
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
 | [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
-| [D3](#d3--attention-signals-in-the-mvp-ui) | Are `bell` / `idle` surfaced in the MVP? | M8 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
@@ -553,28 +552,6 @@ v2 addition and should not be built now.
 
 The point of recording the decision is that it not be discovered halfway through M5 and
 answered by whatever is quickest that afternoon.
-
-## D3 — Attention signals in the MVP UI
-
-**Blocks M8.** M2 records `bell` and `idle` rows in `session_events`
-([05](05-persistence.md#schema)). **Nothing in the MVP ever reads them.**
-
-Meanwhile [13-native-clients.md](13-native-clients.md#push-notifications) names *"an agent
-is waiting for you"* as the feature that justifies the product existing, and
-[08-packaging.md](08-packaging.md) lists OS notifications as in-scope for the Tauri shell
-— which cannot be built, because attention state is not on the API.
-
-**Cost to close:** two fields on the session-list payload (`last_bell_ms`,
-`idle_since_ms`), a badge in the session list, a tray notification in M10. Roughly two
-hours.
-
-**Recommendation: take it in M8.** It is the highest ratio of user-visible payoff to
-lines of code anywhere in the plan, and it converts the M10 notification bullet from
-aspiration into something implementable.
-
-**If rejected, delete the `bell` and `idle` event types from the schema.** Recording
-events that nothing reads is dead weight that will rot into a lie about what the daemon
-detects.
 
 ---
 

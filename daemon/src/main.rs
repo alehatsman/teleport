@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use teleportd::api::{build_router, AppState};
 use teleportd::auth::OriginPolicy;
 use teleportd::log::LogLimits;
-use teleportd::session::SessionManager;
+use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
 use teleportd::{config, now_ms, presets};
 
 const DEFAULT_PORT: u16 = 7337;
@@ -166,6 +166,7 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         web_dist,
     });
+    spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
 
     let serve_result = axum::serve(listener, app)
@@ -289,6 +290,23 @@ fn remove_port_file(data_dir: &Path) -> Result<()> {
 /// deleted, then its row -- directory first, so a crash mid-GC leaves a row
 /// with no log rather than a log with no row. Detached (`tokio::spawn`, not
 /// awaited) -- GC is background housekeeping, not on any request path.
+/// D3 (docs/04-api-protocol.md#get-apiv1sessions): the
+/// only trigger for "output went quiet" is time passing with nothing
+/// happening, so unlike every other `session_events` write this one needs a
+/// clock, not a callback. Same shape as `spawn_gc_task` below.
+fn spawn_idle_sweep_task(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(IDLE_SWEEP_INTERVAL_MS));
+        loop {
+            interval.tick().await;
+            let now = now_ms();
+            for session in state.sessions.list() {
+                session.tick_idle(now, IDLE_THRESHOLD_MS);
+            }
+        }
+    });
+}
+
 fn spawn_gc_task(
     db: teleportd::persistence::Db,
     sessions_root: PathBuf,
