@@ -1,0 +1,43 @@
+/* Plain CSS only -- no UI framework (docs/09-frontend.md#explicitly-not-in-the-frontend). */
+
+:root {
+  color-scheme: dark;
+  --bg: #121212;
+  --fg: #e6e6e6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+input,
+select {
+  font: inherit;
+  background: #1a1a1a;
+  color: inherit;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+}
