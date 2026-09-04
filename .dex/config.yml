@@ -6,4 +6,12 @@ index:
   include:
     - docs/
     - "*.md"
-  ignore: []
+    - daemon/
+    - spike/
+    - web/
+  ignore:
+    - daemon/target/
+    - spike/target/
+    - web/node_modules/
+    - web/dist/
+    - web/dist-ssr/
