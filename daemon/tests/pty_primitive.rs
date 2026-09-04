@@ -99,7 +99,7 @@ fn contains(acc: &[u8], needle: &str) -> bool {
 
 #[test]
 fn echo_roundtrip() {
-    let (mut spawned, out_rx) = spawn_interactive_sh(24, 80);
+    let (spawned, out_rx) = spawn_interactive_sh(24, 80);
     spawned.session.write(b"echo hello\n").unwrap();
     recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "hello"));
 }
@@ -114,7 +114,7 @@ fn large_write_arrives_intact_and_in_order() {
     // \n -> \r\n surprises on the way back either. Same lesson the spike
     // already learned the hard way for S3
     // (docs/15-open-questions.md#s3--a-blocking-write-wedges-terminate).
-    let (mut spawned, out_rx) = spawn_sh("stty raw -echo; cat", 24, 80);
+    let (spawned, out_rx) = spawn_sh("stty raw -echo; cat", 24, 80);
 
     let payload: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
     spawned.session.write(&payload).unwrap();
@@ -139,7 +139,7 @@ fn large_burst_read_drops_nothing() {
 
 #[test]
 fn resize_is_observed_by_the_child() {
-    let (mut spawned, out_rx) = spawn_interactive_sh(24, 80);
+    let (spawned, out_rx) = spawn_interactive_sh(24, 80);
     spawned.session.resize(120, 40).unwrap();
     // resize() hands off to the control thread and returns immediately
     // (docs/03-pty-layer.md#resize: "short and non-blocking") -- it carries
@@ -199,7 +199,7 @@ fn eof_and_exit_are_independent_signals() {
 
 #[test]
 fn terminate_reaches_exited_within_the_bounded_policy() {
-    let (mut spawned, _out_rx) = spawn_sh("sleep 30", 24, 80);
+    let (spawned, _out_rx) = spawn_sh("sleep 30", 24, 80);
 
     let t0 = Instant::now();
     spawned.session.terminate().expect("terminate should not error");
@@ -215,7 +215,7 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
 
 #[test]
 fn terminate_under_output_load_does_not_deadlock() {
-    let (mut spawned, out_rx) = spawn_sh("yes", 24, 80);
+    let (spawned, out_rx) = spawn_sh("yes", 24, 80);
 
     // Let it produce a real burst before terminating, so terminate() is
     // racing an active reader, not an idle one.
@@ -237,7 +237,7 @@ fn terminate_under_output_load_does_not_deadlock() {
 
 #[test]
 fn terminate_kills_the_grandchild_process_tree() {
-    let (mut spawned, out_rx) = spawn_sh("sleep 30 & echo GRANDCHILD_PID:$!; wait", 24, 80);
+    let (spawned, out_rx) = spawn_sh("sleep 30 & echo GRANDCHILD_PID:$!; wait", 24, 80);
 
     let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "GRANDCHILD_PID:"));
     let text = String::from_utf8_lossy(&acc);

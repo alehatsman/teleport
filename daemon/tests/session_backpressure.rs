@@ -6,6 +6,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teleportd::pty::SpawnSpec;
@@ -29,11 +30,58 @@ async fn zero_subscribers_session_survives() {
     let manager = SessionManager::new();
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 24, 80, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
 
     session.write(b"echo hi\n").expect("write with no subscriber");
     session.resize(40, 120).expect("resize with no subscriber");
     session.terminate().expect("terminate with no subscriber");
+}
+
+/// S3 one layer up (docs/03-pty-layer.md#the-terminalsession-trait): a
+/// `Session` must not serialize `write`/`resize`/`terminate` behind one lock.
+/// A child that never reads its pty eventually blocks a writer thread that
+/// keeps calling `write()`; `terminate()` must still return within its
+/// bounded policy (~7s) instead of queueing behind that stuck writer.
+#[tokio::test]
+async fn terminate_is_not_wedged_by_a_stuck_write() {
+    let manager = SessionManager::new();
+    let cwd = temp_dir();
+    let args = vec!["-c".to_string(), "sleep 30".to_string()];
+    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+
+    // Runs on its own thread, not this test's async task, so a write that
+    // blocks doesn't block the assertion below from ever running.
+    let writer_session = Arc::clone(&session);
+    std::thread::spawn(move || {
+        let chunk = vec![b'x'; 4096];
+        while writer_session.write(&chunk).is_ok() {}
+    });
+
+    // Give the writer thread time to actually fill the write channel and the
+    // pty's own kernel buffer -- otherwise terminate() could win the race by
+    // running before any write is stuck, proving nothing.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let t0 = Instant::now();
+    session.terminate().expect("terminate should not error");
+    assert!(t0.elapsed() < Duration::from_secs(9), "terminate() must not be wedged behind a stuck write");
+}
+
+/// `terminate()` must remove the session from its `SessionManager` -- left
+/// resolvable forever, a terminated session keeps its pty.rs writer thread
+/// (parked on `write_tx` until every clone drops) alive for the life of the
+/// daemon.
+#[tokio::test]
+async fn terminate_removes_the_session_from_its_manager() {
+    let manager = SessionManager::new();
+    let cwd = temp_dir();
+    let args = vec![];
+    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
+    let id = session.id;
+
+    session.terminate().expect("terminate should not error");
+
+    assert!(manager.get(id).is_none(), "terminated session must be removed from the manager");
 }
 
 /// A subscriber that reads gets exactly what the session wrote, in order,
@@ -54,7 +102,7 @@ async fn subscriber_receives_output_in_order() {
     let manager = SessionManager::new();
     let cwd = temp_dir();
     let args = vec![];
-    let session = manager.create(spec(&args, 24, 80, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
 
     let mut sub = session.subscribe();
     session.write(b"printf 'hello world'\n").expect("write");
@@ -94,7 +142,7 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     let manager = SessionManager::new();
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {N}")];
-    let session = manager.create(spec(&args, 24, 80, &cwd)).expect("create session");
+    let session = manager.create(spec(&args, 80, 24, &cwd)).expect("create session");
 
     let slow = session.subscribe(); // never read from this one.
     let mut fast = session.subscribe();
