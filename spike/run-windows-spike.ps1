@@ -85,6 +85,14 @@ Run-Spike "S3 shared"   "s3_blocking_write.exe" @("shared")   15
 Run-Spike "S4 plain"      "s4_drop_master.exe" @("plain")      15
 Run-Spike "S4 grandchild" "s4_drop_master.exe" @("grandchild") 15
 
+# S5 -- W1 follow-up: is the graceful-exit hang cmd.exe-specific, or does it happen
+# for ANY process attached to a ConPTY? Same exit0/exit7/sigkill shape as S1, but
+# spawns mini_exit.exe (a trivial Rust binary, no shell, no console API calls beyond
+# std's implicit runtime init) instead of cmd.exe. See docs/15-open-questions.md#w1
+Run-Spike "S5 minimal exit0"   "s5_minimal.exe" @("exit0")   15
+Run-Spike "S5 minimal exit7"   "s5_minimal.exe" @("exit7")   15
+Run-Spike "S5 minimal sigkill" "s5_minimal.exe" @("sigkill") 15
+
 Write-Host ""
 Write-Host "Done. Full transcript: $outFile"
 Write-Host "Send that file back (or paste its contents) to fold the Windows results into the docs."
