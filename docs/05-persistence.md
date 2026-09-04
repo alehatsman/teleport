@@ -162,10 +162,11 @@ cap changes is only whether the bytes behind an offset are still on disk.
   userspace `BufWriter`** — replay reads through a separate handle, and a byte still
   sitting in a userspace buffer is not visible to it, so buffering there would publish
   offsets whose bytes a reconnect cannot read.
-- `fsync` on session close, and on a 2-second timer while running. The timer is checked
-  on the append path rather than driven by a thread of its own; a session that goes
-  quiet therefore holds its unsynced tail until close, which costs nothing given the
-  daemon-crash boundary ([01-architecture.md](01-architecture.md#the-crash-boundary)).
+- `fsync` on session close, and on a 2-second timer while running. **Neither runs on the
+  reader thread or under the fan-out mutex** — an `fsync` held there stalls the PTY
+  behind disk latency and blocks every concurrent attach. One `LogSyncer` thread for the
+  whole daemon holds a second reference to each log's open file and flushes them on the
+  timer; close-time sync goes through the same handle.
 - Never `fsync` per chunk — it would couple PTY drain rate to disk latency and put the
   reader thread at risk of falling behind under load.
 
@@ -190,6 +191,11 @@ so `log_capped_at == log_max_bytes` exactly for any log capped by growing. A log
 `next_offset` is ahead of its file for any *other* reason — an `io_error`, or a restart
 whose stored `output_bytes` exceeds the file length — reports `log_capped_at` at the
 file length, so "what is readable" has one answer and every read clamps to it.
+
+This is why a failed append **sets `log_capped_at` too**, not just `lost_reason`. A hole
+that is not reported as a cap is served as a replay range that silently stops short
+while live output resumes past it — a gap the client is never told about, which is
+exactly what the offset model exists to make impossible.
 
 Never truncate from the head — that would invalidate every offset in flight.
 
