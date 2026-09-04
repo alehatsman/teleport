@@ -654,12 +654,21 @@ tailnet, takes control, and types into it.
 > default") and the shipped code (`Config::default().auth_token == true`), both of
 > which are correct; the bullet was simply stale and is fixed here.
 >
-> **Not done, and not something this environment can do:** the gate is a physical
-> test — a phone on cellular, off the LAN, through a real `tailscale serve --bg` —
-> plus a full host reboot to confirm `--bg` persistence, plus recording
-> [N1](15-open-questions.md#n1--keystroke-latency)'s RTT and direct-vs-DERP result.
-> All three need real hardware and a tailnet. Deferred to the user; M9 stays
-> gate-open until that pass is run and the numbers are written into 15.
+> **Gate met 2026-09-05, on Linux (`mainpc`, real hardware, real tailnet).** Real
+> `teleportd` on `127.0.0.1:7337`, `allowed_hosts`/`allowed_origins` set to
+> `mainpc.tail37c478.ts.net`, `tailscale serve --bg` proxying it over HTTPS. Phone
+> (iOS) with Wi-Fi off, on cellular, opened `https://mainpc.tail37c478.ts.net/?token=…`,
+> took control of a session, and typed into it. `tailscale status` showed the phone's
+> endpoint move from a private LAN address (an earlier same-Wi-Fi pass, kept as a
+> distinct data point below) to a public IP once actually on cellular, connected
+> **direct** — no DERP relay. See [N1](15-open-questions.md#n1--keystroke-latency)
+> for the RTT numbers and typing-feel report.
+>
+> **Not done — needs a real reboot, deferred:** `tailscale serve status` after a
+> **full host reboot**, to confirm `--bg` persistence actually holds on this OS. Not
+> run in this session (rebooting the live dev machine mid-session is disruptive and
+> wasn't asked for) — do this whenever convenient and report back; nothing else is
+> outstanding for M9.
 
 **Also record** ([N1](15-open-questions.md#n1--keystroke-latency)): the RTT on that link,
 and whether `tailscale status` reports a direct connection or a DERP relay for the phone.
