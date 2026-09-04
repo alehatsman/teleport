@@ -112,12 +112,13 @@
   });
 </script>
 
-<div class="terminal-wrapper" bind:this={wrapperEl}>
-  <div class="terminal-container" bind:this={containerEl}></div>
+<div class="terminal" bind:this={wrapperEl}>
+  <div class="terminal__surface" bind:this={containerEl}></div>
 </div>
 
 <style>
-  .terminal-wrapper {
+  /* Block: terminal -- the xterm.js canvas frame (docs/09-frontend.md#terminalsvelte). */
+  .terminal {
     width: 100%;
     height: 100%;
     overflow: hidden;

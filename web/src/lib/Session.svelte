@@ -93,22 +93,25 @@
   }
 </script>
 
-<div class="session-view">
-  <header>
-    <button class="back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
-    <h1 class="title">{session?.command ?? sessionId}</h1>
-    <span
-      class="status-dot"
-      aria-hidden="true"
-      class:live={connectionState === "live"}
-      class:reconnecting={connectionState === "reconnecting" || connectionState === "connecting"}
-    ></span>
-    <span class="status-label">{connectionState}</span>
-    <span class="spacer"></span>
+<div class="session">
+  <header class="session__header">
+    <button class="session__back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
+    <h1 class="session__title">{session?.command ?? sessionId}</h1>
+    <span class="session__status">
+      <span
+        class="dot"
+        aria-hidden="true"
+        class:dot--success={connectionState === "live"}
+        class:dot--warning-strong={connectionState === "reconnecting" || connectionState === "connecting"}
+        class:dot--pulse={connectionState === "reconnecting" || connectionState === "connecting"}
+      ></span>
+      <span class="session__status-label">{connectionState}</span>
+    </span>
+    <span class="session__spacer"></span>
     {#if hasControl}
-      <span class="badge controlling">Controlling</span>
+      <span class="badge badge--controlling">Controlling</span>
     {:else}
-      <button class="take-control" onclick={takeControl}>
+      <button class="btn btn--primary" onclick={takeControl}>
         Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
       </button>
     {/if}
@@ -117,8 +120,10 @@
   {#if truncatedNotice}
     <div class="notice">
       Scrollback truncated.
-      <a href={`/api/v1/sessions/${sessionId}/log`} target="_blank" rel="noreferrer">View full log</a>
-      <button class="dismiss" onclick={() => (truncatedNotice = false)} aria-label="Dismiss">&times;</button>
+      <a class="notice__link" href={`/api/v1/sessions/${sessionId}/log`} target="_blank" rel="noreferrer">
+        View full log
+      </a>
+      <button class="notice__dismiss" onclick={() => (truncatedNotice = false)} aria-label="Dismiss">&times;</button>
     </div>
   {/if}
 
@@ -126,137 +131,103 @@
     <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
   {/if}
 
-  <main class="terminal-area" class:dimmed={!hasControl}>
+  <main class="session__main" class:session__main--dimmed={!hasControl}>
     {#if stream}
       <Terminal bind:this={terminalRef} {stream} isController={hasControl} />
     {/if}
   </main>
 
   <div class="key-bar">
-    <button onclick={() => sendKey("\x1b")}>Esc</button>
-    <button onclick={() => sendKey("\t")}>Tab</button>
-    <button onclick={() => sendKey("\x03")}>Ctrl-C</button>
-    <button onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
-    <button onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
-    <button onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
-    <button onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x1b")}>Esc</button>
+    <button class="key-bar__button" onclick={() => sendKey("\t")}>Tab</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x03")}>Ctrl-C</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
+    <button class="key-bar__button" onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
   </div>
 </div>
 
 <style>
-  .session-view {
+  /* Block: session -- one session view (header, terminal, key bar). */
+  .session {
     display: flex;
     flex-direction: column;
     height: 100vh;
   }
-  header {
+  .session__header {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
+    gap: var(--space-2);
+    padding: 0.6rem var(--space-3);
     border-bottom: 1px solid var(--border);
+    background: var(--surface);
   }
-  .title {
-    font-size: inherit;
-    font-weight: 600;
-    margin: 0;
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-  }
-  .status-dot.live {
-    background: var(--success);
-  }
-  .status-dot.reconnecting {
-    background: var(--warning-strong);
-  }
-  .status-label {
-    font-size: 0.75rem;
-    opacity: 0.7;
-    text-transform: capitalize;
-  }
-  .spacer {
-    flex: 1;
-  }
-  .badge.controlling {
-    font-size: 0.75rem;
-    background: var(--badge-bg);
-    color: var(--badge-fg);
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-  }
-  .take-control {
-    background: var(--accent);
-    color: var(--accent-fg);
-    border: none;
-    border-radius: 4px;
-    padding: 0.3rem 0.6rem;
-    cursor: pointer;
-  }
-  .notice {
-    background: var(--notice-bg);
-    color: var(--notice-fg);
-    padding: 0.4rem 0.75rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.85rem;
-  }
-  .notice a {
-    color: inherit;
-  }
-  .notice .dismiss {
-    margin-left: auto;
-    background: none;
-    border: none;
-    color: inherit;
-    cursor: pointer;
-  }
-  .toast {
-    position: absolute;
-    top: 3rem;
-    right: 1rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-strong);
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    z-index: 10;
-  }
-  .terminal-area {
-    flex: 1;
-    min-height: 0;
-  }
-  .terminal-area.dimmed {
-    opacity: 0.85;
-  }
-  .key-bar {
-    display: none;
-    gap: 0.25rem;
-    padding: 0.4rem;
-    border-top: 1px solid var(--border);
-  }
-  .key-bar button {
-    flex: 1;
-    background: var(--surface-raised);
-    color: inherit;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    padding: 0.5rem 0;
-  }
-  .back {
+  .session__back {
     background: none;
     border: none;
     color: inherit;
     font-size: 1.1rem;
     cursor: pointer;
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+  .session__back:hover {
+    opacity: 1;
+  }
+  .session__title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .session__status {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+  }
+  .session__status-label {
+    font-size: 0.75rem;
+    opacity: 0.7;
+    text-transform: capitalize;
+  }
+  .session__spacer {
+    flex: 1;
+  }
+  .session__main {
+    flex: 1;
+    min-height: 0;
+    transition: opacity var(--transition-fast);
+  }
+  .session__main--dimmed {
+    opacity: 0.85;
   }
 
-  /* The key bar exists for what a soft keyboard can't send
-     (docs/09-frontend.md#mobile) -- desktop already has these keys. */
+  /* Block: key-bar -- touch-only row of keys a soft keyboard can't send
+     (docs/09-frontend.md#mobile). */
+  .key-bar {
+    display: none;
+    gap: 0.3rem;
+    padding: 0.4rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .key-bar__button {
+    flex: 1;
+    background: var(--surface-raised);
+    color: inherit;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0;
+  }
+  .key-bar__button:active {
+    background: var(--surface-hover);
+  }
+
   @media (max-width: 700px), (pointer: coarse) {
     .key-bar {
       display: flex;

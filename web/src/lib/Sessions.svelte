@@ -149,17 +149,22 @@
   }
 </script>
 
-<div class="sessions-view">
-  <header>
-    <h1>teleport</h1>
-    <button class="primary" onclick={openLauncher} aria-expanded={showLauncher} aria-controls="launcher-panel">
+<div class="sessions">
+  <header class="sessions__header">
+    <h1 class="sessions__title">teleport</h1>
+    <button
+      class="btn btn--primary"
+      onclick={openLauncher}
+      aria-expanded={showLauncher}
+      aria-controls="launcher-panel"
+    >
       New session
     </button>
   </header>
 
   <main>
     {#if loadError}
-      <div class="banner error" role="alert">{loadError}</div>
+      <div class="banner banner--error" role="alert">{loadError}</div>
     {/if}
 
     {#if showLauncher}
@@ -167,7 +172,7 @@
            container, standard for a form acting as a dismissable panel; the actual controls
            inside remain focusable, interactive elements. -->
       <form id="launcher-panel" class="launcher" onsubmit={onLauncherSubmit} onkeydown={onLauncherKeydown}>
-        <label>
+        <label class="launcher__field">
           Preset
           <select bind:value={selectedPreset} bind:this={firstFieldEl}>
             <option value="">Custom command</option>
@@ -177,12 +182,12 @@
           </select>
         </label>
         {#if !selectedPreset}
-          <label>
+          <label class="launcher__field">
             Command
             <input type="text" bind:value={customCommand} autocapitalize="none" autocorrect="off" spellcheck="false" />
           </label>
         {/if}
-        <label>
+        <label class="launcher__field">
           Working directory
           <input
             type="text"
@@ -202,46 +207,50 @@
           {/if}
         </label>
         {#if launchError}
-          <div class="banner error" role="alert">{launchError}</div>
+          <div class="banner banner--error" role="alert">{launchError}</div>
         {/if}
-        <div class="actions">
-          <button type="button" onclick={closeLauncher} disabled={launching}>Cancel</button>
-          <button type="submit" class="primary" disabled={launching}>{launching ? "Launching…" : "Launch"}</button>
+        <div class="launcher__actions">
+          <button type="button" class="btn" onclick={closeLauncher} disabled={launching}>Cancel</button>
+          <button type="submit" class="btn btn--primary" disabled={launching}>
+            {launching ? "Launching…" : "Launch"}
+          </button>
         </div>
       </form>
     {/if}
 
     {#if loading}
-      <p class="empty">Loading…</p>
+      <p class="sessions__loading">Loading…</p>
     {:else if sessions.length === 0}
-      <p class="empty">No sessions yet.</p>
+      <div class="empty">
+        <p class="empty__text">No sessions yet.</p>
+        <button class="btn btn--primary" onclick={openLauncher}>New session</button>
+      </div>
     {:else}
       <ul class="session-list">
         {#each sessions as session (session.id)}
           <li class="session-row">
-            <a class="open" href={`#/sessions/${session.id}`} onclick={() => onOpen(session.id)}>
+            <a class="session-row__link" href={`#/sessions/${session.id}`} onclick={() => onOpen(session.id)}>
               <span
-                class="state"
+                class="dot"
                 aria-hidden="true"
-                class:running={session.state === "running"}
-                class:exited={session.state === "exited"}
-                class:lost={session.state === "lost"}
+                class:dot--success={session.state === "running"}
+                class:dot--warning={session.state === "lost"}
               ></span>
               <span class="sr-only">{STATE_LABELS[session.state]}.</span>
               {#if needsAttention(session)}
-                <span class="attention" aria-hidden="true">●</span>
+                <span class="session-row__attention" aria-hidden="true">●</span>
                 <span class="sr-only">Needs attention.</span>
               {/if}
-              <span class="command">{session.command}</span>
-              <span class="cwd">{session.cwd}</span>
+              <span class="session-row__command">{session.command}</span>
+              <span class="session-row__cwd">{session.cwd}</span>
               {#if session.controller}
-                <span class="controller">controlled by {session.controller}</span>
+                <span class="session-row__controller">controlled by {session.controller}</span>
               {/if}
             </a>
             {#if session.state === "exited" || session.state === "lost"}
-              <button class="danger" onclick={() => purge(session.id)}>Delete</button>
+              <button class="btn btn--danger" onclick={() => purge(session.id)}>Delete</button>
             {:else}
-              <button onclick={() => terminate(session.id)}>Terminate</button>
+              <button class="btn" onclick={() => terminate(session.id)}>Terminate</button>
             {/if}
           </li>
         {/each}
@@ -251,72 +260,108 @@
 </div>
 
 <style>
-  .sessions-view {
-    padding: 1rem;
+  /* Block: sessions -- the session-list view (root). */
+  .sessions {
+    padding: var(--space-4);
     max-width: 720px;
     margin: 0 auto;
   }
-  header {
+  .sessions__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 1rem;
+    margin-bottom: 1.25rem;
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border);
   }
-  h1 {
-    font-size: 1.1rem;
+  .sessions__title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
     margin: 0;
   }
-  .banner.error {
-    background: var(--error-bg);
-    color: var(--error-fg);
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    margin-bottom: 0.75rem;
+  .sessions__loading {
+    opacity: 0.6;
   }
+
+  /* Block: launcher -- the new-session form panel. */
   .launcher {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-3);
+    background: var(--surface-raised);
     border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    padding: 0.75rem;
-    margin-bottom: 1rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
+    box-shadow: var(--shadow-panel);
   }
-  .launcher label {
+  .launcher__field {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.3rem;
     font-size: 0.85rem;
+    color: var(--muted);
   }
-  .actions {
+  .launcher__field input,
+  .launcher__field select {
+    color: var(--fg);
+  }
+  .launcher__actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
+
+  /* Block: empty -- the no-sessions-yet placeholder. */
   .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: 2.5rem var(--space-3);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
+  }
+  .empty__text {
+    margin: 0;
     opacity: 0.6;
   }
+
+  /* Block: session-list -- just the list container; each item is its own
+     block (session-row) since it has too many parts to stay one element
+     deep. */
   .session-list {
     list-style: none;
     margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
+
+  /* Block: session-row -- one row in the session list. */
   .session-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
+    background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-md);
+    padding: 0.6rem var(--space-3);
+    transition:
+      border-color var(--transition-fast),
+      background-color var(--transition-fast);
   }
-  .open {
+  .session-row:hover {
+    border-color: var(--border-strong);
+    background: var(--surface-hover);
+  }
+  .session-row__link {
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     background: none;
     border: none;
     text-align: left;
@@ -326,60 +371,33 @@
     padding: 0;
     overflow: hidden;
   }
-  .state {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
-  }
-  .state.running {
-    background: var(--success);
-  }
-  .state.exited {
-    background: var(--muted);
-  }
-  .state.lost {
-    background: var(--warning);
-  }
-  .attention {
+  .session-row__attention {
     color: var(--attention);
     font-size: 0.7rem;
     flex-shrink: 0;
   }
-  .command {
+  .session-row__command {
     font-weight: 600;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9rem;
   }
-  .cwd {
-    opacity: 0.6;
-    font-size: 0.85rem;
+  .session-row__cwd {
+    opacity: 0.55;
+    font-size: 0.8rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .controller {
+  .session-row__controller {
     margin-left: auto;
     font-size: 0.75rem;
     opacity: 0.7;
-  }
-  button.primary {
-    background: var(--accent);
-    color: var(--accent-fg);
-    border: none;
-  }
-  button.danger {
-    background: var(--danger-bg);
-    color: var(--danger-fg);
-    border: none;
-  }
-  button {
-    border-radius: 4px;
-    padding: 0.4rem 0.7rem;
-    cursor: pointer;
+    flex-shrink: 0;
   }
 
   @media (max-width: 600px) {
-    .sessions-view {
+    .sessions {
       padding: 0.5rem;
     }
   }
