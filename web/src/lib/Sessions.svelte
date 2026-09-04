@@ -18,6 +18,22 @@
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
+  // derived from the session list already on hand -- no new storage/endpoint.
+  // Most-recent-use-first, deduped, capped so the dropdown stays scannable.
+  let recentCwds: string[] = $derived.by(() => {
+    const latest = new Map<string, number>();
+    for (const s of sessions) {
+      if (!s.cwd) continue;
+      const prev = latest.get(s.cwd);
+      if (prev === undefined || s.created_at_ms > prev) latest.set(s.cwd, s.created_at_ms);
+    }
+    return [...latest.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([dir]) => dir);
+  });
+
   onMount(async () => {
     await Promise.all([refresh(), loadPresets()]);
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
@@ -120,7 +136,14 @@
       {/if}
       <label>
         Working directory
-        <input type="text" bind:value={cwd} placeholder="/home/me/project" />
+        <input type="text" bind:value={cwd} placeholder="/home/me/project" list="recent-cwds" />
+        {#if recentCwds.length > 0}
+          <datalist id="recent-cwds">
+            {#each recentCwds as dir (dir)}
+              <option value={dir}></option>
+            {/each}
+          </datalist>
+        {/if}
       </label>
       {#if launchError}
         <div class="banner error">{launchError}</div>
