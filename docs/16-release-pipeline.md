@@ -112,11 +112,17 @@ job build (matrix: the four targets above, needs: check-version):
 job publish (ubuntu, needs: build):
     download-artifact (all)
     sha256sum every archive → checksums.txt
-    gh release create vX.Y.Z <archives> checksums.txt --generate-notes
+    gh release create vX.Y.Z <archives> checksums.txt --generate-notes [--prerelease]
 ```
 
 `gh release create` (already authenticated via `GITHUB_TOKEN`, default repo perms) is
 enough — no extra release-automation action needed.
+
+A tag with a semver prerelease suffix (`v1.2.3-rc1`, `v0.0.0-dev`) gets `--prerelease`
+automatically — detected as a `-` after the leading `v`. Without it, `gh release
+create` marks every tag "latest," and `install.sh` (plus the Releases page) resolves
+"latest" to the newest non-prerelease release — a prerelease tag would otherwise
+hijack that for real users pulling `curl | sh` with no `$TELEPORT_VERSION` set.
 
 ## `scripts/install.sh`
 
