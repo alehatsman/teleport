@@ -100,6 +100,29 @@ are additionally blocked on
 even once ported; the rest, including user-initiated `terminate` (hard-kills, unaffected
 by W1) and the grandchild-tree-close case, are expected to pass on Windows once W2 lands.
 
+> **CI flake found and closed, 2026-09-04:** `eof_and_exit_are_independent_signals`'s
+> detach recipe used `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- sh -c '...'`
+> (picked over the `setsid(1)` binary, which is util-linux and not on stock
+> macOS). Confirmed failing for real on `macos-latest`: the grandchild produced
+> *zero bytes* of output, meaning `perl` itself silently never started -- the
+> exact risk the recipe's own comment named, just not guarded against. Root
+> cause traced back to S2's own spike finding: what actually matters is SIGHUP
+> ignored *before* the fork races the parent's `exit 0`; a plain `trap '' HUP`
+> on the parent covers a backgrounded `sleep` (no exec of its own) just as
+> well, since fork inherits signal disposition and an ignored signal survives
+> `exec` too. Dropped `perl`/`setsid(1)` entirely -- verified locally that
+> `trap '' HUP; sleep 2 & echo $!` alone reproduces the same timing (direct
+> child exits ~1ms, EOF ~2000ms) -- one less external dependency for CI to be
+> missing. Additionally hardened by having the grandchild `echo` its own pid
+> (`$!`, same idiom as `terminate_kills_the_grandchild_process_tree`) and
+> asserting it's alive via `kill(pid, 0)` right after the direct child exits --
+> turns "it really started" into a fact instead of an inference from timing,
+> so the EOF-latency floor is no longer gambling on that. Deliberately does
+> *not* assert the grandchild is dead once EOF fires: past reparenting,
+> whatever ancestor reaps it (usually init) may not do so immediately, so a
+> live `kill(pid, 0)` doesn't mean still-running -- asserting otherwise would
+> just be a different flake.
+
 ---
 
 ## M2 — Session ownership and backpressure
@@ -284,6 +307,13 @@ boundary as [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempt
 > closes, not done here; picking it up is a half-day task, not a blocker for M5.
 > Windows: cross-compile-checked only, no fixtures run (same boundary as
 > [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted)).
+>
+> **CI gap found and closed, 2026-09-04:** `http_api.rs` was missing the
+> `cfg(unix)` gate every other `/bin/sh`-driving test file has, so `cargo test`
+> actually ran its fixtures on `windows-latest` -- 3 of them 422'd (no `/bin/sh`
+> there) instead of the 201/CREATED they hardcode. Gated it like its siblings;
+> Windows CI now matches the "cross-compile-checked only" boundary this doc
+> already claimed.
 >
 > **Review pass (2026-09-04), before this milestone closed:** an independent code
 > review of this diff found ten correctness bugs, all fixed here rather than carried

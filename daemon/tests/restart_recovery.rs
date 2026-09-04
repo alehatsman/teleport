@@ -12,6 +12,13 @@
 //! a couple of hand-rolled HTTP/1.1 requests over a raw `TcpStream` are
 //! simpler than pulling one in (`serde_json` is already a normal dependency,
 //! so JSON parsing doesn't need the same justification).
+//!
+//! `cfg(unix)`-gated: the one fixture here uses SIGKILL, and every helper is
+//! otherwise unused on Windows -- an `unused_functions` clippy error under
+//! `-D warnings` there, same class of gap as `http_api.rs`/`ws_protocol.rs`
+//! (found and closed alongside them, 2026-09-05).
+
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -133,7 +140,6 @@ fn http(port: u16, method: &str, path: &str, token: &str, body: Option<&Value>) 
     (status, body)
 }
 
-#[cfg(unix)]
 #[test]
 fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     let data_dir = temp_dir("sigkill-recovery");

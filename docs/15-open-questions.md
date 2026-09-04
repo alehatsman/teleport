@@ -20,14 +20,16 @@ backlog pretending to be a spec.
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
+| [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [D3](#d3--attention-signals-in-the-mvp-ui) | Are `bell` / `idle` surfaced in the MVP? | M8 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
+| [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
 
-W1 and S1–S4 are **blocking**. The rest are decisions that must be *made* before
+W1 and S1–S5 are **blocking**. The rest are decisions that must be *made* before
 their milestone, not necessarily *built*. (D1 — replay sharing the live subscriber
 budget — is **closed**: the fix is the catch-up loop in
 [04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early), built and
@@ -493,6 +495,51 @@ already explained by W1.
 
 ---
 
+## S5 — A detached grandchild's survival is non-deterministic on macOS
+
+**Found in CI, 2026-09-05, open -- not a spike result, a real flake.**
+
+S2 (above) verified on Linux that a detached grandchild ignoring `SIGHUP` keeps a pty's
+master open past the direct child's exit, and `daemon/tests/pty_primitive.rs`'s
+`eof_and_exit_are_independent_signals` encodes exactly that. It has never been reliably
+green on `macos-latest`:
+
+- First recipe (`perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- sh -c '...'`): failed
+  outright -- the grandchild produced *zero bytes* of output, meaning `perl` itself never
+  started.
+- Second recipe (plain `trap '' HUP; sleep 2 & ...`, no external interpreter, verified
+  correct on Linux via a direct `pty.fork()` reproduction): **flaky, not fixed** --
+  passed once, then failed again with "EOF arrived suspiciously early: 20ms", despite an
+  added assertion confirming the grandchild's pid was genuinely alive moments before.
+
+Two different, independently-reasoned recipes, neither reliable. The pattern (sometimes
+surviving the full 2s sleep, sometimes dying within 10-20ms of the direct parent's exit)
+does not look like a scripting mistake -- it looks like a race between whatever tears
+down the pty when its session leader exits and the grandchild's own signal-disposition
+setup, decided by scheduling, not logic. A plausible mechanism, unconfirmed: BSD-derived
+kernels have historically used `revoke(2)`-style semantics on session-leader exit for a
+controlling terminal, which would invalidate other descriptors referencing it regardless
+of *any* userspace signal handling -- categorically different from Linux, where the
+master stays open until every slave fd is actually closed. Not verified against real
+hardware or documentation; recorded as the leading hypothesis, not a finding.
+
+**Not diagnosable further without real macOS access to iterate against** -- every attempt
+here has been a guess pushed to real CI with no way to reproduce or verify offline first.
+
+**Current state:** `eof_and_exit_are_independent_signals` is `#[cfg(target_os =
+"linux")]`-gated (2026-09-05) rather than shipped flaky or silently weakened. Not run on
+macOS at all until this is actually understood -- same posture as W1 for Windows, and for
+the same reason: a guessed fix that appears to pass is worse than an honest gap, since it
+would silently reintroduce this exact flake the next time CI got unlucky.
+
+**Open:** does macOS need a fundamentally different mechanism for "outlive the direct
+parent while holding the pty" (if the revoke hypothesis holds, none exists in userspace,
+and S2's grandchild scenario may simply not be reproducible there at all), or is there a
+correct macOS-specific recipe this hasn't found yet? Needs real hardware, not another
+guess.
+
+---
+
 # Decisions to make
 
 ## D2 — Session-list freshness
@@ -628,6 +675,86 @@ whether the trade needs a second mitigation.
 one busy session) and measure reader-thread latency during it. If it stays acceptable,
 record the number and close this. If not, the fix is bounding *concurrent* catch-ups per
 session (an admission limit or a queue), not reworking the per-round design N4 measures.
+
+---
+
+## N5 — A fast producer can outrun catch-up on a slow runner
+
+**Found in CI, 2026-09-05, not yet designed. Diagnosis revised once, below --
+the first theory was wrong; recorded to save the next person from the same
+detour.**
+
+`daemon/tests/session_backpressure.rs`'s `slow_subscriber_is_disconnected_and_never_blocks_the_reader`
+drives its "fast" subscriber through `attach(0)`, then drains it continuously
+against a session running `yes | head -c 10MiB` -- about as aggressive a
+producer as a shell can make. Reliable on Linux CI; on `macos-latest` the fast
+subscriber itself gets disconnected.
+
+**First theory (wrong):** that `Replay::next_round`'s last round
+([session.rs](../daemon/src/session.rs)) registers the live `Fanout`
+subscriber *before* reading the final replay chunk off the lock leaves a
+narrow window -- between registration and the caller's first `recv()` --
+where nothing drains the fresh subscriber while the producer fills its 8 MiB
+budget. Mitigated by retrying the whole attach on an early disconnect,
+reasoning that each retry narrows the race (more of the producer's output
+already on disk, less still in flight).
+
+**That mitigation failed outright in CI: 20 out of 20 retries disconnected
+early, not intermittently.** A race that narrows with each attempt does not
+fail *every* attempt regardless of how many you allow. The retry's own
+premise -- "once the producer exits there is no more live output left to
+race against" -- only holds once the producer has actually finished; while
+it is still running, a **fresh** `attach(0)` restarts the catch-up from
+offset 0 every time, facing the *same* total gap on every attempt. If this
+runner's catch-up throughput (bounded by real per-round disk reads,
+deliberately kept off the fan-out lock so the PTY reader thread is never
+blocked behind them -- see [N4](#n4--reconnect-storms-and-reader-thread-contention))
+is simply slower than `yes`'s production rate for the whole test's duration,
+every attempt hits `should_register`'s stalled-client path
+([session.rs](../daemon/src/session.rs): `gap <= LIVE_GAP_BYTES ||
+stalled_rounds >= MAX_STALLED_ROUNDS || total_rounds >= MAX_CATCHUP_ROUNDS`)
+identically, truncating to the freshest `LIVE_GAP_BYTES` and reporting a
+hole each time -- unwinnable by retrying, since retrying doesn't change the
+relative throughput. This reads as a genuine, sustained mismatch on this
+runner, not a narrow one-off timing coincidence.
+
+**Not a one-line fix**, and not one to guess a third time against real CI
+with no way to reproduce this runner's speed locally. Reading before
+registering, or registering under a lock held through the read (closing the
+*first* theory's window) would both reopen bugs this design already fixed on
+purpose: the attach-race
+([04](04-api-protocol.md#catch-up--register-late-not-early)) and the PTY
+reader thread blocking on I/O under the shared lock. Neither would address
+the actual, now-confirmed cause anyway. The fixture is `target_os`-gated off
+macOS (2026-09-05) rather than shipped false-green or silently weakened.
+
+**Open:** is this runner-speed-specific (a slow/shared/throttled CI machine,
+plausibly not representative of any real client's environment), or would a
+genuinely resource-constrained real client hit the identical wall attaching
+to a very hot session? If the latter, `should_register`'s round-trip design
+(N4's documented trade-off) may need real throughput headroom, not just a
+correctness fix -- needs measurement on real hardware, not a guess.
+
+**Same category, found the same day:** `daemon/tests/session_catchup.rs`'s
+`attaching_far_behind_a_producing_session_reaches_live` (the D1 gate) also
+failed on `macos-latest` once it got the chance to run -- not with a wrong
+result, but with its own built-in guard tripping ("the pre-registered
+subscriber survived the catch-up window ... make the child noisier or the
+rounds slower before trusting it"), meaning its pacing (a fixed
+`ROUND_LATENCY` and a `sleep 0.01` trickle, both tuned against Linux timing)
+no longer reliably reproduces the race it exists to guard against on this
+runner. `target_os = "linux"`-gated alongside this one rather than re-tuned
+blind against real CI.
+
+**A third, same category, same day:** `daemon/tests/session_replay.rs`'s
+`disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate` (the M3
+gate) failed with "first subscriber disconnected early" during its initial
+live-drain loop -- another `yes`-driven producer racing this runner's
+catch-up throughput. A `cargo test --no-fail-fast` diagnostic pass
+(2026-09-05) confirmed this was the *only* remaining macOS failure across
+the entire suite once this and the two fixtures above were gated -- not an
+open-ended cascade, three fixtures sharing one root cause.
+`target_os = "linux"`-gated alongside them.
 
 ---
 
