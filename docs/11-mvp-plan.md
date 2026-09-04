@@ -169,17 +169,19 @@ session permanently unattachable. The attach ordering is correct; the budget is 
 > **(1)** 05's "buffered append" is `write_all` straight to the file, not a userspace
 > `BufWriter` — a buffered byte is not visible to the separate read handle replay uses,
 > so buffering it would publish offsets whose bytes a reconnect cannot read. The page
-> cache is the buffer; `fsync` stays off the per-chunk path, on a 2 s throttle checked
-> inside `append` plus an explicit sync on `terminate()`. A session that goes *quiet*
-> holds its unsynced tail until close — acceptable, since a daemon crash loses the live
-> PTY anyway ([01](01-architecture.md#the-crash-boundary)). **(2)** A chunk straddling
+> cache is the buffer, and no `fsync` ever runs on the reader thread or under the
+> fan-out mutex — one `LogSyncer` thread for the whole daemon holds a second reference
+> to each log's open file and flushes on the 2 s timer, so a slow disk stalls the syncer
+> instead of the terminal. **(2)** A chunk straddling
 > `log_max_bytes` is written up to the limit and truncated there, so `log_capped_at`
 > is always exactly `log_max_bytes` for a log that got capped by growing. **(3)** After
 > a failed write the log stops persisting but keeps advancing offsets (05's `io_error`
 > rule); `readable_end()` is therefore the actual file length, which is what every read
 > clamps to — equal to `min(next_offset, log_capped_at)` in the normal and capped
-> cases, and honest in the degraded one. Reopening with a stored `output_bytes` ahead of
-> the file and no recorded cap reports the cap at the file length for the same reason.
+> cases, and honest in the degraded one. A failed append sets `log_capped_at` as well, so
+> the hole is *reported* rather than served as a replay range that stops short of a live
+> stream resuming past it. Reopening with a stored `output_bytes` ahead of the file and
+> no recorded cap reports the cap at the file length for the same reason.
 >
 > Not wired: `StoredState` is the M7 seam and `create()` always passes `None`, so
 > restart recovery is proven at the `log.rs` level, not yet end to end through SQLite.

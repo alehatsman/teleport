@@ -24,13 +24,23 @@
 //! (docs/04-api-protocol.md#the-vt-state-caveat--read-this-before-implementing).
 //! Recording [`LogEvent`]s in `session_events` is M7; [`append`] returns them
 //! rather than writing them anywhere.
+//!
+//! **Nothing on the append path ever calls `fsync`.** The periodic sync
+//! docs/05-persistence.md asks for runs on [`LogSyncer`]'s own thread against
+//! a [`SyncHandle`] -- a second `Arc` on the same open file -- so it holds no
+//! lock the PTY reader thread needs, and a slow disk stalls the syncer rather
+//! than the terminal.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Weak};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tracing::warn;
 
 pub const LOG_FILE_NAME: &str = "output.vt";
 
@@ -96,7 +106,10 @@ pub struct Appended {
 /// `session.rs` keeps it inside the mutex the reader loop takes.
 pub struct OutputLog {
     path: PathBuf,
-    file: File,
+    /// Shared with every [`SyncHandle`] handed out for this log, so the
+    /// background syncer flushes the same open file without taking the
+    /// caller's lock. Writes go through `&File`, which is `Write`.
+    file: Arc<File>,
     limits: LogLimits,
     /// Authoritative output offset. Never rewinds -- not on a cap, not across
     /// a restart (docs/05-persistence.md#restart-recovery).
@@ -109,7 +122,6 @@ pub struct OutputLog {
     /// a hole into a byte stream whose offsets are an index.
     io_failed: bool,
     warned: bool,
-    last_sync: Instant,
 }
 
 impl OutputLog {
@@ -148,14 +160,13 @@ impl OutputLog {
 
         Ok(Self {
             path,
-            file,
+            file: Arc::new(file),
             limits,
             next_offset,
             file_len,
             log_capped_at,
             io_failed: false,
             warned: file_len >= limits.warn_bytes,
-            last_sync: Instant::now(),
         })
     }
 
@@ -174,7 +185,7 @@ impl OutputLog {
             let fits = room.min(bytes.len() as u64) as usize;
 
             if fits > 0 {
-                match self.file.write_all(&bytes[..fits]) {
+                match (&*self.file).write_all(&bytes[..fits]) {
                     Ok(()) => self.file_len += fits as u64,
                     Err(e) => self.fail(&mut events, &e),
                 }
@@ -196,7 +207,6 @@ impl OutputLog {
         // offset for bytes that are not yet readable
         // (docs/03-pty-layer.md#reader-loop).
         self.next_offset = start + bytes.len() as u64;
-        self.maybe_sync(&mut events);
 
         Appended { start, events }
     }
@@ -230,34 +240,121 @@ impl OutputLog {
         LogReader::open(&self.path)
     }
 
-    /// Flushes to disk. Call on session close; the periodic case is handled
-    /// inside [`append`].
-    pub fn sync(&mut self) -> Vec<LogEvent> {
-        let mut events = Vec::new();
-        if let Err(e) = self.file.sync_data() {
-            self.fail(&mut events, &e);
-        }
-        self.last_sync = Instant::now();
-        events
+    /// A handle for flushing this log to disk from somewhere that is not the
+    /// reader thread -- see [`LogSyncer`]. Cheap; hand one to whoever needs
+    /// to sync on close.
+    pub fn sync_handle(&self) -> SyncHandle {
+        SyncHandle { file: Arc::clone(&self.file), path: self.path.clone() }
     }
 
-    fn maybe_sync(&mut self, events: &mut Vec<LogEvent>) {
-        if self.io_failed || self.last_sync.elapsed() < self.limits.sync_interval {
-            return;
-        }
-        if let Err(e) = self.file.sync_data() {
-            self.fail(events, &e);
-        }
-        self.last_sync = Instant::now();
-    }
-
+    /// Persistence stopped and it is not coming back for this log. Setting
+    /// `log_capped_at` here is what keeps the module's invariant true and
+    /// keeps the hole *visible*: without it a client would be handed a
+    /// replay range that silently stops short of `next_offset` and live
+    /// chunks resuming past a gap it was never told about
+    /// (docs/05-persistence.md#size-cap).
     fn fail(&mut self, events: &mut Vec<LogEvent>, error: &io::Error) {
         if self.io_failed {
             return;
         }
         self.io_failed = true;
+        self.log_capped_at = Some(self.file_len);
         events.push(LogEvent::IoError { at: self.file_len, error: error.to_string() });
     }
+}
+
+/// A second reference to a log's open file, used only to `fsync` it. Exists
+/// so the flush never happens on the PTY reader thread or under the fan-out
+/// mutex (docs/05-persistence.md#output-log).
+#[derive(Clone)]
+pub struct SyncHandle {
+    file: Arc<File>,
+    path: PathBuf,
+}
+
+impl SyncHandle {
+    pub fn sync(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// One thread for the whole daemon that flushes every registered log on
+/// `sync_interval` -- the "`fsync` on a 2-second timer while running" half of
+/// docs/05-persistence.md#output-log.
+///
+/// One thread, not one per session: the work is a handful of `fsync`s and the
+/// per-session thread budget is already spent on the four `pty.rs` needs.
+/// Registrations are `Weak`, so a log whose session is gone is pruned on the
+/// next tick rather than kept alive by the syncer.
+pub struct LogSyncer {
+    tx: Option<Sender<(Weak<File>, PathBuf)>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LogSyncer {
+    pub fn new(interval: Duration) -> Self {
+        let (tx, rx) = mpsc::channel::<(Weak<File>, PathBuf)>();
+        let thread = std::thread::Builder::new()
+            .name("log-syncer".into())
+            .spawn(move || {
+                let mut registered: Vec<(Weak<File>, PathBuf)> = Vec::new();
+                let mut last = Instant::now();
+                loop {
+                    // A registration must not reset the timer, or a daemon
+                    // creating sessions steadily would never sync at all.
+                    let wait = interval.saturating_sub(last.elapsed());
+                    match rx.recv_timeout(wait) {
+                        Ok(entry) => registered.push(entry),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => {
+                            sync_all(&mut registered);
+                            return;
+                        }
+                    }
+                    if last.elapsed() >= interval {
+                        sync_all(&mut registered);
+                        last = Instant::now();
+                    }
+                }
+            })
+            .expect("spawning the log syncer thread");
+        Self { tx: Some(tx), thread: Some(thread) }
+    }
+
+    /// Starts flushing `handle`'s log on the timer. Dropping every
+    /// `SyncHandle` and `OutputLog` for that file unregisters it.
+    pub fn register(&self, handle: &SyncHandle) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send((Arc::downgrade(&handle.file), handle.path.clone()));
+        }
+    }
+}
+
+impl Drop for LogSyncer {
+    /// Dropping the sender is the stop signal; the thread does one last pass
+    /// so a daemon shutting down does not lose the tail of every live log.
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn sync_all(registered: &mut Vec<(Weak<File>, PathBuf)>) {
+    registered.retain(|(weak, path)| match weak.upgrade() {
+        Some(file) => {
+            if let Err(e) = file.sync_data() {
+                warn!(path = %path.display(), error = %e, "periodic log fsync failed");
+            }
+            true
+        }
+        None => false, // the session is gone; stop tracking it.
+    });
 }
 
 /// The read side. Cheap to create, one per replay.
@@ -270,16 +367,20 @@ impl LogReader {
         Ok(Self { file: File::open(path)? })
     }
 
-    /// Reads `[from, to)`. Returns fewer bytes than asked for only if the
-    /// file is shorter than `to` -- callers clamp `to` to
-    /// [`OutputLog::readable_end`] under the fan-out lock, so a short read
-    /// here means someone read past what they accounted for.
+    /// Reads `[from, to)`, clamped to what the file actually holds. Callers
+    /// clamp `to` to [`OutputLog::readable_end`] under the fan-out lock, so a
+    /// short read here means someone read past what they accounted for --
+    /// the clamp is a backstop, and it is also what keeps a bogus `to` from
+    /// reserving a buffer the size of the range rather than the file.
     pub fn read_range(&mut self, from: u64, to: u64) -> io::Result<Vec<u8>> {
-        if to <= from {
+        let end = to.min(self.file.metadata()?.len());
+        if end <= from {
             return Ok(Vec::new());
         }
-        let len = to - from;
+        let len = end - from;
         self.file.seek(SeekFrom::Start(from))?;
+        // `len` is now bounded by the file size, so this cannot truncate on a
+        // 32-bit target the way the requested range could.
         let mut buf = Vec::with_capacity(len as usize);
         Read::by_ref(&mut self.file).take(len).read_to_end(&mut buf)?;
         Ok(buf)
@@ -297,4 +398,93 @@ fn create_dir_owner_only(dir: &Path) -> Result<()> {
             .with_context(|| format!("setting owner-only permissions on {}", dir.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "teleportd-log-unit-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A failed append stops persistence *and* publishes where it stopped.
+    /// Without the second half a client is handed a replay range that ends
+    /// short of `next_offset` and live chunks that resume past a hole it was
+    /// never told about (docs/05-persistence.md: `lost_reason='io_error'` is
+    /// the one reason set while the child is still alive).
+    ///
+    /// Lives here rather than in `daemon/tests/` because inducing a real
+    /// write failure means handing `OutputLog` a read-only handle, which
+    /// needs the private field.
+    #[test]
+    fn a_failed_append_caps_the_log_and_keeps_offsets_advancing() {
+        let dir = scratch("io-error");
+        let mut log = OutputLog::open(&dir, LogLimits::default(), None).expect("open");
+        log.append(b"the bytes that made it");
+        assert_eq!(log.readable_end(), 22);
+
+        // Swap in a read-only handle to the same file: writes now fail the
+        // way a full disk or a revoked mount would, without needing either.
+        log.file = Arc::new(File::open(log.path()).expect("reopen read-only"));
+
+        let appended = log.append(b"and the ones that did not");
+        assert_eq!(appended.start, 22, "the offset is still handed out");
+        assert_eq!(log.next_offset(), 47, "offsets keep advancing -- the session is still running");
+        assert_eq!(log.readable_end(), 22, "nothing more reached the disk");
+        assert_eq!(
+            log.log_capped_at(),
+            Some(22),
+            "the log must say where persistence stopped, not report an open-ended range"
+        );
+        assert!(
+            matches!(appended.events.as_slice(), [LogEvent::IoError { at: 22, .. }]),
+            "expected one IoError at the truncation point, got {:?}",
+            appended.events
+        );
+
+        // The invariant still holds, which is the whole point of setting the
+        // cap: file_length == min(next_offset, log_capped_at).
+        let on_disk = std::fs::metadata(log.path()).unwrap().len();
+        assert_eq!(on_disk, log.next_offset().min(log.log_capped_at().unwrap()));
+
+        // And it is sticky: a later append neither retries nor re-reports.
+        let again = log.append(b"still nothing");
+        assert!(again.events.is_empty(), "IoError is reported once, not per chunk");
+        assert_eq!(log.readable_end(), 22);
+        assert_eq!(log.log_capped_at(), Some(22), "the cap must not move to the new offset");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `LogSyncer` flushes registered logs off the caller's thread and stops
+    /// tracking a log whose `OutputLog` is gone.
+    #[test]
+    fn the_syncer_flushes_and_prunes() {
+        let dir = scratch("syncer");
+        let syncer = LogSyncer::new(Duration::from_millis(20));
+
+        let mut log = OutputLog::open(&dir, LogLimits::default(), None).expect("open");
+        syncer.register(&log.sync_handle());
+        log.append(b"flush me");
+
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(std::fs::read(log.path()).unwrap(), b"flush me");
+
+        // Dropping the log drops the last strong `Arc<File>`, so the syncer's
+        // `Weak` stops upgrading and the entry is pruned. Nothing to assert
+        // beyond "this does not panic or keep the file open forever"; the
+        // syncer's final pass on drop is what would surface a wedged thread.
+        drop(log);
+        std::thread::sleep(Duration::from_millis(40));
+        drop(syncer);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

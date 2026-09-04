@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tracing::warn;
 use ulid::Ulid;
 
-use crate::log::{LogEvent, LogLimits, LogReader, OutputLog};
+use crate::log::{LogEvent, LogLimits, LogReader, LogSyncer, OutputLog, SyncHandle};
 use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 
 /// Queue bound per subscriber: whichever trips first
@@ -105,10 +105,10 @@ impl Fanout {
 
     /// Runs on the PTY reader thread via the `on_output` closure passed to
     /// `pty::spawn`. Must never block: the append is a `write_all` into the
-    /// page cache and never an `fsync` on this path, every send is
-    /// `try_send`, budget acquisition is `try_acquire`, and a subscriber
-    /// that would exceed either bound is dropped instead of waited on
-    /// (docs/03-pty-layer.md#the-rule).
+    /// page cache -- the periodic `fsync` is `LogSyncer`'s thread, never this
+    /// one -- every send is `try_send`, budget acquisition is `try_acquire`,
+    /// and a subscriber that would exceed either bound is dropped instead of
+    /// waited on (docs/03-pty-layer.md#the-rule).
     ///
     /// Returns whatever the log wants recorded; the caller traces it off the
     /// hot path rather than this method reaching for a logger under the lock.
@@ -236,6 +236,11 @@ pub struct Session {
     /// this isn't a reference cycle -- the directory's `Arc<Session>` is the
     /// only strong owner.
     directory: Weak<SessionDirectory>,
+    /// Flushes the log without touching `fanout`. Deliberately *not* reached
+    /// through the lock: an `fsync` held under the mutex the reader thread
+    /// takes would stall the PTY behind disk latency, which is the whole
+    /// thing docs/05-persistence.md#output-log forbids.
+    sync: SyncHandle,
 }
 
 impl Session {
@@ -309,13 +314,14 @@ impl Session {
         self.fanout.lock().unwrap().log.path().to_path_buf()
     }
 
-    /// Flushes the log to disk. The periodic case lives inside the append
-    /// path; this is the close case (docs/05-persistence.md#output-log).
-    /// `terminate()` calls it for the user-initiated path; wiring it to a
-    /// child that exits on its own needs `exit_rx`, which is M4/M7.
+    /// Flushes the log to disk. This is the close case; the periodic one is
+    /// `LogSyncer`'s (docs/05-persistence.md#output-log). `terminate()` calls
+    /// it for the user-initiated path; wiring it to a child that exits on its
+    /// own needs `exit_rx`, which is M4/M7.
     pub fn sync_log(&self) {
-        let events = self.fanout.lock().unwrap().log.sync();
-        trace_log_events(self.id, &events);
+        if let Err(e) = self.sync.sync() {
+            warn!(session_id = %self.id, path = %self.sync.path().display(), error = %e, "syncing the output log failed");
+        }
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -361,6 +367,9 @@ pub struct SessionManager {
     /// (docs/05-persistence.md#layout).
     root: PathBuf,
     limits: LogLimits,
+    /// One thread for every session's periodic `fsync`, so the reader threads
+    /// never do one. Dropped with the manager, which flushes a last time.
+    syncer: LogSyncer,
     sessions: Arc<SessionDirectory>,
 }
 
@@ -372,7 +381,12 @@ impl SessionManager {
     /// Same, with non-default log thresholds -- how a test drives the cap
     /// path without writing a gigabyte.
     pub fn with_limits(root: PathBuf, limits: LogLimits) -> Self {
-        Self { root, limits, sessions: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            root,
+            limits,
+            syncer: LogSyncer::new(limits.sync_interval),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Spawns `spec` behind a fresh PTY and registers the resulting session.
@@ -386,6 +400,8 @@ impl SessionManager {
         // case of docs/05-persistence.md#restart-recovery, and M7 is what
         // will pass `Some` for a recovered one.
         let log = OutputLog::open(&self.root.join(id.to_string()), self.limits, None)?;
+        let sync = log.sync_handle();
+        self.syncer.register(&sync);
         let fanout = Arc::new(Mutex::new(Fanout::new(log)));
 
         let publish_fanout = Arc::clone(&fanout);
@@ -399,6 +415,7 @@ impl SessionManager {
             pty: spawned.session,
             fanout,
             directory: Arc::downgrade(&self.sessions),
+            sync,
         });
         self.sessions.lock().unwrap().insert(id, Arc::clone(&session));
         Ok(session)
