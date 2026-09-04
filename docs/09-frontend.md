@@ -113,7 +113,15 @@ Rules:
 
 ```ts
 // generated once, persisted forever
-const CLIENT_ID   = localStorage.getItem("client_id") ?? crypto.randomUUID();
+const CLIENT_ID   = localStorage.getItem("client_id") ?? newClientId();
+
+// `crypto` is exposed only in a secure context (HTTPS, or a localhost origin).
+// Over plain http:// on a LAN IP — the --i-know-what-im-doing path — it is
+// undefined and randomUUID() throws before the app renders. Degrade, don't die.
+function newClientId(): string {
+  return globalThis.crypto?.randomUUID?.()
+      ?? `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 const CLIENT_NAME = localStorage.getItem("client_name") ?? defaultName();  // "Chrome on macOS"
 ```
 
@@ -183,6 +191,12 @@ The phone uses the **same SPA**. No separate mobile API, no native app.
   immediately with the tracked offset rather than waiting for a timeout.
 - PWA manifest + installability. **No service-worker caching of API responses** — stale
   session state is worse than a spinner.
+- **Secure context is a hard prerequisite for most of this.** Installability, service
+  workers, notifications, the clipboard API and `crypto` all require HTTPS or a
+  `localhost` origin. Served over `http://<lan-ip>:<port>` none of them exist. Reaching a
+  phone properly means Tailscale Serve ([07](07-remote-access.md)), which terminates TLS
+  — the raw-LAN escape hatch is for debugging, and the mobile feature set silently
+  collapses on it.
 
 ## Connection status
 

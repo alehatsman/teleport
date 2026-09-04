@@ -80,7 +80,10 @@ Enforce on **all mutating HTTP** (`POST`, `DELETE`) and **all WebSocket upgrades
 
 1. **`Origin` allowlist — when `Origin` is present.** Reject unknown values. Default
    allowlist:
-   - `http://127.0.0.1:7337`, `http://localhost:7337`
+   - `http://127.0.0.1:<port>`, `http://localhost:<port>` — constructed **after** the
+     listener binds, from the port actually bound. Never from the `7337` default: the
+     fallback is ephemeral ([08](08-packaging.md#port-discovery--do-not-hardcode-7337)),
+     and a hardcoded list would reject the daemon's own UI.
    - the Vite dev origin, only when built in debug (`http://localhost:5173`)
    - `tauri://localhost` and `https://tauri.localhost` for the packaged shell
    - any origin explicitly listed in `config.toml` under `allowed_origins`

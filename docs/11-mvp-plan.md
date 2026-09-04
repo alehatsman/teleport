@@ -48,13 +48,23 @@ three platforms.
 
 > **Build the PTY daemon before the desktop app.**
 
+> **Run the spike first.** [15-open-questions.md](15-open-questions.md#the-m1-spike)
+> lists four things this milestone's design asserts but has not proven — who reaps the
+> child, whether EOF means exit, whether a blocking write can wedge `terminate`, and
+> whether dropping the master closes the pseudoconsole on Windows. S1–S3 together
+> decide the per-session thread count, which is the first line of `pty.rs`. Budget one
+> day; do not start the deliverable until they are answered.
+
 **Deliver:** `pty.rs` — spawn, read, write, resize, exit detection, termination, behind
 the `TerminalSession` trait. Dedicated reader + control threads. No HTTP yet; drive it
 from integration tests.
 
 - `native_pty_system()` / `openpty` / `CommandBuilder` / `spawn_command`
 - dedicated `std::thread` per direction — **not** `spawn_blocking`
-  ([03-pty-layer.md](03-pty-layer.md#thread-model))
+  ([03-pty-layer.md](03-pty-layer.md#thread-model)). Expect **three or four** threads per
+  session, not two: `read`, `write`, and the child wait are independently blocking
+  ([S1](15-open-questions.md#s1--who-reaps-the-child),
+  [S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate))
 - full termination state machine: `RUNNING → CLOSING → EXITED`, graceful signal,
   bounded waits, hard kill fallback, keep draining output throughout
 - resize with clamping and 100 ms coalescing
@@ -77,6 +87,11 @@ process-tree case. Windows is not deferred.
 
 **Gate:** with a subscriber that never reads, PTY drain rate is unchanged and daemon
 memory stays flat. Verified under 1 MB/s sustained output.
+
+**Before M4:** resolve [D1](15-open-questions.md#d1--replay-must-not-share-the-live-subscriber-budget).
+As specified, a subscriber accumulates live output for the whole duration of its replay
+and can overflow this same 8 MiB bound before it ever goes live — which makes a busy
+session permanently unattachable. The attach ordering is correct; the budget is not.
 
 ---
 
@@ -222,6 +237,12 @@ tailscale serve --bg http://127.0.0.1:7337
 
 **Gate:** a phone off the local network, on cellular, reaches a running agent over the
 tailnet, takes control, and types into it.
+
+**Also record** ([N1](15-open-questions.md#n1--keystroke-latency)): the RTT on that link,
+and whether `tailscale status` reports a direct connection or a DERP relay for the phone.
+A relayed path is common behind CGNAT and costs one full RTT per keystroke echo. That
+number decides whether predictive local echo is a v2 item or something the product cannot
+ship without — write it into 15.
 
 ---
 

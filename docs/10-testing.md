@@ -33,7 +33,9 @@ equivalents chosen per platform.
 - write large input (1 MiB) without loss or reordering
 - read a large burst (100 MiB from `yes`) without dropping bytes or stalling
 - resize and confirm the child observes it (`stty size` on Unix, `mode con` on Windows)
-- child exits normally → reader sees EOF, exit code `0` recorded
+- child exits normally → exit code `0` recorded. The code comes from the child wait,
+  **not** from EOF on the master — the two are separate signals and can arrive in
+  either order ([S2](15-open-questions.md#s2--eof-is-not-exit))
 - child exits nonzero → exit code recorded accurately
 - terminate a running child → state machine reaches `exited` within the bounded policy
 - terminate a child that is producing output at full rate → no deadlock, no lost tail
@@ -91,7 +93,7 @@ equivalents chosen per platform.
 - **every `/api/v1` route except `/health` rejects a request with no token**, including
   one arriving on loopback
 - token compare is constant-time (assert the implementation, not the timing)
-- `POST /sessions` with a nonexistent executable → `422`, not `404`
+- `POST /sessions` with a nonexistent executable → `422`, not `404`, and no row written
 - `max_sessions + 1` concurrent spawns → `429`, daemon healthy
 
 ### 4. Persistence / restart tests
@@ -115,13 +117,16 @@ Every one of these must produce a defined, tested state — not an exception tra
 | Fill a subscriber queue (pause the client, blast output) | that client disconnects (1013); PTY drain rate unchanged |
 | Rapid resize (100/s) | coalesced; PTY size ends correct; no deadlock |
 | Two clients both claiming control repeatedly | lease always held by exactly one; no lost input to the wrong PTY |
-| Kill an agent process externally (`kill -9`) | reader sees EOF; state `exited`; exit code recorded |
+| Kill an agent process externally (`kill -9`) | state `exited` and exit code recorded from the child wait; reader stops on EOF ([S2](15-open-questions.md#s2--eof-is-not-exit)) |
 | Kill `teleportd` (SIGKILL) | on restart, sessions are `lost`, logs intact and readable |
 | Close a ConPTY session under heavy output load | no deadlock on Win < 24H2 **or** ≥ 24H2; output tail drained |
 | Restart the daemon while a client is attached | client gets a clean close; reconnect shows `lost` state |
 | Fill the disk | append fails → session marked with `io_error`, daemon stays up |
 | `cwd` deleted after spawn | child's problem, not a daemon crash |
-| Spawn a nonexistent executable | `422`, row recorded with `spawn_failed`, no orphan directory |
+| Child exits leaving a grandchild holding the PTY | session reaches `exited` anyway; the master staying open must not strand it in `running` ([S2](15-open-questions.md#s2--eof-is-not-exit)) |
+| `terminate` while a 1 MiB write is blocked on an unreading child | terminate completes inside the bounded policy; input is dropped, never allowed to hold the session open ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)) |
+| Spawn a nonexistent executable | `422` from pre-spawn validation — **no row, no directory** ([01](01-architecture.md#session-creation-sequence)) |
+| Spawn fails *after* validation (permissions, fork failure) | `500`, row recorded `exited` / `spawn_failed`, directory exists and is collected on schedule |
 | Second daemon started as another OS user | binds an ephemeral port; neither daemon can read the other's token |
 | Port 7337 already taken | ephemeral fallback; `<data_dir>/port` names the real one |
 | Update the daemon with sessions running | refused/deferred; sessions keep running ([08](08-packaging.md#updates-must-not-kill-sessions)) |

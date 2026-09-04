@@ -44,11 +44,16 @@ app launches
     ↓
 read <data_dir>/port and <data_dir>/token
     ↓
-GET http://127.0.0.1:<port>/api/v1/health   (unauthenticated shape)
+GET http://127.0.0.1:<port>/api/v1/health
+    Authorization: Bearer <token>    (when the token file was readable)
     ↓
-├── 200 + matching device_id → attach to the existing daemon, open the UI
+├── 200, authenticated shape   → our daemon. Attach to it, open the UI.
 │
-└── refused / no port file   → start teleportd detached
+├── 200, unauthenticated shape → something is listening but did not accept our
+│                                token: another OS user's daemon, or our token
+│                                file is stale. Do not attach — surface it.
+│
+└── refused / no port file    → start teleportd detached
                                  (not as a child that dies with the GUI)
                                  ↓
                               poll for the port file, then /health, up to 10 s
@@ -56,6 +61,12 @@ GET http://127.0.0.1:<port>/api/v1/health   (unauthenticated shape)
                               ├── ok    → open the UI
                               └── fail  → show the daemon log, offer a retry
 ```
+
+**The authenticated shape is the entire check.** Only a daemon holding our token can
+return it, and only a process running as our OS user can read that token file — so the
+shape itself proves ownership. Do not gate on `device_id`: it identifies the *host* to
+remote clients ([12](12-identity-and-connectivity.md#the-principal)), and on a first run
+the shell has nothing to compare it against.
 
 On quit, the shell closes its window. **It does not stop the daemon.** Stopping the
 daemon is an explicit user action in the tray menu, with a confirmation naming how many

@@ -25,6 +25,10 @@ phone are interchangeable clients that attach and detach freely.
 | 12 | [Identity & connectivity](12-identity-and-connectivity.md) | You touch `auth.rs`, bind addresses, or anything about *who* is calling. Defines the three stages and the `Principal` seam. |
 | 13 | [Native clients](13-native-clients.md) | Post-MVP. Read before changing the protocol — it lists what the MVP must not break. |
 | 14 | [Cloud backend](14-cloud-backend.md) | Post-MVP. Accounts, device directory, relay, push. Contains one decision to make early. |
+| 15 | [Open questions](15-open-questions.md) | **Before starting M1.** What the docs assert but have not proven, and the decisions still open. |
+
+Docs 01–14 describe the design. [15](15-open-questions.md) is the list of places where
+that design is asserted rather than proven — read it before writing `pty.rs`.
 
 ## Naming
 

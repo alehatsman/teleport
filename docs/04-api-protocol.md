@@ -159,7 +159,14 @@ Runs the termination state machine from
 session in `closing`; clients watch the WebSocket `exit` frame or poll `GET`.
 
 `?purge=true` additionally deletes `data/sessions/{id}/` after the session reaches
-`exited`. Without it, logs are retained.
+`exited`, **and then the `sessions` row** — directory first, row second, the same
+ordering the collector uses ([05](05-persistence.md#garbage-collection)). Without it the
+log is retained and the session stays in the list as `exited`.
+
+Purge is also the only way a session leaves the list. On a session that has already
+exited, `DELETE …?purge=true` skips the termination machine and deletes outright. A
+purged id returns `404` from `GET` and `session_gone` to any client still attached.
+Without this the list grows without bound and the UI has no delete affordance.
 
 ### `GET /api/v1/sessions/{id}/log`
 

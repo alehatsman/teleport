@@ -234,6 +234,19 @@ length unconditionally would rewind `next_offset` below offsets already handed t
 clients, which turns every reconnecting client into an `offset_ahead` error and makes
 the daemon hand out offsets it has already used.
 
+### When `output_bytes` is written
+
+The `max()` rule is only worth anything if the column is being maintained. Write
+`output_bytes` — together with `cols` and `rows` — on a **throttled schedule, at most
+once per second per session** while output is flowing, plus once on the transition to
+`closing` / `exited`. Never on the per-chunk path: that would put SQLite in the PTY
+drain loop and couple throughput to disk latency ([above](#output-log)).
+
+A column written *only* at exit silently degrades `max()` to file-wins. A capped session
+killed before it exited would then come back with `next_offset` below offsets live
+clients already hold — precisely the rewind the column exists to prevent. The cadence is
+the mitigation; the column alone is not.
+
 A recovered session is `lost` and will never produce another byte, so the few seconds
 of column lag on a capped session cost nothing.
 
