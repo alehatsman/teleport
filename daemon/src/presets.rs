@@ -91,13 +91,17 @@ pub fn load_or_create(data_dir: &Path) -> Result<Vec<Preset>> {
         Ok(contents) => {
             let file: PresetsFile =
                 toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
-            validate_presets(&file.presets).with_context(|| format!("validating {}", path.display()))?;
+            validate_presets(&file.presets)
+                .with_context(|| format!("validating {}", path.display()))?;
             Ok(file.presets)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let presets = default_presets();
-            let file = PresetsFile { presets: presets.clone() };
-            let serialized = toml::to_string_pretty(&file).context("serializing default presets")?;
+            let file = PresetsFile {
+                presets: presets.clone(),
+            };
+            let serialized =
+                toml::to_string_pretty(&file).context("serializing default presets")?;
             fs::write(&path, serialized).with_context(|| format!("writing {}", path.display()))?;
             Ok(presets)
         }
@@ -115,8 +119,16 @@ fn validate_presets(presets: &[Preset]) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     for p in presets {
         anyhow::ensure!(!p.id.is_empty(), "a preset has an empty id");
-        anyhow::ensure!(!p.command.is_empty(), "preset {:?} has an empty command", p.id);
-        anyhow::ensure!(seen.insert(p.id.as_str()), "duplicate preset id: {:?}", p.id);
+        anyhow::ensure!(
+            !p.command.is_empty(),
+            "preset {:?} has an empty command",
+            p.id
+        );
+        anyhow::ensure!(
+            seen.insert(p.id.as_str()),
+            "duplicate preset id: {:?}",
+            p.id
+        );
     }
     Ok(())
 }
@@ -129,7 +141,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "teleportd-presets-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
         dir

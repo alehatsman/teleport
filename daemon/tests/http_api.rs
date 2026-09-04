@@ -15,8 +15,14 @@ async fn request(daemon: &support::Daemon, req: Request<Body>) -> (StatusCode, V
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     let response = router.oneshot(req).await.expect("router call");
     let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
     (status, body)
 }
 
@@ -34,7 +40,10 @@ fn post_json(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
         .uri(uri)
         .header(header::HOST, "127.0.0.1")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::AUTHORIZATION, format!("Bearer {}", token.unwrap_or("")))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token.unwrap_or("")),
+        )
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -63,8 +72,14 @@ async fn unauthenticated_health_omits_device_fields() {
     assert_eq!(body["status"], "ok");
     assert!(body.get("api_versions").is_some());
     assert!(body.get("capabilities").is_some());
-    assert!(body.get("device_id").is_none(), "unauthenticated /health must not leak device_id");
-    assert!(body.get("device_name").is_none(), "unauthenticated /health must not leak device_name");
+    assert!(
+        body.get("device_id").is_none(),
+        "unauthenticated /health must not leak device_id"
+    );
+    assert!(
+        body.get("device_name").is_none(),
+        "unauthenticated /health must not leak device_name"
+    );
 }
 
 #[tokio::test]
@@ -90,7 +105,11 @@ async fn every_route_except_health_rejects_a_request_with_no_token() {
 
     // Including on loopback -- the whole point of
     // docs/06-security.md#loopback-is-not-a-user-boundary.
-    let (status, _) = request(&daemon, get("/api/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV", None)).await;
+    let (status, _) = request(
+        &daemon,
+        get("/api/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV", None),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -104,11 +123,19 @@ async fn create_session_with_a_nonexistent_executable_is_422_not_404_and_writes_
         "cols": 80,
         "rows": 24,
     });
-    let (status, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), body)).await;
+    let (status, _) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), body),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (_, list) = request(&daemon, get("/api/v1/sessions", Some(support::TOKEN))).await;
-    assert_eq!(list["sessions"].as_array().unwrap().len(), 0, "a rejected create must not leave a session behind");
+    assert_eq!(
+        list["sessions"].as_array().unwrap().len(),
+        0,
+        "a rejected create must not leave a session behind"
+    );
 }
 
 #[tokio::test]
@@ -128,14 +155,27 @@ async fn max_sessions_plus_one_is_429_and_the_daemon_stays_healthy() {
         })
     };
 
-    let (s1, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5"))).await;
+    let (s1, _) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+    )
+    .await;
     assert_eq!(s1, StatusCode::CREATED);
-    let (s2, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5"))).await;
+    let (s2, _) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+    )
+    .await;
     assert_eq!(s2, StatusCode::CREATED);
-    let (s3, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5"))).await;
+    let (s3, _) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+    )
+    .await;
     assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
 
-    let (health_status, health_body) = request(&daemon, get("/api/v1/health", Some(support::TOKEN))).await;
+    let (health_status, health_body) =
+        request(&daemon, get("/api/v1/health", Some(support::TOKEN))).await;
     assert_eq!(health_status, StatusCode::OK);
     assert_eq!(health_body["sessions_running"], 2);
 }
@@ -151,36 +191,66 @@ async fn full_lifecycle_create_list_terminate_purge() {
         "cols": 80,
         "rows": 24,
     });
-    let (status, created) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), body)).await;
+    let (status, created) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), body),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["state"], "running");
 
-    let (_, one) = request(&daemon, get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN))).await;
+    let (_, one) = request(
+        &daemon,
+        get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN)),
+    )
+    .await;
     assert_eq!(one["id"], id);
     assert_eq!(one["command"], "/bin/sh");
 
     // Terminate: 202, still listed as exited (not removed) until purge.
-    let (status, _) = request(&daemon, delete_request(&format!("/api/v1/sessions/{id}"), support::TOKEN)).await;
+    let (status, _) = request(
+        &daemon,
+        delete_request(&format!("/api/v1/sessions/{id}"), support::TOKEN),
+    )
+    .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let (status, view) = request(&daemon, get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN))).await;
-        assert_eq!(status, StatusCode::OK, "must stay listed after terminate, before purge");
+        let (status, view) = request(
+            &daemon,
+            get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN)),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "must stay listed after terminate, before purge"
+        );
         if view["state"] == "exited" {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "session never reached exited");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session never reached exited"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     // Purge: gone from GET.
-    let (status, _) =
-        request(&daemon, delete_request(&format!("/api/v1/sessions/{id}?purge=true"), support::TOKEN)).await;
+    let (status, _) = request(
+        &daemon,
+        delete_request(&format!("/api/v1/sessions/{id}?purge=true"), support::TOKEN),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _) = request(&daemon, get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN))).await;
+    let (status, _) = request(
+        &daemon,
+        get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN)),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -205,7 +275,11 @@ async fn purging_an_exited_session_frees_a_max_sessions_slot() {
         })
     };
 
-    let (status, created) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("true"))).await;
+    let (status, created) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), make("true")),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap().to_string();
 
@@ -213,17 +287,32 @@ async fn purging_an_exited_session_frees_a_max_sessions_slot() {
     // the M2 contract keeps it listed as `exited`, not removed.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let (_, view) = request(&daemon, get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN))).await;
+        let (_, view) = request(
+            &daemon,
+            get(&format!("/api/v1/sessions/{id}"), Some(support::TOKEN)),
+        )
+        .await;
         if view["state"] == "exited" {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "session never reached exited");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session never reached exited"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     // At the cap, but nothing is actually running -- create must not 429.
-    let (status, _) = request(&daemon, post_json("/api/v1/sessions", Some(support::TOKEN), make("true"))).await;
-    assert_eq!(status, StatusCode::CREATED, "an exited-but-unpurged session must not count against max_sessions");
+    let (status, _) = request(
+        &daemon,
+        post_json("/api/v1/sessions", Some(support::TOKEN), make("true")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an exited-but-unpurged session must not count against max_sessions"
+    );
 }
 
 #[tokio::test]
@@ -237,7 +326,8 @@ async fn bad_origin_on_a_mutating_request_is_rejected() {
         .header(header::ORIGIN, "https://evil.example")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
-            json!({ "kind": "shell", "command": "/bin/sh", "cwd": "/tmp", "cols": 80, "rows": 24 }).to_string(),
+            json!({ "kind": "shell", "command": "/bin/sh", "cwd": "/tmp", "cols": 80, "rows": 24 })
+                .to_string(),
         ))
         .unwrap();
     let (status, _) = request(&daemon, req).await;

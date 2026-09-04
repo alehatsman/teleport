@@ -77,7 +77,11 @@ pub fn resolve(
 }
 
 fn bearer_from_header(headers: &HeaderMap) -> Option<&str> {
-    headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
 }
 
 /// Equal-time byte comparison. The length check short-circuits, but a
@@ -133,7 +137,10 @@ impl OriginPolicy {
         let mut allowed_hosts = vec!["127.0.0.1".to_string(), "localhost".to_string()];
         allowed_hosts.extend(extra_hosts.iter().cloned());
 
-        Self { allowed_origins, allowed_hosts }
+        Self {
+            allowed_origins,
+            allowed_hosts,
+        }
     }
 
     /// Enforce on mutating HTTP (`POST`, `DELETE`) and the WS upgrade only
@@ -148,7 +155,10 @@ impl OriginPolicy {
     /// Origin absent                   -> continue (not a browser; resolve() enforces the credential)
     /// ```
     pub fn check(&self, headers: &HeaderMap) -> Result<(), AuthError> {
-        let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).ok_or(AuthError::BadOrigin)?;
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AuthError::BadOrigin)?;
         let bare_host = host.split(':').next().unwrap_or(host);
         if !self.allowed_hosts.iter().any(|h| h == bare_host) {
             return Err(AuthError::BadOrigin);
@@ -185,7 +195,10 @@ mod tests {
     #[test]
     fn missing_credential_is_unauthorized() {
         let h = HeaderMap::new();
-        assert_eq!(resolve(&h, None, "secret", true), Err(AuthError::Unauthorized));
+        assert_eq!(
+            resolve(&h, None, "secret", true),
+            Err(AuthError::Unauthorized)
+        );
     }
 
     #[test]
@@ -197,19 +210,28 @@ mod tests {
     #[test]
     fn query_token_is_accepted_when_header_is_absent() {
         let h = HeaderMap::new();
-        assert_eq!(resolve(&h, Some("secret"), "secret", true), Ok(Principal::LocalUser));
+        assert_eq!(
+            resolve(&h, Some("secret"), "secret", true),
+            Ok(Principal::LocalUser)
+        );
     }
 
     #[test]
     fn header_takes_precedence_over_a_mismatched_query_token() {
         let h = headers(&[(header::AUTHORIZATION, "Bearer secret")]);
-        assert_eq!(resolve(&h, Some("wrong"), "secret", true), Ok(Principal::LocalUser));
+        assert_eq!(
+            resolve(&h, Some("wrong"), "secret", true),
+            Ok(Principal::LocalUser)
+        );
     }
 
     #[test]
     fn wrong_token_is_unauthorized() {
         let h = headers(&[(header::AUTHORIZATION, "Bearer nope")]);
-        assert_eq!(resolve(&h, None, "secret", true), Err(AuthError::Unauthorized));
+        assert_eq!(
+            resolve(&h, None, "secret", true),
+            Err(AuthError::Unauthorized)
+        );
     }
 
     #[test]
@@ -233,14 +255,20 @@ mod tests {
     #[test]
     fn allowed_origin_is_accepted() {
         let policy = OriginPolicy::new(7337, false, &[], &[]);
-        let h = headers(&[(header::HOST, "127.0.0.1:7337"), (header::ORIGIN, "http://127.0.0.1:7337")]);
+        let h = headers(&[
+            (header::HOST, "127.0.0.1:7337"),
+            (header::ORIGIN, "http://127.0.0.1:7337"),
+        ]);
         assert_eq!(policy.check(&h), Ok(()));
     }
 
     #[test]
     fn unknown_origin_is_rejected() {
         let policy = OriginPolicy::new(7337, false, &[], &[]);
-        let h = headers(&[(header::HOST, "127.0.0.1:7337"), (header::ORIGIN, "https://evil.example")]);
+        let h = headers(&[
+            (header::HOST, "127.0.0.1:7337"),
+            (header::ORIGIN, "https://evil.example"),
+        ]);
         assert_eq!(policy.check(&h), Err(AuthError::BadOrigin));
     }
 
@@ -276,7 +304,10 @@ mod tests {
     fn dev_server_origin_only_allowed_when_enabled() {
         let debug = OriginPolicy::new(7337, true, &[], &[]);
         let release = OriginPolicy::new(7337, false, &[], &[]);
-        let h = headers(&[(header::HOST, "127.0.0.1:7337"), (header::ORIGIN, "http://localhost:5173")]);
+        let h = headers(&[
+            (header::HOST, "127.0.0.1:7337"),
+            (header::ORIGIN, "http://localhost:5173"),
+        ]);
         assert_eq!(debug.check(&h), Ok(()));
         assert_eq!(release.check(&h), Err(AuthError::BadOrigin));
     }

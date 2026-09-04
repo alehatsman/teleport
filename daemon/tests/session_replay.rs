@@ -22,7 +22,10 @@ fn sessions_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "teleportd-replay-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
@@ -44,9 +47,23 @@ fn sessions_root(name: &str) -> PathBuf {
 /// terminates the session when it's done.
 fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Session> {
     let cwd = std::env::temp_dir();
-    let args = vec!["-c".to_string(), format!("stty raw -echo; yes | head -c {bytes}; cat")];
+    let args = vec![
+        "-c".to_string(),
+        format!("stty raw -echo; yes | head -c {bytes}; cat"),
+    ];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
+        .create(
+            SpawnSpec {
+                program: "/bin/sh",
+                args: &args,
+                cwd: &cwd,
+                env: &[],
+                cols: 80,
+                rows: 24,
+            },
+            "shell",
+            None,
+        )
         .expect("create session")
 }
 
@@ -61,7 +78,18 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
         "stty raw -echo; while :; do yes | head -c 65536; sleep 0.05; done".to_string(),
     ];
     manager
-        .create(SpawnSpec { program: "/bin/sh", args: &args, cwd: &cwd, env: &[], cols: 80, rows: 24 }, "shell", None)
+        .create(
+            SpawnSpec {
+                program: "/bin/sh",
+                args: &args,
+                cwd: &cwd,
+                env: &[],
+                cols: 80,
+                rows: 24,
+            },
+            "shell",
+            None,
+        )
         .expect("create session")
 }
 
@@ -77,7 +105,10 @@ async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
 
     // First connection: replay whatever already exists, then go live.
     let first = session.attach(0).expect("attach at 0");
-    assert_eq!(first.replay_from, 0, "attaching at 0 replays from the start");
+    assert_eq!(
+        first.replay_from, 0,
+        "attaching at 0 replays from the start"
+    );
     let (mut acc, mut first, _) = support::catch_up(first, Duration::ZERO).await;
     let mut end = first.replay_to();
     assert_eq!(end, acc.len() as u64);
@@ -87,7 +118,10 @@ async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
             .await
             .expect("first subscriber timed out")
             .expect("first subscriber disconnected early");
-        assert_eq!(chunk.offset, end, "live output must continue exactly where replay stopped");
+        assert_eq!(
+            chunk.offset, end,
+            "live output must continue exactly where replay stopped"
+        );
         acc.extend_from_slice(&chunk.bytes);
         end += chunk.bytes.len() as u64;
     }
@@ -97,28 +131,51 @@ async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
     drop(first.subscription);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let second = session.attach(end).expect("re-attach at the recorded offset");
-    assert_eq!(second.replay_from, end, "replay resumes at exactly the offset we held");
+    let second = session
+        .attach(end)
+        .expect("re-attach at the recorded offset");
+    assert_eq!(
+        second.replay_from, end,
+        "replay resumes at exactly the offset we held"
+    );
     let (replayed, mut second, _) = support::catch_up(second, Duration::ZERO).await;
-    assert!(second.replay_to() > end, "output kept accumulating while nobody was attached");
+    assert!(
+        second.replay_to() > end,
+        "output kept accumulating while nobody was attached"
+    );
     acc.extend_from_slice(&replayed);
     end = second.replay_to();
-    assert_eq!(end, acc.len() as u64, "replay must not gap or overlap what we already had");
+    assert_eq!(
+        end,
+        acc.len() as u64,
+        "replay must not gap or overlap what we already had"
+    );
 
     while acc.len() < TOTAL {
         let chunk = tokio::time::timeout(RECV_TIMEOUT, second.subscription.recv())
             .await
             .expect("second subscriber timed out")
             .expect("second subscriber disconnected early");
-        assert_eq!(chunk.offset, end, "live output must continue exactly where replay stopped");
+        assert_eq!(
+            chunk.offset, end,
+            "live output must continue exactly where replay stopped"
+        );
         acc.extend_from_slice(&chunk.bytes);
         end += chunk.bytes.len() as u64;
     }
 
     let on_disk = std::fs::read(session.log_path()).expect("read output.vt");
     assert!(on_disk.len() >= acc.len());
-    assert_eq!(acc, on_disk[..acc.len()], "replay + live must equal the log byte for byte");
-    assert_eq!(acc, vec![b"y\n".to_vec(); TOTAL / 2].concat(), "and the log must be the child's actual output");
+    assert_eq!(
+        acc,
+        on_disk[..acc.len()],
+        "replay + live must equal the log byte for byte"
+    );
+    assert_eq!(
+        acc,
+        vec![b"y\n".to_vec(); TOTAL / 2].concat(),
+        "and the log must be the child's actual output"
+    );
 
     session.terminate().expect("terminate");
 }
@@ -138,18 +195,32 @@ async fn repeated_attach_against_a_concurrent_writer_never_gaps() {
     let mut end: u64 = 0;
 
     for round in 0..200 {
-        let replay = session.attach(end).unwrap_or_else(|e| panic!("attach round {round}: {e}"));
-        assert_eq!(replay.replay_from, end, "round {round}: replay must start where we left off");
+        let replay = session
+            .attach(end)
+            .unwrap_or_else(|e| panic!("attach round {round}: {e}"));
+        assert_eq!(
+            replay.replay_from, end,
+            "round {round}: replay must start where we left off"
+        );
         let (replayed, mut attach, _) = support::catch_up(replay, Duration::ZERO).await;
         acc.extend_from_slice(&replayed);
         end = attach.replay_to();
-        assert_eq!(end, acc.len() as u64, "round {round}: replay gapped or duplicated");
+        assert_eq!(
+            end,
+            acc.len() as u64,
+            "round {round}: replay gapped or duplicated"
+        );
 
         // Take one live chunk before dropping, so the subscriber path is
         // exercised at the boundary too -- not just the file read.
         if acc.len() < TOTAL {
-            if let Ok(Some(chunk)) = tokio::time::timeout(RECV_TIMEOUT, attach.subscription.recv()).await {
-                assert_eq!(chunk.offset, end, "round {round}: first live chunk must start at the boundary");
+            if let Ok(Some(chunk)) =
+                tokio::time::timeout(RECV_TIMEOUT, attach.subscription.recv()).await
+            {
+                assert_eq!(
+                    chunk.offset, end,
+                    "round {round}: first live chunk must start at the boundary"
+                );
                 acc.extend_from_slice(&chunk.bytes);
                 end += chunk.bytes.len() as u64;
             }
@@ -158,7 +229,11 @@ async fn repeated_attach_against_a_concurrent_writer_never_gaps() {
 
     let on_disk = std::fs::read(session.log_path()).expect("read output.vt");
     assert!(!acc.is_empty(), "the fuzz loop never observed any output");
-    assert_eq!(acc, on_disk[..acc.len()], "the accumulated stream must equal the log byte for byte");
+    assert_eq!(
+        acc,
+        on_disk[..acc.len()],
+        "the accumulated stream must equal the log byte for byte"
+    );
 
     session.terminate().expect("terminate");
 }
@@ -173,19 +248,33 @@ async fn attaching_past_next_offset_is_offset_ahead() {
 
     let next_offset = session.next_offset();
     match session.attach(next_offset + 4096) {
-        Err(AttachError::OffsetAhead { requested, next_offset: reported }) => {
+        Err(AttachError::OffsetAhead {
+            requested,
+            next_offset: reported,
+        }) => {
             assert_eq!(requested, next_offset + 4096);
-            assert!(reported >= next_offset, "the reported offset must be the daemon's own");
+            assert!(
+                reported >= next_offset,
+                "the reported offset must be the daemon's own"
+            );
         }
         Err(other) => panic!("expected OffsetAhead, got {other}"),
         Ok(_) => panic!("attaching past next_offset must not succeed"),
     }
 
     // Attaching *at* next_offset is legal and simply replays nothing.
-    let replay = session.attach(session.next_offset()).expect("attach at the head");
-    assert_eq!(replay.replay_from, replay.next_offset, "attaching at the head replays nothing");
+    let replay = session
+        .attach(session.next_offset())
+        .expect("attach at the head");
+    assert_eq!(
+        replay.replay_from, replay.next_offset,
+        "attaching at the head replays nothing"
+    );
     let (replayed, attach, _) = support::catch_up(replay, Duration::ZERO).await;
-    assert!(replayed.is_empty(), "and the catch-up loop goes live on its first round");
+    assert!(
+        replayed.is_empty(),
+        "and the catch-up loop goes live on its first round"
+    );
     assert_eq!(attach.replay_from, attach.replay_to());
 
     session.terminate().expect("terminate");
@@ -199,7 +288,11 @@ async fn attaching_past_next_offset_is_offset_ahead() {
 async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
     const CAP: u64 = 64 * 1024;
 
-    let limits = LogLimits { max_bytes: CAP, warn_bytes: CAP / 2, ..LogLimits::default() };
+    let limits = LogLimits {
+        max_bytes: CAP,
+        warn_bytes: CAP / 2,
+        ..LogLimits::default()
+    };
     let manager = SessionManager::with_limits(sessions_root("cap"), limits);
     // Must still be producing when the assertions below run -- the point of
     // the cap is that live streaming outlives persistence.
@@ -208,28 +301,53 @@ async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
     // Wait for the cap to actually be hit, then for output to run well past it.
     let deadline = std::time::Instant::now() + RECV_TIMEOUT;
     while session.next_offset() < CAP * 4 {
-        assert!(std::time::Instant::now() < deadline, "session never produced enough output to cap");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session never produced enough output to cap"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    assert_eq!(session.log_capped_at(), Some(CAP), "the cap lands on log_max_bytes exactly");
+    assert_eq!(
+        session.log_capped_at(),
+        Some(CAP),
+        "the cap lands on log_max_bytes exactly"
+    );
     let on_disk = std::fs::read(session.log_path()).expect("read output.vt");
-    assert_eq!(on_disk.len() as u64, CAP, "the file must stop growing at the cap");
+    assert_eq!(
+        on_disk.len() as u64,
+        CAP,
+        "the file must stop growing at the cap"
+    );
 
     // A replay that starts before the cap serves what exists and stops there.
     let from_start = session.attach(0).expect("attach at 0");
     assert_eq!(from_start.replay_from, 0);
-    assert_eq!(from_start.log_capped_at, Some(CAP), "ready must carry the cap so a client can render the gap");
+    assert_eq!(
+        from_start.log_capped_at,
+        Some(CAP),
+        "ready must carry the cap so a client can render the gap"
+    );
     let (replayed, from_start, _) = support::catch_up(from_start, Duration::ZERO).await;
-    assert_eq!(from_start.replay_to(), CAP, "replay must clamp to log_capped_at");
+    assert_eq!(
+        from_start.replay_to(),
+        CAP,
+        "replay must clamp to log_capped_at"
+    );
     assert_eq!(replayed.len() as u64, CAP);
 
     // A client asking for bytes past the cap gets no replay, and is told
     // where the live stream resumes rather than being served the wrong bytes.
     let past_cap = session.attach(CAP + 1024).expect("attach past the cap");
-    assert_eq!(past_cap.replay_from, past_cap.next_offset, "replay_from must be next_offset past a cap");
+    assert_eq!(
+        past_cap.replay_from, past_cap.next_offset,
+        "replay_from must be next_offset past a cap"
+    );
     let (replayed, mut past_cap, _) = support::catch_up(past_cap, Duration::ZERO).await;
-    assert!(replayed.is_empty(), "the bytes past a cap are gone, not served from the wrong position");
+    assert!(
+        replayed.is_empty(),
+        "the bytes past a cap are gone, not served from the wrong position"
+    );
     assert_eq!(
         past_cap.replay_from, past_cap.next_offset,
         "the boundary moved on while we caught up; replay_from must move with it, not point into the hole"
@@ -242,7 +360,10 @@ async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
             .await
             .expect("live output stopped after the cap")
             .expect("subscriber disconnected after the cap");
-        assert_eq!(chunk.offset, end, "offsets keep advancing contiguously past the cap");
+        assert_eq!(
+            chunk.offset, end,
+            "offsets keep advancing contiguously past the cap"
+        );
         end += chunk.bytes.len() as u64;
     }
     assert!(end > CAP);

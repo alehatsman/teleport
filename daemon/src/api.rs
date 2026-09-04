@@ -57,10 +57,18 @@ pub struct AppState {
 impl FromRequestParts<Arc<AppState>> for Principal {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
         let query_token = query_param(parts.uri.query().unwrap_or(""), "token");
-        auth::resolve(&parts.headers, query_token, &state.token, state.config.auth_token)
-            .map_err(ApiError::from)
+        auth::resolve(
+            &parts.headers,
+            query_token,
+            &state.token,
+            state.config.auth_token,
+        )
+        .map_err(ApiError::from)
     }
 }
 
@@ -100,34 +108,55 @@ impl From<CreateError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
-            ApiError::Auth(AuthError::Unauthorized) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid credential".to_string())
-            }
-            ApiError::Auth(AuthError::BadOrigin) => {
-                (StatusCode::FORBIDDEN, "bad_origin", "Origin or Host rejected".to_string())
-            }
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found", "session not found".to_string()),
+            ApiError::Auth(AuthError::Unauthorized) => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or invalid credential".to_string(),
+            ),
+            ApiError::Auth(AuthError::BadOrigin) => (
+                StatusCode::FORBIDDEN,
+                "bad_origin",
+                "Origin or Host rejected".to_string(),
+            ),
+            ApiError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "session not found".to_string(),
+            ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             // docs/04-api-protocol.md#post-apiv1sessions: 422 for a
             // resolvable-at-validation-time problem, 429 for max_sessions,
             // 500 for a spawn failure past that point. Never 404 -- the
             // collection exists, the request is unprocessable.
-            ApiError::Create(CreateError::ExecutableNotFound(cmd)) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable", format!("executable not found on PATH: {cmd}"))
-            }
+            ApiError::Create(CreateError::ExecutableNotFound(cmd)) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unprocessable",
+                format!("executable not found on PATH: {cmd}"),
+            ),
             ApiError::Create(CreateError::InvalidCwd(cwd)) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unprocessable",
-                format!("cwd does not exist or is not a directory: {}", cwd.display()),
+                format!(
+                    "cwd does not exist or is not a directory: {}",
+                    cwd.display()
+                ),
             ),
-            ApiError::Create(CreateError::MaxSessions(n)) => {
-                (StatusCode::TOO_MANY_REQUESTS, "max_sessions", format!("max_sessions ({n}) reached"))
-            }
-            ApiError::Create(CreateError::Spawn(e)) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed", e.to_string())
-            }
+            ApiError::Create(CreateError::MaxSessions(n)) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "max_sessions",
+                format!("max_sessions ({n}) reached"),
+            ),
+            ApiError::Create(CreateError::Spawn(e)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "spawn_failed",
+                e.to_string(),
+            ),
         };
-        (status, Json(serde_json::json!({ "error": code, "message": message }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": code, "message": message })),
+        )
+            .into_response()
     }
 }
 
@@ -142,7 +171,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route("/api/v1/sessions/{id}", get(get_session).delete(delete_session))
+        .route(
+            "/api/v1/sessions/{id}",
+            get(get_session).delete(delete_session),
+        )
         .route("/api/v1/sessions/{id}/log", get(get_log))
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
@@ -183,7 +215,10 @@ async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Respo
 /// id" -- reusing that message here would mislabel an unmatched route as a
 /// missing session.
 fn route_not_found() -> Response {
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "not_found", "message": "no such route" })))
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "not_found", "message": "no such route" })),
+    )
         .into_response()
 }
 
@@ -195,7 +230,11 @@ const CAPABILITIES: &[&str] = &["sessions", "presets", "tail_attach"];
 /// directly rather than taking a [`Principal`] extractor: an extractor
 /// rejects on failure, and this handler must not reject, only pick a
 /// response shape.
-async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: axum::http::Uri) -> impl IntoResponse {
+async fn health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
     let query_token = query_param(uri.query().unwrap_or(""), "token");
     let authenticated =
         auth::resolve(&headers, query_token, &state.token, state.config.auth_token).is_ok();
@@ -265,14 +304,21 @@ async fn create_session(
     check_origin(&state, &headers)?;
 
     if !(1..=1000).contains(&req.cols) || !(1..=1000).contains(&req.rows) {
-        return Err(ApiError::BadRequest("cols and rows must be in 1..=1000".to_string()));
+        return Err(ApiError::BadRequest(
+            "cols and rows must be in 1..=1000".to_string(),
+        ));
     }
 
-    let preset = req.preset.as_deref().and_then(|id| state.presets.iter().find(|p| p.id == id));
+    let preset = req
+        .preset
+        .as_deref()
+        .and_then(|id| state.presets.iter().find(|p| p.id == id));
     let command = req
         .command
         .or_else(|| preset.map(|p| p.resolved_command()))
-        .ok_or_else(|| ApiError::BadRequest("command is required unless a preset supplies it".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest("command is required unless a preset supplies it".to_string())
+        })?;
     let args = resolve_args(req.args, preset);
     let env: Vec<(String, String)> = req.env.into_iter().collect();
     let cwd = PathBuf::from(req.cwd);
@@ -287,7 +333,14 @@ async fn create_session(
     // built inside the closure rather than moved in already constructed.
     // `state` isn't needed again after this, so it moves in whole.
     let session = tokio::task::spawn_blocking(move || {
-        let spec = SpawnSpec { program: &command, args: &args, cwd: &cwd, env: &env, cols, rows };
+        let spec = SpawnSpec {
+            program: &command,
+            args: &args,
+            cwd: &cwd,
+            env: &env,
+            cols,
+            rows,
+        };
         state.sessions.create(spec, kind, preset_id)
     })
     .await
@@ -364,7 +417,10 @@ impl SessionView {
 /// Sorted newest-first; `env` never appears (it is never stored on
 /// [`crate::session::Session`] in the first place --
 /// docs/06-security.md#secrets-and-environment).
-async fn list_sessions(State(state): State<Arc<AppState>>, _principal: Principal) -> impl IntoResponse {
+async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+) -> impl IntoResponse {
     let mut sessions = state.sessions.list();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms()));
     let views: Vec<SessionView> = sessions.iter().map(|s| SessionView::from(s)).collect();
@@ -417,15 +473,24 @@ async fn delete_session(
             // result before it can safely delete the directory).
             let terminate_session = Arc::clone(&session);
             match tokio::task::spawn_blocking(move || terminate_session.terminate()).await {
-                Ok(Err(e)) => tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed"),
+                Ok(Err(e)) => {
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed")
+                }
                 Ok(Ok(())) => {}
-                Err(e) => tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked"),
+                Err(e) => {
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked")
+                }
             }
             session.exited().await;
         }
-        let log_dir = session.log_path().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| session.log_path());
+        let log_dir = session
+            .log_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| session.log_path());
         // `remove_dir_all` is blocking fs work too.
-        if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await {
+        if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
+        {
             tracing::warn!(session_id = %session.id, error = %e, "removing session directory task panicked");
         }
         state.sessions.purge(session.id);
@@ -473,8 +538,12 @@ async fn get_log(
     let to = to.min(end);
     let from = from.min(to);
 
-    let mut reader = session.log_reader().map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let bytes = reader.read_range(from, to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let mut reader = session
+        .log_reader()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let bytes = reader
+        .read_range(from, to)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
 }
@@ -489,11 +558,18 @@ fn parse_byte_range(header: &str, len: u64) -> Option<(u64, u64)> {
     // malformed/adversarial `Range` header) must reject the range and fall
     // back to the full response, not overflow-panic or silently wrap to 0
     // (M4 review).
-    let end: u64 = if end.is_empty() { len } else { end.parse::<u64>().ok()?.checked_add(1)? };
+    let end: u64 = if end.is_empty() {
+        len
+    } else {
+        end.parse::<u64>().ok()?.checked_add(1)?
+    };
     Some((start, end))
 }
 
-async fn list_presets(State(state): State<Arc<AppState>>, _principal: Principal) -> impl IntoResponse {
+async fn list_presets(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+) -> impl IntoResponse {
     Json(serde_json::json!({ "presets": state.presets }))
 }
 
@@ -527,14 +603,20 @@ mod tests {
     #[test]
     fn explicit_empty_args_is_honored_not_replaced_by_the_preset_default() {
         let preset = preset_with_args(&["-l"]);
-        assert_eq!(resolve_args(Some(vec![]), Some(&preset)), Vec::<String>::new());
+        assert_eq!(
+            resolve_args(Some(vec![]), Some(&preset)),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn explicit_args_override_the_preset_default() {
         let preset = preset_with_args(&["-l"]);
         let explicit = vec!["-c".to_string(), "true".to_string()];
-        assert_eq!(resolve_args(Some(explicit.clone()), Some(&preset)), explicit);
+        assert_eq!(
+            resolve_args(Some(explicit.clone()), Some(&preset)),
+            explicit
+        );
     }
 
     #[test]

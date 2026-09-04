@@ -223,7 +223,11 @@ pub fn spawn(
         .context("spawning control thread")?;
 
     Ok(SpawnedSession {
-        session: PtySession { write_tx, control_tx, state },
+        session: PtySession {
+            write_tx,
+            control_tx,
+            state,
+        },
         exit_rx,
         eof_rx,
         pid,
@@ -252,7 +256,10 @@ impl TerminalSession for PtySession {
     }
 
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let (cols, rows) = (cols.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()), rows.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()));
+        let (cols, rows) = (
+            cols.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()),
+            rows.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end()),
+        );
         self.control_tx
             .send(ControlEvent::Resize { cols, rows })
             .context("pty control thread is gone")
@@ -261,14 +268,23 @@ impl TerminalSession for PtySession {
     fn terminate(&self) -> Result<()> {
         if self
             .state
-            .compare_exchange(STATE_RUNNING, STATE_CLOSING, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(
+                STATE_RUNNING,
+                STATE_CLOSING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
             .is_err()
         {
             return Ok(()); // already closing or exited -- idempotent
         }
 
         let (reply_tx, reply_rx) = mpsc::sync_channel::<PtyExit>(1);
-        if self.control_tx.send(ControlEvent::Terminate { reply_tx }).is_err() {
+        if self
+            .control_tx
+            .send(ControlEvent::Terminate { reply_tx })
+            .is_err()
+        {
             // The control thread is already gone -- it must have processed a
             // spontaneous ChildExited (and dropped control_rx) in the window
             // between our compare_exchange above and this send(). The session
@@ -323,7 +339,10 @@ fn writer_thread_main(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<
     }
 }
 
-fn reaper_thread_main(mut child: Box<dyn Child + Send + Sync>, control_tx: SyncSender<ControlEvent>) {
+fn reaper_thread_main(
+    mut child: Box<dyn Child + Send + Sync>,
+    control_tx: SyncSender<ControlEvent>,
+) {
     let result = child.wait();
     // Ignored if the control thread already finished (e.g. gave up on a
     // hard-kill timeout) and dropped its receiver -- its result stands.
@@ -351,7 +370,12 @@ fn control_thread_main(
             ControlEvent::Resize { cols, rows } => {
                 if state.load(Ordering::SeqCst) == STATE_RUNNING {
                     if let Some(master) = &master {
-                        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                        let _ = master.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
                     }
                 }
             }
@@ -381,7 +405,8 @@ fn control_thread_main(
                     drop(master.take());
                 }
 
-                let exit = match wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT) {
+                let exit = match wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT)
+                {
                     Some(result) => pty_exit_from_wait(result),
                     None => {
                         // Step 4: hard kill. portable-pty's kill() is a hard
@@ -389,7 +414,10 @@ fn control_thread_main(
                         let _ = killer.kill();
                         match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
                             Some(result) => pty_exit_from_wait(result),
-                            None => PtyExit { status: None, lost_reason: Some(LostReason::KillTimeout) },
+                            None => PtyExit {
+                                status: None,
+                                lost_reason: Some(LostReason::KillTimeout),
+                            },
                         }
                     }
                 };
@@ -435,7 +463,13 @@ fn wait_for_child_exited(
 
 fn pty_exit_from_wait(result: IoResult<ExitStatus>) -> PtyExit {
     match result {
-        Ok(status) => PtyExit { status: Some(status), lost_reason: None },
-        Err(_) => PtyExit { status: None, lost_reason: Some(LostReason::WaitError) },
+        Ok(status) => PtyExit {
+            status: Some(status),
+            lost_reason: None,
+        },
+        Err(_) => PtyExit {
+            status: None,
+            lost_reason: Some(LostReason::WaitError),
+        },
     }
 }

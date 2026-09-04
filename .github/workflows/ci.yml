@@ -6,6 +6,19 @@ on:
   pull_request:
 
 jobs:
+  daemon-fmt:
+    name: daemon (fmt)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
   daemon:
     name: daemon (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -27,6 +40,18 @@ jobs:
       - run: cargo build --all-targets
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
+
+  daemon-audit:
+    name: daemon (audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
 
   web:
     name: web

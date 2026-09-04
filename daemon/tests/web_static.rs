@@ -9,11 +9,17 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 fn get(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn body_string(response: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
     String::from_utf8(bytes.to_vec()).expect("utf8 body")
 }
 
@@ -34,12 +40,16 @@ async fn no_web_dist_configured_serves_api_only() {
 
 #[tokio::test]
 async fn known_asset_is_served_from_web_dist() {
-    let dist = std::env::temp_dir().join(format!("teleportd-web-dist-{}-assets", std::process::id()));
+    let dist =
+        std::env::temp_dir().join(format!("teleportd-web-dist-{}-assets", std::process::id()));
     write_dist(&dist);
     let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
 
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
-    let response = router.oneshot(get("/assets/app.js")).await.expect("router call");
+    let response = router
+        .oneshot(get("/assets/app.js"))
+        .await
+        .expect("router call");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_string(response).await, "console.log('app')");
 
@@ -48,7 +58,10 @@ async fn known_asset_is_served_from_web_dist() {
 
 #[tokio::test]
 async fn unknown_client_route_falls_back_to_index_html() {
-    let dist = std::env::temp_dir().join(format!("teleportd-web-dist-{}-fallback", std::process::id()));
+    let dist = std::env::temp_dir().join(format!(
+        "teleportd-web-dist-{}-fallback",
+        std::process::id()
+    ));
     write_dist(&dist);
     let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
 
@@ -56,7 +69,10 @@ async fn unknown_client_route_falls_back_to_index_html() {
     // A client-side route with no matching file on disk -- e.g. deep-linking
     // straight to a session view -- must still get the SPA shell so Svelte's
     // router can take over, not a raw 404.
-    let response = router.oneshot(get("/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV")).await.expect("router call");
+    let response = router
+        .oneshot(get("/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+        .await
+        .expect("router call");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_string(response).await, "<html>spa shell</html>");
 
@@ -65,7 +81,10 @@ async fn unknown_client_route_falls_back_to_index_html() {
 
 #[tokio::test]
 async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
-    let dist = std::env::temp_dir().join(format!("teleportd-web-dist-{}-apinotfound", std::process::id()));
+    let dist = std::env::temp_dir().join(format!(
+        "teleportd-web-dist-{}-apinotfound",
+        std::process::id()
+    ));
     write_dist(&dist);
     let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
 
@@ -73,7 +92,10 @@ async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
     // `nest("/api/v1", ...)` gives the mount point its own 404 for an
     // unmatched sub-path -- it must never fall through to the SPA fallback,
     // or a typo'd API path would silently return HTML instead of an error.
-    let response = router.oneshot(get("/api/v1/this-route-does-not-exist")).await.expect("router call");
+    let response = router
+        .oneshot(get("/api/v1/this-route-does-not-exist"))
+        .await
+        .expect("router call");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_ne!(body_string(response).await, "<html>spa shell</html>");
 

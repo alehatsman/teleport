@@ -1,0 +1,4 @@
+# Everything else is rustfmt's default. `edition` mirrors Cargo.toml so
+# rustfmt applies 2021 formatting rules (e.g. import grouping) instead of
+# its own default of 2015.
+edition = "2021"

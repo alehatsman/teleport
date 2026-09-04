@@ -59,7 +59,12 @@ fn first_run_creates_expected_files_and_prints_url() {
 
     let mut child = KillOnDrop(
         Command::new(bin())
-            .args(["--data-dir", data_dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -67,7 +72,10 @@ fn first_run_creates_expected_files_and_prints_url() {
     );
 
     let port_file = data_dir.join("port");
-    assert!(wait_for_file(&port_file, Duration::from_secs(5)), "port file never appeared");
+    assert!(
+        wait_for_file(&port_file, Duration::from_secs(5)),
+        "port file never appeared"
+    );
 
     assert!(data_dir.join("device.json").exists());
     assert!(data_dir.join("token").exists());
@@ -81,14 +89,21 @@ fn first_run_creates_expected_files_and_prints_url() {
 
     let token = std::fs::read_to_string(data_dir.join("token")).unwrap();
     let token = token.trim();
-    assert_eq!(token.len(), 64, "256 bits hex-encoded is 64 chars: {token:?}");
+    assert_eq!(
+        token.len(),
+        64,
+        "256 bits hex-encoded is 64 chars: {token:?}"
+    );
     assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
 
     let stdout = child.0.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), format!("http://127.0.0.1:{port}/?token={token}"));
+    assert_eq!(
+        line.trim(),
+        format!("http://127.0.0.1:{port}/?token={token}")
+    );
 
     #[cfg(unix)]
     {
@@ -109,13 +124,21 @@ fn device_id_and_token_survive_a_restart() {
     let run_once = |data_dir: &Path| -> (String, String) {
         let mut child = KillOnDrop(
             Command::new(bin())
-                .args(["--data-dir", data_dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+                .args([
+                    "--data-dir",
+                    data_dir.to_str().unwrap(),
+                    "--listen",
+                    "127.0.0.1:0",
+                ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn teleportd"),
         );
-        assert!(wait_for_file(&data_dir.join("port"), Duration::from_secs(5)));
+        assert!(wait_for_file(
+            &data_dir.join("port"),
+            Duration::from_secs(5)
+        ));
         let device = std::fs::read_to_string(data_dir.join("device.json")).unwrap();
         let token = std::fs::read_to_string(data_dir.join("token")).unwrap();
         child.0.kill().unwrap();
@@ -126,7 +149,10 @@ fn device_id_and_token_survive_a_restart() {
     let (device1, token1) = run_once(&data_dir);
     let (device2, token2) = run_once(&data_dir);
 
-    assert_eq!(device1, device2, "device.json must not change across restarts");
+    assert_eq!(
+        device1, device2,
+        "device.json must not change across restarts"
+    );
     assert_eq!(token1, token2, "token must not change across restarts");
 
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -157,9 +183,16 @@ fn falls_back_to_an_ephemeral_port_when_the_configured_one_is_taken() {
 
     let port_file = data_dir.join("port");
     assert!(wait_for_file(&port_file, Duration::from_secs(5)));
-    let bound_port: u16 = std::fs::read_to_string(&port_file).unwrap().trim().parse().unwrap();
+    let bound_port: u16 = std::fs::read_to_string(&port_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
 
-    assert_ne!(bound_port, held_port, "should not have bound the already-held port");
+    assert_ne!(
+        bound_port, held_port,
+        "should not have bound the already-held port"
+    );
 
     drop(holder);
     child.0.kill().unwrap();
@@ -172,14 +205,22 @@ fn refuses_non_loopback_without_the_escape_hatch() {
     let data_dir = temp_dir("non-loopback");
 
     let status = Command::new(bin())
-        .args(["--data-dir", data_dir.to_str().unwrap(), "--listen", "0.0.0.0:0"])
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--listen",
+            "0.0.0.0:0",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .expect("run teleportd");
 
     assert!(!status.success());
-    assert!(!data_dir.join("port").exists(), "must not have bound anything");
+    assert!(
+        !data_dir.join("port").exists(),
+        "must not have bound anything"
+    );
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
@@ -191,7 +232,12 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
 
     let mut child = KillOnDrop(
         Command::new(bin())
-            .args(["--data-dir", data_dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -207,8 +253,14 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
     }
 
     let status = child.0.wait().expect("wait for child");
-    assert!(status.success(), "graceful shutdown should exit 0, got {status:?}");
-    assert!(!port_file.exists(), "port file should be removed on clean shutdown");
+    assert!(
+        status.success(),
+        "graceful shutdown should exit 0, got {status:?}"
+    );
+    assert!(
+        !port_file.exists(),
+        "port file should be removed on clean shutdown"
+    );
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

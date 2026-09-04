@@ -66,7 +66,10 @@ use crate::pty::{self, PtySession, SpawnSpec, TerminalSession};
 /// here and, from M7 on, of the matching SQLite columns
 /// (docs/05-persistence.md#schema).
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Queue bound per subscriber: whichever trips first
@@ -110,7 +113,9 @@ const MAX_CATCHUP_ROUNDS: u32 = 4 * (crate::log::DEFAULT_LOG_MAX_BYTES / REPLAY_
 /// (`MAX_STALLED_ROUNDS`), or it hasn't converged in any number of rounds
 /// (`MAX_CATCHUP_ROUNDS`) even though it kept gaining a little each time.
 fn should_register(gap: u64, stalled_rounds: u32, total_rounds: u32) -> bool {
-    gap <= LIVE_GAP_BYTES || stalled_rounds >= MAX_STALLED_ROUNDS || total_rounds >= MAX_CATCHUP_ROUNDS
+    gap <= LIVE_GAP_BYTES
+        || stalled_rounds >= MAX_STALLED_ROUNDS
+        || total_rounds >= MAX_CATCHUP_ROUNDS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -264,14 +269,21 @@ struct ControlLease {
 /// (docs/04-api-protocol.md#control-messages).
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    Resized { cols: u16, rows: u16 },
+    Resized {
+        cols: u16,
+        rows: u16,
+    },
     /// `lost_by` addresses the notification -- only the connection whose
     /// `client_id` matches acts on it. `new_controller_id`/`_name` are the
     /// wire message's content: who control was given *to*
     /// (docs/04-api-protocol.md#control-messages:
     /// `{"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}`
     /// -- both fields describe the new holder, not the one losing it).
-    ControlRevoked { lost_by: String, new_controller_id: String, new_controller_name: String },
+    ControlRevoked {
+        lost_by: String,
+        new_controller_id: String,
+        new_controller_name: String,
+    },
 }
 
 /// Capacity for the [`SessionEvent`] broadcast channel. Resize and
@@ -317,7 +329,11 @@ struct Fanout {
 
 impl Fanout {
     fn new(log: OutputLog) -> Self {
-        Self { log, subscribers: Vec::new(), next_subscriber_id: 0 }
+        Self {
+            log,
+            subscribers: Vec::new(),
+            next_subscriber_id: 0,
+        }
     }
 
     /// Runs on the PTY reader thread via the `on_output` closure passed to
@@ -347,7 +363,10 @@ impl Fanout {
                 Ok(permit) => permit,
                 Err(_) => return false, // byte bound tripped -- disconnect, don't wait.
             };
-            let chunk = Chunk { offset: start, bytes: Arc::clone(&payload) };
+            let chunk = Chunk {
+                offset: start,
+                bytes: Arc::clone(&payload),
+            };
             match sub.tx.try_send(chunk) {
                 Ok(()) => {
                     permit.forget(); // returned by Subscription::recv once this chunk is drained
@@ -372,9 +391,18 @@ impl Fanout {
 
         let id = SubscriberId(self.next_subscriber_id);
         self.next_subscriber_id += 1;
-        self.subscribers.push(SubscriberSlot { id, tx, budget: Arc::clone(&budget) });
+        self.subscribers.push(SubscriberSlot {
+            id,
+            tx,
+            budget: Arc::clone(&budget),
+        });
 
-        Subscription { id, rx, budget, fanout: Arc::clone(fanout) }
+        Subscription {
+            id,
+            rx,
+            budget,
+            fanout: Arc::clone(fanout),
+        }
     }
 }
 
@@ -451,7 +479,11 @@ pub struct Replay {
 pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
     /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
-    History { offset: u64, bytes: Vec<u8>, replay: HistoryReplay },
+    History {
+        offset: u64,
+        bytes: Vec<u8>,
+        replay: HistoryReplay,
+    },
     /// The gap closed: the subscriber is registered and the handover is set
     /// up. Write [`Attach::replay`] first, then stream the subscription.
     Live(Attach),
@@ -566,7 +598,10 @@ impl Replay {
             return Ok(ReplayStep::History {
                 offset,
                 bytes,
-                replay: HistoryReplay { round_len, replay: self },
+                replay: HistoryReplay {
+                    round_len,
+                    replay: self,
+                },
             });
         };
 
@@ -590,10 +625,13 @@ impl Replay {
         // bytes and the first queued chunk are contiguous by construction:
         // this range ends at or before `end <= next_offset`, and every chunk
         // that subscription will ever see starts at or after `next_offset`.
-        let replay = self
-            .reader
-            .read_range(replay_from, end)
-            .map_err(|source| AttachError::Read { offset: replay_from, source })?;
+        let replay =
+            self.reader
+                .read_range(replay_from, end)
+                .map_err(|source| AttachError::Read {
+                    offset: replay_from,
+                    source,
+                })?;
 
         Ok(ReplayStep::Live(Attach {
             replay_from,
@@ -710,7 +748,10 @@ impl Session {
 
         let next_offset = fanout.log.next_offset();
         if from > next_offset {
-            return Err(AttachError::OffsetAhead { requested: from, next_offset });
+            return Err(AttachError::OffsetAhead {
+                requested: from,
+                next_offset,
+            });
         }
         let log_capped_at = fanout.log.log_capped_at();
         let readable_end = fanout.log.readable_end();
@@ -721,8 +762,11 @@ impl Session {
         // gone. A client asking for them gets no replay and is told where the
         // stream resumes, rather than being served whatever happens to sit at
         // that file position (docs/05-persistence.md#size-cap).
-        let replay_from =
-            if from >= next_offset.min(readable_end) { next_offset } else { from };
+        let replay_from = if from >= next_offset.min(readable_end) {
+            next_offset
+        } else {
+            from
+        };
 
         Ok(Replay {
             replay_from,
@@ -947,7 +991,12 @@ impl Session {
     /// so a just-preempted connection's input could still reach the PTY (M4
     /// review). `Err(None)` means "not the controller"; `Err(Some(e))` means
     /// the write itself failed (session closing).
-    pub fn write_if_controller(&self, client_id: &str, epoch: u64, bytes: &[u8]) -> Result<(), Option<anyhow::Error>> {
+    pub fn write_if_controller(
+        &self,
+        client_id: &str,
+        epoch: u64,
+        bytes: &[u8],
+    ) -> Result<(), Option<anyhow::Error>> {
         let lease = self.control.lock().unwrap();
         if lease.holder.as_deref() != Some(client_id) || lease.epoch != epoch {
             return Err(None);
@@ -985,7 +1034,10 @@ impl Session {
             // epoch -- a reconnect bumps `epoch` and clears `grace`, and a
             // `claim_control` from someone else already replaced `holder`
             // (and `epoch`) entirely.
-            if lease.grace && lease.holder.as_deref() == Some(client_id.as_str()) && lease.epoch == epoch {
+            if lease.grace
+                && lease.holder.as_deref() == Some(client_id.as_str())
+                && lease.epoch == epoch
+            {
                 lease.holder = None;
                 lease.holder_name = None;
                 lease.grace = false;
@@ -1134,7 +1186,9 @@ impl SessionManager {
             return Err(CreateError::MaxSessions(self.max_sessions));
         }
         *reserved += 1;
-        Ok(ReservationGuard { reserved: &self.reserved })
+        Ok(ReservationGuard {
+            reserved: &self.reserved,
+        })
     }
 
     /// Spawns `spec` behind a fresh PTY and registers the resulting session,
@@ -1218,7 +1272,10 @@ impl SessionManager {
             exited_tx,
             sync,
         });
-        self.sessions.lock().unwrap().insert(id, Arc::clone(&session));
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&session));
         spawn_exit_listener(Arc::clone(&session), spawned.exit_rx);
         Ok(session)
     }
@@ -1260,17 +1317,25 @@ fn resolve_executable(command: &str, cwd: &Path) -> bool {
         // in -- not the daemon's own cwd (M4 review: checking against the
         // daemon's cwd could wrongly 422 a command that would have spawned
         // fine, e.g. `./run.sh` with `cwd` pointing at its directory).
-        let resolved = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
         return is_executable_file(&resolved);
     }
-    let Some(path_var) = std::env::var_os("PATH") else { return false };
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)))
 }
 
 #[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(not(unix))]
@@ -1282,7 +1347,9 @@ fn is_executable_file(path: &Path) -> bool {
     if path.is_file() {
         return true;
     }
-    ["exe", "cmd", "bat", "ps1"].iter().any(|ext| path.with_extension(ext).is_file())
+    ["exe", "cmd", "bat", "ps1"]
+        .iter()
+        .any(|ext| path.with_extension(ext).is_file())
 }
 
 /// Consumes `exit_rx` on its own thread -- the same shape as `pty.rs`'s own
@@ -1365,7 +1432,11 @@ mod tests {
         assert_eq!(fanout.lock().unwrap().subscribers.len(), 1);
 
         drop(sub);
-        assert_eq!(fanout.lock().unwrap().subscribers.len(), 0, "Drop must remove the slot without waiting for output");
+        assert_eq!(
+            fanout.lock().unwrap().subscribers.len(),
+            0,
+            "Drop must remove the slot without waiting for output"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1425,8 +1496,16 @@ mod tests {
         let mut step = replay.next_round().expect("first catch-up round");
         let attach = loop {
             match step {
-                ReplayStep::History { offset, bytes, replay: rest } => {
-                    assert_eq!(offset, rounds * REPLAY_ROUND_BYTES, "rounds must be contiguous");
+                ReplayStep::History {
+                    offset,
+                    bytes,
+                    replay: rest,
+                } => {
+                    assert_eq!(
+                        offset,
+                        rounds * REPLAY_ROUND_BYTES,
+                        "rounds must be contiguous"
+                    );
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES, "a round is bounded");
                     rounds += 1;
                     assert_no_subscriber(rounds);
@@ -1436,15 +1515,29 @@ mod tests {
             }
         };
 
-        assert_eq!(rounds, 2, "3 MiB is two 1 MiB rounds, then a 1 MiB gap that fits");
-        assert_eq!(fanout.lock().unwrap().subscribers.len(), 1, "the last round registers");
+        assert_eq!(
+            rounds, 2,
+            "3 MiB is two 1 MiB rounds, then a 1 MiB gap that fits"
+        );
+        assert_eq!(
+            fanout.lock().unwrap().subscribers.len(),
+            1,
+            "the last round registers"
+        );
         assert!(attach.caught_up);
         assert_eq!(attach.replay_from, 2 * REPLAY_ROUND_BYTES);
         assert_eq!(attach.replay.len() as u64, LIVE_GAP_BYTES);
-        assert_eq!(attach.replay_to(), next_offset, "replay must meet the live boundary exactly");
+        assert_eq!(
+            attach.replay_to(),
+            next_offset,
+            "replay must meet the live boundary exactly"
+        );
 
         drop(attach);
-        assert!(fanout.lock().unwrap().subscribers.is_empty(), "dropping the attach unregisters");
+        assert!(
+            fanout.lock().unwrap().subscribers.is_empty(),
+            "dropping the attach unregisters"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1466,7 +1559,11 @@ mod tests {
         let mut step = replay.next_round().expect("first catch-up round");
         let attach = loop {
             match step {
-                ReplayStep::History { bytes, replay: rest, .. } => {
+                ReplayStep::History {
+                    bytes,
+                    replay: rest,
+                    ..
+                } => {
                     rounds += 1;
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES);
                     // The producer gains 2 MiB for every 1 MiB served: this
@@ -1479,11 +1576,21 @@ mod tests {
             }
         };
 
-        assert_eq!(rounds, MAX_STALLED_ROUNDS as u64, "one round to set the baseline, then four stalls");
+        assert_eq!(
+            rounds, MAX_STALLED_ROUNDS as u64,
+            "one round to set the baseline, then four stalls"
+        );
         assert!(!attach.caught_up, "a clamped replay must say so");
         let served = rounds * REPLAY_ROUND_BYTES;
-        assert!(attach.replay_from > served, "the clamp must leave a hole, not silently rewind");
-        assert_eq!(attach.replay.len() as u64, LIVE_GAP_BYTES, "the client gets the freshest MiB");
+        assert!(
+            attach.replay_from > served,
+            "the clamp must leave a hole, not silently rewind"
+        );
+        assert_eq!(
+            attach.replay.len() as u64,
+            LIVE_GAP_BYTES,
+            "the client gets the freshest MiB"
+        );
         assert_eq!(
             attach.replay_to(),
             attach.next_offset,
@@ -1506,7 +1613,8 @@ mod tests {
         publish_mib(&fanout, 3);
 
         let replay = scratch_replay(&fanout);
-        let ReplayStep::History { replay, .. } = replay.next_round().expect("first catch-up round") else {
+        let ReplayStep::History { replay, .. } = replay.next_round().expect("first catch-up round")
+        else {
             panic!("3 MiB backlog must not go live on the first round");
         };
 
@@ -1545,8 +1653,15 @@ mod tests {
     fn open_and_read_failures_report_distinct_messages() {
         let boom = || std::io::Error::other("boom");
         let open = AttachError::Open(boom()).to_string();
-        let read = AttachError::Read { offset: 4096, source: boom() }.to_string();
-        assert!(open.starts_with("opening the log for replay"), "got: {open}");
+        let read = AttachError::Read {
+            offset: 4096,
+            source: boom(),
+        }
+        .to_string();
+        assert!(
+            open.starts_with("opening the log for replay"),
+            "got: {open}"
+        );
         assert!(read.starts_with("reading a replay range"), "got: {read}");
         assert_ne!(open, read);
     }
@@ -1565,7 +1680,10 @@ mod tests {
     /// message shape so a future edit can't drop the offset again.
     #[test]
     fn read_failure_carries_the_offset_to_resume_at() {
-        let err = AttachError::Read { offset: 2 * 1024 * 1024, source: std::io::Error::other("boom") };
+        let err = AttachError::Read {
+            offset: 2 * 1024 * 1024,
+            source: std::io::Error::other("boom"),
+        };
         assert_eq!(
             err.to_string(),
             "reading a replay range at offset 2097152: boom",
@@ -1598,7 +1716,10 @@ mod tests {
                 chunk.bytes.len(),
                 on_disk.len()
             );
-            assert_eq!(&on_disk[chunk.offset as usize..][..chunk.bytes.len()], &*chunk.bytes);
+            assert_eq!(
+                &on_disk[chunk.offset as usize..][..chunk.bytes.len()],
+                &*chunk.bytes
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1621,7 +1742,10 @@ mod tests {
 
         // Relative to the daemon's own (irrelevant) cwd, "./run.sh" resolves
         // to nothing -- only resolving against the session's `cwd` finds it.
-        assert!(!resolve_executable("./run.sh", &std::env::temp_dir().join("not-the-right-place")));
+        assert!(!resolve_executable(
+            "./run.sh",
+            &std::env::temp_dir().join("not-the-right-place")
+        ));
         assert!(resolve_executable("./run.sh", &dir));
 
         let _ = std::fs::remove_dir_all(&dir);

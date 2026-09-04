@@ -194,7 +194,9 @@ impl OutputLog {
             if !self.io_failed {
                 if !self.warned && self.file_len >= self.limits.warn_bytes {
                     self.warned = true;
-                    events.push(LogEvent::Warned { output_bytes: self.file_len });
+                    events.push(LogEvent::Warned {
+                        output_bytes: self.file_len,
+                    });
                 }
                 if fits < bytes.len() {
                     self.log_capped_at = Some(self.file_len);
@@ -244,7 +246,10 @@ impl OutputLog {
     /// reader thread -- see [`LogSyncer`]. Cheap; hand one to whoever needs
     /// to sync on close.
     pub fn sync_handle(&self) -> SyncHandle {
-        SyncHandle { file: Arc::clone(&self.file), path: self.path.clone() }
+        SyncHandle {
+            file: Arc::clone(&self.file),
+            path: self.path.clone(),
+        }
     }
 
     /// Persistence stopped and it is not coming back for this log. Setting
@@ -259,7 +264,10 @@ impl OutputLog {
         }
         self.io_failed = true;
         self.log_capped_at = Some(self.file_len);
-        events.push(LogEvent::IoError { at: self.file_len, error: error.to_string() });
+        events.push(LogEvent::IoError {
+            at: self.file_len,
+            error: error.to_string(),
+        });
     }
 }
 
@@ -322,7 +330,10 @@ impl LogSyncer {
                 }
             })
             .expect("spawning the log syncer thread");
-        Self { tx: Some(tx), thread: Some(thread) }
+        Self {
+            tx: Some(tx),
+            thread: Some(thread),
+        }
     }
 
     /// Starts flushing `handle`'s log on the timer. Dropping every
@@ -364,7 +375,9 @@ pub struct LogReader {
 
 impl LogReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        Ok(Self { file: File::open(path)? })
+        Ok(Self {
+            file: File::open(path)?,
+        })
     }
 
     /// Reads `[from, to)`, clamped to what the file actually holds. Callers
@@ -382,7 +395,9 @@ impl LogReader {
         // `len` is now bounded by the file size, so this cannot truncate on a
         // 32-bit target the way the requested range could.
         let mut buf = Vec::with_capacity(len as usize);
-        Read::by_ref(&mut self.file).take(len).read_to_end(&mut buf)?;
+        Read::by_ref(&mut self.file)
+            .take(len)
+            .read_to_end(&mut buf)?;
         Ok(buf)
     }
 }
@@ -408,7 +423,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "teleportd-log-unit-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
@@ -436,7 +454,11 @@ mod tests {
 
         let appended = log.append(b"and the ones that did not");
         assert_eq!(appended.start, 22, "the offset is still handed out");
-        assert_eq!(log.next_offset(), 47, "offsets keep advancing -- the session is still running");
+        assert_eq!(
+            log.next_offset(),
+            47,
+            "offsets keep advancing -- the session is still running"
+        );
         assert_eq!(log.readable_end(), 22, "nothing more reached the disk");
         assert_eq!(
             log.log_capped_at(),
@@ -444,7 +466,10 @@ mod tests {
             "the log must say where persistence stopped, not report an open-ended range"
         );
         assert!(
-            matches!(appended.events.as_slice(), [LogEvent::IoError { at: 22, .. }]),
+            matches!(
+                appended.events.as_slice(),
+                [LogEvent::IoError { at: 22, .. }]
+            ),
             "expected one IoError at the truncation point, got {:?}",
             appended.events
         );
@@ -456,9 +481,16 @@ mod tests {
 
         // And it is sticky: a later append neither retries nor re-reports.
         let again = log.append(b"still nothing");
-        assert!(again.events.is_empty(), "IoError is reported once, not per chunk");
+        assert!(
+            again.events.is_empty(),
+            "IoError is reported once, not per chunk"
+        );
         assert_eq!(log.readable_end(), 22);
-        assert_eq!(log.log_capped_at(), Some(22), "the cap must not move to the new offset");
+        assert_eq!(
+            log.log_capped_at(),
+            Some(22),
+            "the cap must not move to the new offset"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
