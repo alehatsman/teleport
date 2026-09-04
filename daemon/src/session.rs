@@ -92,6 +92,27 @@ pub const REPLAY_ROUND_BYTES: u64 = LIVE_GAP_BYTES;
 /// reporting the hole beats an unbounded reconnect loop.
 const MAX_STALLED_ROUNDS: u32 = 4;
 
+/// Absolute ceiling on catch-up rounds, independent of `MAX_STALLED_ROUNDS`.
+/// A client whose throughput barely exceeds the producer's shrinks the gap
+/// by a few bytes every round -- resetting `stalled_rounds` to 0 each time
+/// -- and can defer registration indefinitely, re-acquiring the fan-out
+/// mutex every round with no bound in sight. Sized at four full backlogs of
+/// the default log cap so a legitimate one-shot catch-up of the largest
+/// on-disk log never trips it; a client that still hasn't converged after
+/// this many rounds gets the same clamp-and-report-the-hole treatment a
+/// stalled one does.
+const MAX_CATCHUP_ROUNDS: u32 = 4 * (crate::log::DEFAULT_LOG_MAX_BYTES / REPLAY_ROUND_BYTES) as u32;
+
+/// Whether this round should register the subscriber and go live. A pure
+/// function of the three catch-up floors so each can be exercised without
+/// driving a `Replay` through real rounds: the gap already fits (the common
+/// case), the client has stopped gaining ground at all
+/// (`MAX_STALLED_ROUNDS`), or it hasn't converged in any number of rounds
+/// (`MAX_CATCHUP_ROUNDS`) even though it kept gaining a little each time.
+fn should_register(gap: u64, stalled_rounds: u32, total_rounds: u32) -> bool {
+    gap <= LIVE_GAP_BYTES || stalled_rounds >= MAX_STALLED_ROUNDS || total_rounds >= MAX_CATCHUP_ROUNDS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(Ulid);
 
@@ -418,6 +439,10 @@ pub struct Replay {
     /// `u64::MAX` so the first round can never count as a stall.
     previous_gap: u64,
     stalled_rounds: u32,
+    /// Rounds run so far, counted whether or not the gap shrank. A client
+    /// that gains a few bytes of ground every round resets `stalled_rounds`
+    /// forever without ever registering -- see `MAX_CATCHUP_ROUNDS`.
+    total_rounds: u32,
 }
 
 /// One step of a catch-up loop. The `History` variant carries the rest of the
@@ -425,11 +450,40 @@ pub struct Replay {
 /// has already gone live and register a second subscriber by accident.
 pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
-    /// [`Replay::next_round`] on `replay` again.
-    History { offset: u64, bytes: Vec<u8>, replay: Replay },
+    /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
+    History { offset: u64, bytes: Vec<u8>, replay: HistoryReplay },
     /// The gap closed: the subscriber is registered and the handover is set
     /// up. Write [`Attach::replay`] first, then stream the subscription.
     Live(Attach),
+}
+
+/// A `Replay` that has just served one round of history. `written` is the
+/// only way back to a [`ReplayStep`] from here, and it takes that round's
+/// `bytes` as an argument -- not just `self` -- so a caller cannot ask for
+/// the next round without first having them in hand. That is what turns
+/// "write this round before requesting the next one"
+/// (docs/04-api-protocol.md#catch-up--register-late-not-early) from a
+/// comment into something the compiler checks: there is no path from a
+/// `History` step to the next one that does not pass through `bytes`.
+pub struct HistoryReplay {
+    round_len: usize,
+    replay: Replay,
+}
+
+impl HistoryReplay {
+    /// Advances the catch-up loop. `bytes` must be the round's own bytes --
+    /// checked by length, not just present for the type checker's sake -- so
+    /// passing back the wrong thing (or a placeholder) fails loudly here
+    /// rather than quietly reintroducing the pre-fetch race D1 closed.
+    pub fn written(self, bytes: Vec<u8>) -> Result<ReplayStep, AttachError> {
+        assert_eq!(
+            bytes.len(),
+            self.round_len,
+            "HistoryReplay::written must be called with this round's own bytes -- \
+             docs/04-api-protocol.md#catch-up--register-late-not-early"
+        );
+        self.replay.next_round()
+    }
 }
 
 /// A subscriber registered at the replay boundary, with the last stretch of
@@ -491,8 +545,9 @@ impl Replay {
                 self.stalled_rounds = 0;
             }
             self.previous_gap = gap;
+            self.total_rounds += 1;
 
-            let register = gap <= LIVE_GAP_BYTES || self.stalled_rounds >= MAX_STALLED_ROUNDS;
+            let register = should_register(gap, self.stalled_rounds, self.total_rounds);
             let subscription = register.then(|| fanout.register(&self.fanout));
             (next_offset, end, log_capped_at, subscription)
         };
@@ -500,11 +555,19 @@ impl Replay {
         let Some(subscription) = subscription else {
             let to = (self.cursor + REPLAY_ROUND_BYTES).min(end);
             let offset = self.cursor;
-            let bytes = self.reader.read_range(offset, to)?;
+            let bytes = self
+                .reader
+                .read_range(offset, to)
+                .map_err(|source| AttachError::Read { offset, source })?;
             // Advance by what was actually read, not by what was asked for: a
             // short read must not leave a hole the client is never told about.
             self.cursor += bytes.len() as u64;
-            return Ok(ReplayStep::History { offset, bytes, replay: self });
+            let round_len = bytes.len();
+            return Ok(ReplayStep::History {
+                offset,
+                bytes,
+                replay: HistoryReplay { round_len, replay: self },
+            });
         };
 
         let mut replay_from = self.cursor;
@@ -527,7 +590,10 @@ impl Replay {
         // bytes and the first queued chunk are contiguous by construction:
         // this range ends at or before `end <= next_offset`, and every chunk
         // that subscription will ever see starts at or after `next_offset`.
-        let replay = self.reader.read_range(replay_from, end)?;
+        let replay = self
+            .reader
+            .read_range(replay_from, end)
+            .map_err(|source| AttachError::Read { offset: replay_from, source })?;
 
         Ok(ReplayStep::Live(Attach {
             replay_from,
@@ -547,8 +613,27 @@ pub enum AttachError {
     /// `offset_ahead` error frame (docs/04-api-protocol.md#attach-race).
     #[error("requested offset {requested} is ahead of next_offset {next_offset}")]
     OffsetAhead { requested: u64, next_offset: u64 },
+    /// `Session::attach`'s own `fanout.log.reader()` call failed before any
+    /// round ever ran.
     #[error("opening the log for replay: {0}")]
-    Io(#[from] std::io::Error),
+    Open(std::io::Error),
+    /// A `read_range` call failed partway through catch-up -- history-round
+    /// or the final post-registration stretch alike. Distinct from `Open` so
+    /// an incident doesn't read a mid-walk read failure as though the
+    /// initial open never succeeded (issue #1 finding 4).
+    ///
+    /// `offset` is where this round was about to read from -- nothing at or
+    /// past it was served. The `Replay` itself is gone (a transient failure
+    /// still drops the cursor, the stall counters and the open `LogReader`
+    /// along with the error, same as any other `?`), but `offset` is
+    /// everything `Session::attach` needs to pick the walk back up: a fresh
+    /// `attach(offset)` resumes exactly where this one left off, replaying
+    /// nothing twice, losing nothing before it (issue #1 finding 6). A
+    /// caller that already tracks how much it has written could derive this
+    /// itself from prior rounds, but only for a round that isn't the first;
+    /// carrying it here means that isn't a special case.
+    #[error("reading a replay range at offset {offset}: {source}")]
+    Read { offset: u64, source: std::io::Error },
 }
 
 type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
@@ -629,7 +714,7 @@ impl Session {
         }
         let log_capped_at = fanout.log.log_capped_at();
         let readable_end = fanout.log.readable_end();
-        let reader = fanout.log.reader()?;
+        let reader = fanout.log.reader().map_err(AttachError::Open)?;
         drop(fanout);
 
         // Bytes between a cap and `next_offset` were streamed live and are
@@ -648,6 +733,7 @@ impl Session {
             cursor: replay_from,
             previous_gap: u64::MAX,
             stalled_rounds: 0,
+            total_rounds: 0,
         })
     }
 
@@ -1302,6 +1388,7 @@ mod tests {
             cursor: 0,
             previous_gap: u64::MAX,
             stalled_rounds: 0,
+            total_rounds: 0,
         }
     }
 
@@ -1323,21 +1410,27 @@ mod tests {
         let fanout = scratch_fanout(&dir);
         publish_mib(&fanout, 3);
 
-        let mut replay = scratch_replay(&fanout);
+        let replay = scratch_replay(&fanout);
         let next_offset = replay.next_offset;
 
-        let mut rounds = 0u64;
-        let attach = loop {
+        let assert_no_subscriber = |rounds: u64| {
             assert!(
                 fanout.lock().unwrap().subscribers.is_empty(),
                 "round {rounds}: a subscriber must not be registered while history is still owed"
             );
-            match replay.next_round().expect("catch-up round") {
+        };
+
+        let mut rounds = 0u64;
+        assert_no_subscriber(rounds);
+        let mut step = replay.next_round().expect("first catch-up round");
+        let attach = loop {
+            match step {
                 ReplayStep::History { offset, bytes, replay: rest } => {
                     assert_eq!(offset, rounds * REPLAY_ROUND_BYTES, "rounds must be contiguous");
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES, "a round is bounded");
                     rounds += 1;
-                    replay = rest;
+                    assert_no_subscriber(rounds);
+                    step = rest.written(bytes).expect("catch-up round");
                 }
                 ReplayStep::Live(attach) => break attach,
             }
@@ -1367,18 +1460,20 @@ mod tests {
         let fanout = scratch_fanout(&dir);
         publish_mib(&fanout, 3);
 
-        let mut replay = scratch_replay(&fanout);
+        let replay = scratch_replay(&fanout);
         let mut rounds = 0u64;
+        assert!(rounds < 16, "the catch-up loop did not terminate");
+        let mut step = replay.next_round().expect("first catch-up round");
         let attach = loop {
-            assert!(rounds < 16, "the catch-up loop did not terminate");
-            match replay.next_round().expect("catch-up round") {
+            match step {
                 ReplayStep::History { bytes, replay: rest, .. } => {
                     rounds += 1;
                     assert_eq!(bytes.len() as u64, REPLAY_ROUND_BYTES);
                     // The producer gains 2 MiB for every 1 MiB served: this
                     // client is losing ground, every round, on purpose.
                     publish_mib(&fanout, 2);
-                    replay = rest;
+                    assert!(rounds < 16, "the catch-up loop did not terminate");
+                    step = rest.written(bytes).expect("catch-up round");
                 }
                 ReplayStep::Live(attach) => break attach,
             }
@@ -1395,6 +1490,87 @@ mod tests {
             "and it still meets the live boundary exactly -- the hole is behind it, not in front"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #1 finding 5: `HistoryReplay::written` is the only way to reach
+    /// the next `ReplayStep`, and it takes this round's bytes as an
+    /// argument rather than being reachable off bare `self` -- so a caller
+    /// that tries to advance without holding the right bytes (a pre-fetch,
+    /// or a placeholder) is caught here instead of silently reintroducing
+    /// the queue-overflow race D1 closed.
+    #[test]
+    #[should_panic(expected = "HistoryReplay::written must be called with this round's own bytes")]
+    fn written_rejects_bytes_that_are_not_this_round_s_own() {
+        let dir = scratch_dir("written-guard");
+        let fanout = scratch_fanout(&dir);
+        publish_mib(&fanout, 3);
+
+        let replay = scratch_replay(&fanout);
+        let ReplayStep::History { replay, .. } = replay.next_round().expect("first catch-up round") else {
+            panic!("3 MiB backlog must not go live on the first round");
+        };
+
+        let _ = replay.written(vec![0u8; 1]); // not this round's REPLAY_ROUND_BYTES-sized stretch
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `MAX_STALLED_ROUNDS` only catches a client that stops gaining ground
+    /// *entirely*; one that gains a few bytes every round resets
+    /// `stalled_rounds` to 0 forever and would re-acquire the fan-out mutex
+    /// indefinitely without a second floor.
+    /// Driving that through real rounds would mean actually shrinking a
+    /// multi-gigabyte gap one byte at a time, so this exercises the pure
+    /// decision `next_round` defers to instead -- deterministic and fast,
+    /// same as the arithmetic it's testing.
+    #[test]
+    fn total_rounds_forces_registration_even_when_the_gap_keeps_shrinking() {
+        let gap = LIVE_GAP_BYTES + 1; // never small enough to register on its own
+        assert!(
+            !should_register(gap, 0, MAX_CATCHUP_ROUNDS - 1),
+            "must not register early just because rounds are piling up"
+        );
+        assert!(
+            should_register(gap, 0, MAX_CATCHUP_ROUNDS),
+            "a client that never stalls must still be bounded by total rounds"
+        );
+    }
+
+    /// Issue #1 finding 4: `Open` (the initial `fanout.log.reader()` call)
+    /// and `Read` (any `read_range` during catch-up) used to be one `Io`
+    /// variant with a message hardcoded to the open case, so a read failure
+    /// several rounds into a large backlog read as though the daemon had
+    /// never managed to open the log at all. Guards against the two
+    /// collapsing back into one variant, or trading messages.
+    #[test]
+    fn open_and_read_failures_report_distinct_messages() {
+        let boom = || std::io::Error::other("boom");
+        let open = AttachError::Open(boom()).to_string();
+        let read = AttachError::Read { offset: 4096, source: boom() }.to_string();
+        assert!(open.starts_with("opening the log for replay"), "got: {open}");
+        assert!(read.starts_with("reading a replay range"), "got: {read}");
+        assert_ne!(open, read);
+    }
+
+    /// Issue #1 finding 6: a `read_range` failure mid-catch-up used to drop
+    /// the whole `Replay` -- cursor, stall counters and open `LogReader`
+    /// alike -- along with the error, leaving no way to resume through the
+    /// session API except the caller reconstructing the offset from its own
+    /// bookkeeping (impossible on the very first round, which has no prior
+    /// successful round to derive it from). `AttachError::Read` now carries
+    /// that offset itself: `Session::attach(offset)` picks the walk back up
+    /// exactly there, so recovery doesn't depend on the caller having kept
+    /// count. Both `next_round` call sites (the per-round history read and
+    /// the final post-registration read) feed their own resume point in --
+    /// `self.cursor` and `replay_from` respectively -- this pins the
+    /// message shape so a future edit can't drop the offset again.
+    #[test]
+    fn read_failure_carries_the_offset_to_resume_at() {
+        let err = AttachError::Read { offset: 2 * 1024 * 1024, source: std::io::Error::other("boom") };
+        assert_eq!(
+            err.to_string(),
+            "reading a replay range at offset 2097152: boom",
+            "the resume offset must be in the message, not just the source error"
+        );
     }
 
     /// The ordering rule, checked from the outside: by the time a chunk is

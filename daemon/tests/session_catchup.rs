@@ -18,11 +18,13 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teleportd::pty::SpawnSpec;
-use teleportd::session::{ReplayStep, SessionManager};
+use teleportd::session::SessionManager;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 /// Backlog to attach behind: more than the 8 MiB queue bound, so a
@@ -78,38 +80,20 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // it exists to guard against, and the assertions below prove nothing.
     let registered_first = session.subscribe();
 
-    let mut replay = session.attach(0).expect("attach at 0");
+    let replay = session.attach(0).expect("attach at 0");
     assert_eq!(replay.replay_from, 0);
     let ready_next_offset = replay.next_offset;
     assert!(ready_next_offset >= BACKLOG);
 
     // Catch up the way a client on a slow link does: write each round out
-    // before asking for the next.
-    let mut acc: Vec<u8> = Vec::new();
-    let mut rounds = 0u32;
-    let attach = loop {
-        assert!(rounds < 64, "catch-up did not terminate");
-        match replay.next_round().expect("catch-up round") {
-            ReplayStep::History { offset, bytes, replay: rest } => {
-                assert_eq!(offset, acc.len() as u64, "catch-up rounds must be contiguous");
-                acc.extend_from_slice(&bytes);
-                rounds += 1;
-                replay = rest;
-                tokio::time::sleep(ROUND_LATENCY).await; // the "network"
-            }
-            ReplayStep::Live(attach) => break attach,
-        }
-    };
+    // before asking for the next. `ROUND_LATENCY` is the "network" -- slow
+    // enough that the trickle above outpaces the count half of the queue
+    // bound during the walk, which is what makes the old ordering fail here.
+    let (mut acc, attach, rounds) = support::catch_up(replay, ROUND_LATENCY).await;
 
     assert!(rounds > 8, "a {BACKLOG}-byte backlog must take several bounded rounds, got {rounds}");
-    assert!(
-        attach.caught_up,
-        "a client outrunning the producer must converge, not be clamped"
-    );
-    assert_eq!(attach.replay_from, acc.len() as u64, "the final stretch must continue the rounds");
-    acc.extend_from_slice(&attach.replay);
     let mut end = attach.replay_to();
-    assert_eq!(end, acc.len() as u64);
+    assert_eq!(end, acc.len() as u64, "replay rounds plus the final stretch must equal every byte served");
     assert!(end >= ready_next_offset, "catch-up must reach at least the boundary `ready` announced");
 
     // The whole point: this subscriber is still connected, and its first

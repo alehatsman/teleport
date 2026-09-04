@@ -379,9 +379,13 @@ would otherwise vanish.
 **Correct order:**
 
 ```text
-capture the output offset N / register subscriber     ← one mutex
+capture the output offset N                            ← mutex
              ↓
-replay [requested_offset, N)
+replay [requested_offset, N) in bounded rounds,
+re-checking the gap each round (see Catch-up below)
+             ↓
+register subscriber, same mutex as the final,
+freshly re-read N                                       ← mutex
              ↓
 deliver buffered events >= N
              ↓
@@ -441,9 +445,13 @@ screen after 1 MiB rather than after the whole replay
 **Convergence.** The gap closes only while the client outruns the producer — which is
 the same condition it must meet to stay attached at all, so the loop demands nothing new
 of it. A client that cannot is detected by the gap failing to shrink across four
-consecutive rounds. The daemon then clamps replay to the last `live_gap_bytes` before
-the boundary, registers, and lets ordinary backpressure take it from there: the client
-gets the live screen and a hole it is told about, instead of an unbounded reconnect loop.
+consecutive rounds — but a client that always shrinks the gap, just barely, resets that
+counter every round and would otherwise never stop re-acquiring the mutex. A second,
+absolute floor catches that case too: past a fixed number of total rounds (four backlogs'
+worth of the largest on-disk log), the daemon gives up regardless of whether the gap was
+still inching down. Either floor clamps replay to the last `live_gap_bytes` before the
+boundary, registers, and lets ordinary backpressure take it from there: the client gets
+the live screen and a hole it is told about, instead of an unbounded reconnect loop.
 
 **`ready` is still the first frame, and its `next_offset` is still the boundary captured
 when the client attached** — not the one the subscriber is eventually registered at. The
@@ -451,6 +459,14 @@ client does not need the difference. History and live output are one contiguous 
 stream under one set of offsets, so "I have consumed up to `ready.next_offset`" still
 means "I hold the session's full history as of the moment I attached", whichever side of
 the handover each byte arrived from.
+
+**A round that fails to read is not a reason to restart the walk.** A transient I/O
+error partway through catch-up (a large backlog, an unlucky disk hiccup) surfaces the
+offset that round was about to read from, not just the underlying error. Re-attaching
+there resumes exactly where the failed round left off — nothing already served needs
+replaying, nothing behind that offset is lost. This is the same recovery path a normal
+reconnect uses, not a special case: the daemon does not need to remember the failed
+`Replay` for a client to continue.
 
 If `after > N`, the client is ahead of the daemon (log was purged, or a stale client
 after a `lost` session): reply `error` with code `offset_ahead` and `next_offset`, and
