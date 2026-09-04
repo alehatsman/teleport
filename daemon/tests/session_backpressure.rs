@@ -5,12 +5,14 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teleportd::pty::SpawnSpec;
-use teleportd::session::{ReplayStep, SessionManager};
+use teleportd::session::SessionManager;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -165,20 +167,8 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     // the replay too and closes that race
     // (docs/04-api-protocol.md#attach-race).
     let replay = session.attach(0).expect("attach at 0");
-    let mut received = 0usize;
-    let mut step = replay.next_round().expect("first catch-up round");
-    let mut fast = loop {
-        match step {
-            ReplayStep::History { bytes, replay: rest, .. } => {
-                received += bytes.len();
-                step = rest.written(bytes).expect("catch-up round");
-            }
-            ReplayStep::Live(attach) => {
-                received += attach.replay.len();
-                break attach;
-            }
-        }
-    };
+    let (received_bytes, mut fast, _) = support::catch_up(replay, Duration::ZERO).await;
+    let mut received = received_bytes.len();
 
     let t0 = Instant::now();
     while received < N {
