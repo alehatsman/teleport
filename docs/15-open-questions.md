@@ -25,6 +25,7 @@ backlog pretending to be a spec.
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | M9 measurement |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
+| [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
 
 W1 and S1–S4 are **blocking**. The rest are decisions that must be *made* before
 their milestone, not necessarily *built*. (D1 — replay sharing the live subscriber
@@ -595,6 +596,38 @@ Two parts, both client-side:
 
 Add to the M5 gate: reattaching to a session with a large log paints the first screen in
 under a second.
+
+## N4 — Reconnect storms and reader-thread contention
+
+**Measure before M4 closes.**
+
+Catch-up ([04](04-api-protocol.md#catch-up--register-late-not-early)) decides whether to
+register once per round, not once per attach — each round re-acquires the same fan-out
+mutex the PTY reader thread locks on every `publish()`
+([03](03-pty-layer.md#reader-loop)). Per client, that is now bounded: a stalled client is
+cut off after four consecutive non-shrinking rounds, and a client that always gains a
+little ground but never quite converges is cut off after a fixed total-round ceiling
+either way
+([Convergence](04-api-protocol.md#catch-up--register-late-not-early)) — so one client can
+only reacquire the lock so many times before the daemon stops trying and hands it the live
+stream with a hole.
+
+What that does **not** bound: many clients catching up *at once* — the shape of a
+reconnect storm after a network blip drops every attached client on a multi-session host
+in the same second. Each round's own hold is short (arithmetic and a length check, no
+I/O), but the aggregate rate of acquisitions scales with concurrent catch-ups, and the
+reader thread competes for the same lock on every chunk it appends. Unmeasured: whether
+that shows up as observable jitter on the live path under realistic concurrency.
+
+This is a traded-off cost, not an oversight — the alternative most implementations ship
+(register once, up front) is exactly what D1 closed as the far worse failure: livelock,
+not jitter (04-api-protocol.md#catch-up--register-late-not-early). The question is only
+whether the trade needs a second mitigation.
+
+**Before M4 closes:** load-test a synthetic reconnect storm (N simultaneous attaches to
+one busy session) and measure reader-thread latency during it. If it stays acceptable,
+record the number and close this. If not, the fix is bounding *concurrent* catch-ups per
+session (an admission limit or a queue), not reworking the per-round design N4 measures.
 
 ---
 
