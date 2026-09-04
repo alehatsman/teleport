@@ -9,6 +9,7 @@ pub mod auth;
 pub mod config;
 pub mod device;
 pub mod log;
+pub mod persistence;
 pub mod presets;
 pub mod pty;
 pub mod session;
