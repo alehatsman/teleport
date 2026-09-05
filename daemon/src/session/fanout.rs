@@ -13,10 +13,42 @@ use crate::log::{LogEvent, OutputLog};
 
 use super::types::Chunk;
 
-/// Queue bound per subscriber: whichever trips first
+/// Queue bound per subscriber: a memory budget, in bytes
 /// (docs/03-pty-layer.md#backpressure).
-const MAX_QUEUE_CHUNKS: usize = 256;
-pub(super) const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+///
+/// `pub` so fixtures can size a burst against the real bound rather than a
+/// number copied out of here that goes stale;
+/// [`replay::LIVE_GAP_BYTES`](super::replay::LIVE_GAP_BYTES) is derived from
+/// it too.
+pub const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+/// What one queued chunk costs a subscriber *besides* its payload: a channel
+/// slot (`Chunk` is a `u64` plus an `Arc` pointer, ~32 B with tokio's slot
+/// state) plus that queue's share of the shared `Arc<[u8]>` header. Charged
+/// alongside the payload so the budget bounds real memory instead of just
+/// payload bytes -- a deliberate over-estimate, not a measured allocator
+/// figure.
+///
+/// This is what the old `MAX_QUEUE_CHUNKS = 256` was really for, and getting
+/// it wrong is [N5](../../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half): a count bound
+/// calibrated for Linux's large reads let macOS, where a pty read averages
+/// 14 bytes, disconnect a subscriber after ~3.5 KiB against a design that
+/// promises 8 MiB.
+const CHUNK_OVERHEAD: usize = 64;
+
+/// Backstop only. Every chunk costs at least `CHUNK_OVERHEAD` permits, so
+/// the budget above is always the binding half and this capacity cannot trip
+/// first -- it exists because `mpsc::channel` requires a number, not as a
+/// second bound with its own calibration.
+const MAX_QUEUE_CHUNKS: usize = MAX_QUEUE_BYTES / CHUNK_OVERHEAD;
+
+/// Permits one chunk costs: its payload plus the fixed per-chunk overhead.
+/// `publish` acquires this before the chunk is visible and
+/// `Subscription::recv` returns exactly it, which is the symmetry the budget
+/// depends on.
+fn queue_cost(len: usize) -> usize {
+    len + CHUNK_OVERHEAD
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SubscriberId(u64);
@@ -24,16 +56,15 @@ struct SubscriberId(u64);
 pub(super) struct SubscriberSlot {
     id: SubscriberId,
     tx: mpsc::Sender<Chunk>,
-    /// Byte budget for this subscriber's queue, shared with the matching
-    /// `Subscription` so the receive side can return bytes as it drains
-    /// them. Starts at `MAX_QUEUE_BYTES` permits; `publish` acquires a
-    /// chunk's length in permits *before* the chunk is made visible via
-    /// `try_send`, so a chunk can never reach `Subscription::recv` before
-    /// its bytes are already accounted for -- a plain counter bumped
-    /// *after* `try_send` can't promise that (the receiver can drain and
-    /// give bytes back first). This is the byte half of the bound; the
-    /// channel's own capacity (`MAX_QUEUE_CHUNKS`) is the count half -- see
-    /// the module doc.
+    /// Memory budget for this subscriber's queue, shared with the matching
+    /// `Subscription` so the receive side can return it as it drains.
+    /// Starts at `MAX_QUEUE_BYTES` permits; `publish` acquires
+    /// `queue_cost(len)` *before* the chunk is made visible via `try_send`,
+    /// so a chunk can never reach `Subscription::recv` before it is already
+    /// accounted for -- a plain counter bumped *after* `try_send` can't
+    /// promise that (the receiver can drain and give the budget back
+    /// first). This is the whole bound: the channel's capacity is a
+    /// backstop that cannot trip first (`MAX_QUEUE_CHUNKS`).
     budget: Arc<Semaphore>,
 }
 
@@ -83,10 +114,10 @@ impl Fanout {
             // Chunks are bounded by pty.rs's READ_BUFFER_SIZE (64 KiB), so
             // this always fits u32; MAX_QUEUE_BYTES itself fits comfortably
             // under Semaphore's permit ceiling.
-            let len = payload.len() as u32;
-            let permit = match sub.budget.try_acquire_many(len) {
+            let cost = queue_cost(payload.len()) as u32;
+            let permit = match sub.budget.try_acquire_many(cost) {
                 Ok(permit) => permit,
-                Err(_) => return false, // byte bound tripped -- disconnect, don't wait.
+                Err(_) => return false, // bound tripped -- disconnect, don't wait.
             };
             let chunk = Chunk {
                 offset: start,
@@ -97,8 +128,9 @@ impl Fanout {
                     permit.forget(); // returned by Subscription::recv once this chunk is drained
                     true
                 }
-                // Full (count bound tripped) or the Subscription was dropped.
-                // `permit` drops here too, returning the budget it reserved.
+                // The Subscription was dropped (or, unreachably, the backstop
+                // capacity filled). `permit` drops here too, returning the
+                // budget it reserved.
                 Err(_) => false,
             }
         });
@@ -146,7 +178,7 @@ impl Subscription {
     /// (and therefore the reader thread's handle to it) is gone.
     pub async fn recv(&mut self) -> Option<Chunk> {
         let chunk = self.rx.recv().await?;
-        self.budget.add_permits(chunk.bytes.len());
+        self.budget.add_permits(queue_cost(chunk.bytes.len()));
         Some(chunk)
     }
 
@@ -157,7 +189,7 @@ impl Subscription {
     /// and "the fan-out is gone" -- finalizing treats them the same.
     pub fn try_recv(&mut self) -> Option<Chunk> {
         let chunk = self.rx.try_recv().ok()?;
-        self.budget.add_permits(chunk.bytes.len());
+        self.budget.add_permits(queue_cost(chunk.bytes.len()));
         Some(chunk)
     }
 }
@@ -212,6 +244,45 @@ mod tests {
             fanout.lock().subscribers.len(),
             0,
             "Drop must remove the slot without waiting for output"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [N5](../../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half): the bound is a memory budget,
+    /// so a stream of tiny chunks gets the headroom the design promises rather
+    /// than the 256 slots an `mpsc::channel` capacity used to impose. macOS
+    /// pty reads average 14 bytes; under the old count bound a subscriber was
+    /// disconnected after 256 of them (~3.5 KiB) against a documented 8 MiB.
+    ///
+    /// Both halves matter and neither alone is the fix: it must admit *far*
+    /// more than 256, and it must still be bounded.
+    #[tokio::test]
+    async fn tiny_chunks_get_the_budget_not_a_slot_count() {
+        let dir = scratch_dir("tiny-chunks");
+        let fanout = scratch_fanout(&dir);
+        let _sub = fanout.lock().register(&fanout);
+
+        // A 14-byte chunk: the measured macOS mean.
+        let chunk = [b'x'; 14];
+        let mut admitted = 0usize;
+        while !fanout.lock().subscribers.is_empty() {
+            fanout.lock().publish(&chunk);
+            admitted += 1;
+            assert!(
+                admitted <= MAX_QUEUE_CHUNKS,
+                "the queue is unbounded: {admitted} chunks accepted with nobody draining"
+            );
+        }
+
+        let ceiling = MAX_QUEUE_BYTES / queue_cost(chunk.len());
+        assert_eq!(
+            admitted,
+            ceiling + 1,
+            "a never-drained subscriber must take exactly the budget, then be dropped"
+        );
+        assert!(
+            admitted > 256 * 100,
+            "still effectively slot-bound at {admitted} chunks -- N5 has regressed"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

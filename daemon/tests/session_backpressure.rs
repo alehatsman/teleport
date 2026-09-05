@@ -249,27 +249,22 @@ fn contains(acc: &[u8], needle: &str) -> bool {
 /// disconnected (bounded queue, docs/03-pty-layer.md#backpressure) instead
 /// of accumulating unboundedly.
 ///
-/// `target_os` gated off macOS: this fixture's *fast* subscriber gets
-/// disconnected there too, 3 times in 20 runs on real hardware.
+/// Was gated off macOS, where this fixture's *fast* subscriber was
+/// disconnected too, 3 times in 20 runs on real hardware. That was
+/// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half):
+/// the queue bound was `min(256 chunks, 8 MiB)`, and a macOS pty read
+/// averages **14 bytes** (max 1024, the tty output buffer), so 256 chunks
+/// held ~3.5 KiB -- roughly 2300x tighter than the byte half was designed to
+/// allow, and enough to drop any subscriber that stalled even briefly. Linux
+/// ptys coalesce far more, so the byte half governed there and the bound
+/// behaved as documented.
 ///
-/// Root-caused 2026-09-05 on an M-series Mac (#25), and it is not the
-/// "slow CI runner" this comment previously blamed -- the queue bound is
-/// `min(256 chunks, 8 MiB)`, and on macOS a pty read averages **14 bytes**
-/// (max 1024, the tty output buffer), so 256 chunks holds ~3.5 KiB. The
-/// count half trips roughly 2300x earlier than the byte half was designed to
-/// allow, and any subscriber that stalls even briefly is dropped. Linux ptys
-/// coalesce far more, so the byte half governs there and the bound behaves as
-/// documented. Confirmed by raising `MAX_QUEUE_CHUNKS` alone: 20/20 pass.
-///
-/// So this is a real bound-calibration bug in `fanout.rs`, not a test
-/// problem, and the fix is a design decision about what the bound should be
-/// (coalesce reads in `pty.rs`, or make the count bound
-/// byte-proportional) -- deliberately out of scope for #25, which is why the
-/// gate is still here rather than the fixture being un-gated.
-/// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half),
-/// tracked in #25.
+/// Un-gated once the bound became a single byte budget that charges each
+/// chunk a fixed overhead alongside its payload, which is what the count half
+/// was really protecting. `fanout.rs`'s
+/// `tiny_chunks_get_the_budget_not_a_slot_count` covers the same regression
+/// deterministically and without a real pty.
 #[tokio::test]
-#[cfg(not(target_os = "macos"))]
 async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     const N: usize = 10 * 1024 * 1024; // 10 MiB, comfortably past the 8 MiB bound.
     let manager = SessionManager::new(sessions_root("slow-sub"));
