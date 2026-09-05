@@ -28,7 +28,15 @@ Compiles clean (`cargo check` / `clippy -D warnings` / `fmt --check` /
 probe → spawns `teleportd` detached → creates a real session → the GUI
 process is `kill -9`'d → daemon and session both survive → relaunching
 re-probes and reattaches without spawning a second daemon. That's the M10
-gate, met on one platform.
+gate.
+
+Re-run on macOS on 2026-09-05 (real hardware, Darwin 24.6.0 arm64, against a
+real `Teleport.app` from `tauri build`, not `tauri dev`): same sequence, and
+the quit step was a `kill -9` of the GUI's whole process group rather than one
+pid, so `process_group(0)`'s detachment was tested rather than assumed. Passed
+with no new bugs; details in
+[11-mvp-plan.md#m10](../docs/11-mvp-plan.md#m10--tauri-shell). So the gate is
+met on Linux and macOS; Windows is still build-only.
 
 CI: `.github/workflows/desktop.yml` builds `desktop/src-tauri` (unsigned) on
 macOS (both arches) and Windows on every push/PR -- build coverage only, not
@@ -69,7 +77,13 @@ rather than silently papered over:
   doesn't change what `CreateProcessW` does with these flags (see s11's own
   doc comment).
 - **macOS/Windows autostart** (`src/autostart/{macos,windows}.rs`) are
-  templated but unverified on real hardware.
+  templated but unverified on real hardware. Unchanged by the macOS gate run
+  above -- that exercised the launch/detach/reattach path, which never touches
+  the LaunchAgent.
+- **Tray "Stop daemon" confirmation** (validation item 2) has only been run on
+  Linux; it needs a human click, so the macOS pass above could not cover it.
+  The endpoint underneath it (`POST /api/v1/shutdown`) *was* driven live on
+  macOS.
 - **Updater** is wired in (`tauri-plugin-updater`) but inactive
   (`tauri.conf.json`'s `plugins.updater.active: false`) -- no signed update
   artifact exists yet (signing is an external prerequisite, not a repo gap).

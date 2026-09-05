@@ -17,8 +17,14 @@ M0 skeleton
              ├─ M7 SQLite metadata + recovery
              └─ M8 presets
                  └─ M9 Tailscale Serve
-                     └─ M10 Tauri shell
+                     ├─ M10 Tauri shell
+                     └─ M11 CLI client
 ```
+
+M10 and M11 are siblings, not a chain — each only needs M9's protocol/auth surface, and
+neither blocks the other (same reasoning [13-native-clients.md](13-native-clients.md#two-phases-two-different-blockers)
+already applies to a native mobile Phase 1: nothing here is a technical dependency,
+just where the work happened to land first).
 
 Each milestone has a **gate**. Do not start the next one until the gate passes on all
 three platforms.
@@ -875,6 +881,168 @@ reattaches. Browser-only mode remains fully functional.
 > (literally inside a built `.msi`/`.exe`, or a genuine IDE/CI job rather than a
 > self-assigned equivalent) in `desktop/README.md`.
 
+> **Validation item 1 (the gate itself) re-run on macOS, 2026-09-05 -- real hardware
+> (Darwin 24.6.0, arm64, Apple silicon), not CI.** The same box S5 and N5 were
+> root-caused on. Built the real bundle (`npx tauri build --bundles app` ->
+> `Teleport.app`, unsigned) and ran the gate end-to-end against the real default data
+> dir (`~/Library/Application Support/teleport`). No isolation override was needed the
+> way the Linux run needed one -- that directory did not exist on this machine, so
+> there was no live daemon to protect; it was removed again afterwards.
+>
+> | Step | Result |
+> |---|---|
+> | launch | `no daemon reachable; starting teleportd detached`; data dir created `0700`, `token`/`port` `0600` |
+> | detached spawn | daemon's `pgid` equals its own pid and differs from the GUI's, no controlling tty -- `process_group(0)` read out of `ps`, not assumed |
+> | create a session | `POST /api/v1/sessions` -> `running`, `/health` `sessions_running: 1` |
+> | quit | `kill -9` on the GUI's **entire process group**, not just its pid -- strictly harder than the Linux run, and the exact signal path `process_group(0)` exists to survive |
+> | survives | daemon alive and reparented to pid 1; the session's own `/bin/sh` alive under it; `/health` still `sessions_running: 1` |
+> | reopen | `attaching to our daemon ... sessions_running=1`; exactly one `teleportd`, same pid as before -- no second daemon spawned |
+>
+> No new bugs. The tray-icon buffer-size panic the Linux run caught did not recur --
+> startup completed with `build_tray` running -- and the embedded SPA served
+> (`GET /` -> `200 text/html`, so the window had a real UI to load, not a blank page).
+> `POST /api/v1/shutdown` (issue #12), previously exercised only on native Windows and
+> in `shutdown_endpoint.rs`, was also driven live here for the teardown: `202`, then
+> both the daemon and its session process gone.
+>
+> Still not done on macOS, and not claimed by this run: validation item 2 (the tray
+> "Stop daemon" confirmation needs a human click), `autostart/macos.rs`'s launchd
+> LaunchAgent, and M9's `--bg` reboot persistence. macOS moves from "CI build only" to
+> gate-verified in the cross-OS ledger (#8).
+
+---
+
+## M11 — CLI client
+
+> Buildable in parallel with M10 — the protocol has needed nothing new since M9. This
+> is the smallest possible native client per [13-native-clients.md](13-native-clients.md#the-protocol-is-already-native-ready):
+> no WebView, no VT emulator to write or bundle. The user's own terminal *is* the VT
+> emulator.
+
+**Deliver:** `cli/` — a `teleport` binary, standalone crate (own `Cargo.toml`, own
+target dir), the same pattern `desktop/src-tauri/` already established for a second
+Rust component alongside `daemon/` — no new root Cargo workspace.
+
+- `teleport sessions` / `teleport new [--preset|--cmd|--cwd]` / `teleport kill <id>` —
+  thin wrappers over the existing HTTP surface (04)
+- `teleport attach <id>` — the feature: puts the local terminal in raw mode and
+  bridges it to the session's WebSocket 1:1, byte for byte
+- offset-tracked reconnect, resize forwarding while controller, ssh-style `~`
+  escape sequences (below) — no protocol change, no server-side work
+- connection resolution: `--url`/`--token`/`TELEPORT_TOKEN`, else local-daemon
+  auto-discovery via `<data_dir>/port` + `<data_dir>/token` (the same two files
+  `desktop/src-tauri/src/daemon.rs` already reads for M10)
+- added to the release pipeline (16): same target matrix as `teleportd`, `teleport`
+  binary copied into the same per-OS archive
+
+**Gate:** `teleport attach` to a session running `vim`/`tmux` over the same Tailscale
+link M9 proved is, to the eye and to the keyboard, indistinguishable from `ssh`ing in
+and running the program directly — full-screen redraw, resize, Ctrl-C, Ctrl-D, colors
+all correct. `~.` detaches; a second `teleport attach` resumes with no gap. `SIGKILL`
+on the CLI process mid-session leaves the remote session running, same invariant every
+other client already has to honor.
+
+> **Implementation spec drafted 2026-09-05.** Validated against current code and docs
+> — no conflicts, and nothing to build server-side: the WS framing, control-lease,
+> offset-replay, and origin/auth rules (04, 06) already assume a non-browser caller.
+> [06-security.md#browser-origin-defense](06-security.md#browser-origin-defense)
+> names the case explicitly — *"native app, CLI, script"* — a missing `Origin` header
+> was always meant to cover this. `cli/` as a standalone crate, not a workspace
+> member, matches the repository's existing shape rather than introducing one:
+> `daemon/` and `desktop/src-tauri/` are already two independent Rust crates with
+> their own `Cargo.toml` and CI job, never sharing a workspace or a `Cargo.lock`.
+>
+> **Scope.** In: `cli/` crate; `sessions`/`new`/`attach`/`kill` subcommands; raw-mode
+> passthrough with offset-tracked reconnect; resize forwarding while controller;
+> ssh-style escape sequences; local-daemon auto-discovery; `ci.yml`/`release.yml`
+> additions mirroring `daemon`'s existing jobs.
+> Out (deferred, not dropped): shell completions; a config file of session
+> shortcuts/aliases; a non-interactive `teleport exec <id> <cmd>`-style scripting mode
+> (genuinely useful, same shape as `ssh host cmd`, but its own gate — this milestone
+> is interactive parity with the web client, not a new capability); `teleport logs
+> <id>` (tail without attaching — trivial once `attach` exists, cut for the first
+> pass).
+>
+> **Interfaces.**
+> ```text
+> cli/
+>   Cargo.toml         # tokio, tokio-tungstenite (already a dev-dependency of
+>                       # daemon/tests/ws_protocol.rs — same crate, now a runtime one
+>                       # here), clap, serde, serde_json, crossterm, anyhow, thiserror,
+>                       # tracing, directories, ulid. HTTP client left open below.
+>   src/
+>     main.rs            # clap subcommands, connection resolution, dispatch
+>     connect.rs         # resolve base url + token: --url/--token/env, else
+>                         # <data_dir>/port + <data_dir>/token
+>     http.rs             # GET/POST/DELETE wrappers over the HTTP surface (04)
+>     attach.rs           # the ssh-like loop: raw mode, WS read/write tasks, offset
+>                          # tracking, resize forwarding, escape-sequence parsing,
+>                          # reconnect/backoff
+>     identity.rs          # persisted client_id (ULID) in <data_dir>/cli-identity,
+>                           # mirrors web/src/lib/identity.ts's role
+> ```
+> `reqwest` vs. a hand-rolled client on top of `tokio-tungstenite`'s existing `http`/
+> `hyper` transitive deps: decide at write time, and if `reqwest` is chosen, add it to
+> [02-stack-decisions.md](02-stack-decisions.md#direct-dependencies)'s spirit — that
+> doc's rule is "adding a crate is a decision, not a reflex," and that applies here
+> too even though `cli/` has its own `Cargo.toml`.
+> No new server-side code, no protocol version bump. `teleport` is a plain `/api/v1`
+> client — nothing it does is unavailable to curl or the web UI.
+>
+> **Escape sequences**, typed at the start of a line (mirrors `ssh`'s `~` convention
+> deliberately — anyone who knows `ssh` already knows this):
+> - `~.` — detach. Restores the local terminal and exits the CLI; the remote session
+>   is untouched, exactly like closing a browser tab.
+> - `~!` — claim control (`claim_control`), for attaching mid-session as an observer
+>   and wanting the lease.
+> - `~?` — print the two lines above.
+> - `~~` — a literal `~` at start of line, passed through.
+>
+> **Edge cases.**
+> - Resize while observing (not controller): never send `resize` — only the
+>   controller sets PTY geometry
+>   ([04](04-api-protocol.md#control-messages)). Letterbox instead, the same call
+>   the web client already made for its own observers (09).
+> - WS drop mid-session: reconnect with `after=<last offset consumed>`, jittered
+>   backoff, per [04](04-api-protocol.md#keepalive-and-reconnection). Never clear
+>   local scrollback.
+> - A server `exit` frame ends the CLI process with the remote process's exit code
+>   (`std::process::exit(code)`) — the one place `teleport attach` behaves exactly
+>   like `ssh host cmd` returning the remote's status. `~.` detach always exits `0`
+>   regardless of remote state; detaching is not the remote work finishing.
+> - Attaching to an unknown/purged session id: `404` — print the daemon's error, exit
+>   non-zero, and do **not** enter raw mode at all, so there is nothing to restore.
+> - Piped stdin/stdout (`teleport attach x | grep foo`): skip raw-mode setup when
+>   stdin/stdout isn't a real tty (crossterm's `is_tty` check) and fall back to a
+>   plain byte pipe — the same shape as `ssh host cmd | grep foo` already working.
+> - Ctrl-C is never intercepted locally — raw mode passes it through as a byte to the
+>   remote PTY, same as `ssh`. The only way to end the local CLI without ending the
+>   remote work is `~.`; call this out in `--help` and the README, since it is the one
+>   place this client's behavior isn't automatically obvious even to an `ssh` user.
+> - `401`/`403` on connect: print the daemon's error body plus a one-line hint
+>   ("check --token / TELEPORT_TOKEN"), exit non-zero. `teleport` never sends an
+>   `Origin` header — the credential is the whole story for this client, per
+>   [06](06-security.md#browser-origin-defense).
+>
+> **Validation.**
+> 1. Loopback: `teleportd` + `teleport attach` on the same box, run `vim`, resize,
+>    `:q`, confirm exit code and terminal restoration.
+> 2. The same Tailscale setup M9 already proved: `teleport attach --url
+>    https://<tailnet-host> --token …` from a second machine, drive a full-screen
+>    program, detach with `~.`, reattach, confirm continuous replay.
+> 3. Cross-client parity: open the same session in the web UI as observer while the
+>    CLI holds control; both see identical bytes, and the web UI's controller label
+>    shows the CLI's `client_name`.
+> 4. `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`
+>    clean for `cli/`; add `cli-fmt` / `cli` (3-OS matrix) / `cli-audit` jobs to
+>    `ci.yml`, mirroring `daemon-fmt` / `daemon` / `daemon-audit` exactly.
+> 5. `SIGKILL` the CLI process mid-session (not `~.`): remote session survives (the
+>    same invariant M2/M9 already require of every client); a fresh `teleport attach`
+>    resumes with no offset gap.
+> 6. `release.yml`: `teleport` built and copied into the same per-target archive as
+>    `teleportd`; `scripts/install.sh` still installs correctly with two binaries in
+>    the archive instead of one.
+
 ---
 
 ## Small additions this plan makes beyond the original research
@@ -921,7 +1089,8 @@ MVP
 ├── SQLite metadata
 ├── responsive xterm.js UI
 ├── Tailscale Serve
-└── thin optional Tauri package
+├── thin optional Tauri package
+└── CLI client (ssh-like attach)
 ```
 
 Plus: the full failure-injection checklist in
