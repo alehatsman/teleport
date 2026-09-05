@@ -1,0 +1,18 @@
+[s9] scenario=exit0 exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=Some(17704)
+[s9] this process will NOT self-exit -- kill it manually when done
+[s9] blocking on child.wait() now, no timeout, no self-exit
+[s9] reader got 4 bytes at 6ms: "\u{1b}[6n"
+[s9] saw DSR cursor-position query at 6ms -- replying ESC[1;1R
+[s9] reply written+flushed at 6ms
+[s9] reader got 16 bytes at 6ms: "\u{1b}[?9001h\u{1b}[?1004h"
+[s9] reader got 78 bytes at 6ms: "\u{1b}[m\u{1b}]0;C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe\u{7}\u{1b}[?25h"
+[s9] RESULT wait() RETURNED at 8ms exit_code=0 success=true
+[s9] done waiting, now parking forever -- kill this process manually
+[s9] reader got 43 bytes at 14ms: "[mini_exit] pid=17704 exiting with code 0\r\n"
+[s9] heartbeat at 5000ms -- still running, still waiting
+[s9] heartbeat at 10000ms -- still running, still waiting
+[s9] heartbeat at 15000ms -- still running, still waiting
+[s9] heartbeat at 20000ms -- still running, still waiting
+[s9] heartbeat at 25000ms -- still running, still waiting
+[s9] heartbeat at 30000ms -- still running, still waiting
+[s9] heartbeat at 35001ms -- still running, still waiting

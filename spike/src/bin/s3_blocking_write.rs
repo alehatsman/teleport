@@ -95,16 +95,12 @@ fn main() -> Result<()> {
                         let data = vec![b'x'; 1024 * 1024];
                         let _ = writer.write_all(&data);
                         let _ = writer.flush();
-                        result_tx
-                            .send(("write_done", start.elapsed()))
-                            .ok();
+                        result_tx.send(("write_done", start.elapsed())).ok();
                     }
                     Cmd::Terminate => {
                         let start = Instant::now();
                         hard_kill(child_pid);
-                        result_tx
-                            .send(("terminate_done", start.elapsed()))
-                            .ok();
+                        result_tx.send(("terminate_done", start.elapsed())).ok();
                         return;
                     }
                 }
@@ -119,7 +115,10 @@ fn main() -> Result<()> {
             match result_rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(("write_done", d)) => {
                     got_write = Some(d);
-                    eprintln!("[s3] write_all completed (blocked for {} ms)", d.as_millis());
+                    eprintln!(
+                        "[s3] write_all completed (blocked for {} ms)",
+                        d.as_millis()
+                    );
                 }
                 Ok(("terminate_done", _)) => {
                     got_term = Some(t0.elapsed());

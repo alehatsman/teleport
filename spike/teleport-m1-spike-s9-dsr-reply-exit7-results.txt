@@ -1,0 +1,42 @@
+[s9] scenario=exit7 exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=Some(18404)
+[s9] this process will NOT self-exit -- kill it manually when done
+[s9] blocking on child.wait() now, no timeout, no self-exit
+[s9] reader got 4 bytes at 4ms: "\u{1b}[6n"
+[s9] saw DSR cursor-position query at 4ms -- replying ESC[1;1R
+[s9] reply written+flushed at 4ms
+[s9] reader got 16 bytes at 4ms: "\u{1b}[?9001h\u{1b}[?1004h"
+[s9] reader got 78 bytes at 4ms: "\u{1b}[m\u{1b}]0;C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe\u{7}\u{1b}[?25h"
+[s9] RESULT wait() RETURNED at 6ms exit_code=7 success=false
+[s9] done waiting, now parking forever -- kill this process manually
+[s9] reader got 43 bytes at 17ms: "[mini_exit] pid=18404 exiting with code 7\r\n"
+[s9] heartbeat at 5000ms -- still running, still waiting
+[s9] heartbeat at 10000ms -- still running, still waiting
+[s9] heartbeat at 15001ms -- still running, still waiting
+[s9] heartbeat at 20001ms -- still running, still waiting
+[s9] heartbeat at 25001ms -- still running, still waiting
+[s9] heartbeat at 30001ms -- still running, still waiting
+[s9] heartbeat at 35001ms -- still running, still waiting
+[s9] heartbeat at 40002ms -- still running, still waiting
+[s9] heartbeat at 45002ms -- still running, still waiting
+[s9] heartbeat at 50003ms -- still running, still waiting
+[s9] heartbeat at 55003ms -- still running, still waiting
+[s9] heartbeat at 60003ms -- still running, still waiting
+[s9] heartbeat at 65003ms -- still running, still waiting
+[s9] heartbeat at 70003ms -- still running, still waiting
+[s9] heartbeat at 75004ms -- still running, still waiting
+[s9] heartbeat at 80004ms -- still running, still waiting
+[s9] heartbeat at 85004ms -- still running, still waiting
+[s9] heartbeat at 90005ms -- still running, still waiting
+[s9] heartbeat at 95005ms -- still running, still waiting
+[s9] heartbeat at 100006ms -- still running, still waiting
+[s9] heartbeat at 105006ms -- still running, still waiting
+[s9] heartbeat at 110006ms -- still running, still waiting
+[s9] heartbeat at 115006ms -- still running, still waiting
+[s9] heartbeat at 120006ms -- still running, still waiting
+[s9] heartbeat at 125007ms -- still running, still waiting
+[s9] heartbeat at 130007ms -- still running, still waiting
+[s9] heartbeat at 135007ms -- still running, still waiting
+[s9] heartbeat at 140008ms -- still running, still waiting
+[s9] heartbeat at 145008ms -- still running, still waiting
+[s9] heartbeat at 150008ms -- still running, still waiting
+[s9] heartbeat at 155008ms -- still running, still waiting

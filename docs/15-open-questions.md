@@ -14,12 +14,12 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed genuinely unbounded (4+ min, no natural resolution), workaround leads exhausted, real stack trace obtained** — reproduced on a fully-native build (2026-09-05); Job Objects/IOCP ruled out as a workaround, no upstream fix found; WinDbg traces overturned the working "stuck in `ExitProcess`" theory (the real stack points at `conhost`'s own connection thread blocked in `VtIo::StartIfNeeded`'s `ReadFile`, not yet confirmed as *the* cause) and corrected an earlier "~12s natural resolution" misreading — that was the test harness's own process exit tearing down the tree, not the child; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
-| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
-| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
-| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | M1 | **resolved, same day (2026-09-05)** — root cause: conhost's ConPTY startup handshake sends a DSR/cursor-position query (`ESC[6n`) and blocks its `ConsoleIoThread` on the reply, which nothing ever sent; confirmed by spike (`s9_dsr_reply.rs`, wait() returns in 6-8ms once answered) and fixed in production (`daemon/src/pty.rs`'s `ConptyDsrProbe`), proven via `daemon/tests/pty_primitive_windows.rs` against the real `pty::spawn` path (63 passed, 0 failed); tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
+| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **partial** — the two exit-code fixtures W1's fix targets now have Windows coverage (`pty_primitive_windows.rs`); the rest (raw-mode, resize, grandchild/terminate semantics) still needs a Windows-appropriate rewrite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
+| [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **closed** — Linux closed 2026-09-04; Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix, confirmed via `pty_primitive_windows.rs` |
+| [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
-| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
+| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result was confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), now unblocked but not yet re-run against the fix, see below |
 | [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware; tracked in [#11](https://github.com/alehatsman/teleport/issues/11) |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
@@ -29,13 +29,14 @@ backlog pretending to be a spec.
 | [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
-W1 and S1–S5 are **blocking**. The rest are decisions that must be *made* before
-their milestone, not necessarily *built*. (D1 — replay sharing the live subscriber
-budget — is **closed**: the fix is the catch-up loop in
+W2 and S4-S5 are **blocking**; W1 was too until it resolved. The rest are decisions that
+must be *made* before their milestone, not necessarily *built*. (D1 — replay sharing the
+live subscriber budget — is **closed**: the fix is the catch-up loop in
 [04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early), built and
-gated 2026-09-04.) **W1 is the one that matters most right now**:
-until it's understood, no Windows result from S1/S2/S4 can be trusted, because all three
-depend on observing a ConPTY child exit on its own.
+gated 2026-09-04.) **W1 was the one that mattered most, and is now resolved** (2026-09-05,
+same day it was found): root cause identified, fixed in production, proven via a real
+integration test against `pty::spawn`, not just a spike. S4's Windows leg is unblocked by
+the fix but not yet re-run to confirm; W2's full fixture-parity gap is what's left.
 
 ---
 
@@ -332,31 +333,76 @@ available locally — `conhost.exe`'s VT-I/O implementation isn't the open-sourc
 under is a separate, closed-source binary, so the wezterm/Windows-Terminal GitHub repo
 searched earlier for leads 1-2 doesn't contain the code actually running here).
 
-**Engineering implication if root cause is never found:** the existing termination
-policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a
-bounded wait regardless of whether the graceful signal worked — so *user-initiated*
-terminate stays correct on Windows even with W1 unresolved, it just always takes the
-full timeout-then-kill path rather than reaping early. What W1 actually breaks is
-the case nobody is terminating: an agent process that finishes **on its own**. That
-session would sit as `running` indefinitely with no forcing function, and — per the
-finding above — there is no cheap heuristic (CPU, silence) to distinguish "finished
-but stuck exiting" from "legitimately idle and still running," and now Job Objects are
-also confirmed not to be that fallback signal. Closing this gap for real needs the
-actual root cause; there is no cheap heuristic-based or alternate-API shortcut left
-that hasn't already been ruled out. And per the follow-up above, a fixed-timeout
-heuristic ("declare it exited if `wait()` hasn't returned after N seconds") isn't a
-credible stopgap either — there's no natural resolution time to time it against; the
-hang is open-ended, confirmed to outlast 4+ minutes with nothing external to end it.
+**RESOLVED, same day — root cause identified and fixed.** `s8_never_timeout`'s own log
+had the answer sitting in it the whole time and this section didn't call it out until
+now: the very first bytes the pty master ever produces, at 0-6ms, before anything else,
+are `\x1b[6n` — a VT100 **Device Status Report / cursor-position query (DSR/CPR)**. That
+lines up exactly with the WinDbg stack: `ConsoleIoThread` is blocked in
+`VtInputThread::DoReadInput → ReadFile`, i.e. reading the **input** side of the very
+same pty, waiting for the reply (`ESC[row;colR`) a real terminal would send back. Every
+spike up to this point only ever read the master, never wrote to it — so conhost's own
+startup handshake was left hanging, forever, on a reply nobody was ever going to send.
 
-**Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
-*common* case — an agent process finishing normally — would never move a session to
-`exited` on Windows at all. That's a direct hit on session-list accuracy, the
-product's stated front page, and it's worse than anything the original four
-questions anticipated: S1 assumed reaping just needed the right thread/mechanism;
-this says the mechanism doesn't see the event at all, on this build, for this
-spawn path. **Do not write the Windows leg of `pty.rs`'s reap/exit-status path
-against the current design until W1 is understood.** The Unix leg (S1-S4, fully
-closed on Linux) is unaffected and can proceed.
+This is also a documented ConPTY behavior, not something specific to this build: the
+`microsoft/terminal` wiki describes conhost's VT-I/O startup sending exactly this kind
+of capability/cursor-position query and blocking a dedicated input thread on the reply
+(background reading via [DeepWiki's ConPTY-and-VT-I/O
+page](https://deepwiki.com/microsoft/terminal/2.4-conpty-and-vt-io); treat the specific
+timeout figure it cites with caution — it describes a **3-second, DA1-specific**
+`WaitUntilDA1(3000)` that falls through to a `StartupFailed` state, which does not match
+what was actually observed here: a **DSR/CPR** query, unanswered for **265+ seconds**
+with conhost still very much alive, not failed-and-torn-down. Likely a different query
+on the same handshake path, possibly OS-build-dependent — flagged as a discrepancy
+rather than silently reconciled). A handful of related community reports turned up too
+([microsoft/terminal#18117](https://github.com/microsoft/terminal/issues/18117),
+[#19922](https://github.com/microsoft/terminal/issues/19922),
+[discussion #17716](https://github.com/microsoft/terminal/discussions/17716)) — none
+confirmed as the identical bug, listed as pointers only.
+
+**Confirmed by direct test**, not just by reading about it: `spike/src/bin/s9_dsr_reply.rs`
+is `s8_never_timeout` with exactly one addition — a reader thread that watches for
+`ESC[6n` and writes back `ESC[1;1R` the moment it sees it. Result: `wait()` returned in
+**6-8ms** (both `exit0` → code 0 and `exit7` → code 7), instead of hanging indefinitely.
+Ran multiple times, both scenarios, fully reproducible.
+
+**Fix applied in production code**, not left as a spike-only finding: `daemon/src/pty.rs`
+now wraps the pty reader in `ConptyDsrProbe` (Windows-only, `cfg(windows)`) — it scans
+only the first 4KB ever read from the master for `ESC[6n`, answers it exactly once via
+the existing write channel, and then gets out of the way completely for the rest of the
+session (see its doc comment for why the budget and one-shot behavior both matter: a
+program can legitimately send its own `ESC[6n` later expecting a real reply from
+whatever terminal ends up attached, and this must never intercept that). Proven through
+the real production code path, not the spike: `daemon/tests/pty_primitive_windows.rs`
+runs the two exit-code fixtures Unix's `pty_primitive.rs` already had (`clean_exit_zero_
+is_recorded_via_wait_not_eof`, `nonzero_exit_is_recorded_accurately`), against real
+`cmd.exe` children spawned via `teleportd::pty::spawn`. Both pass, both resolve in
+**0.02s total** for the pair — full `cargo test` for the `daemon` crate on this machine:
+**63 passed, 0 failed**.
+
+**What remains open:** the *mechanism* is now understood and neutralized well enough to
+unblock the daemon, but it is still not a from-source-verified explanation — `conhost`'s
+VT-I/O implementation is closed-source, so "conhost needs a DA1/DSR reply during startup
+or its console-allocation path hangs indefinitely" is an empirically confirmed, externally
+corroborated *behavior*, not something read directly out of Microsoft's source. The reply
+value (`ESC[1;1R`, claiming cursor row/col 1;1) is also unverified as *the* value conhost
+expects — it's a well-formed reply that happens to work, not a traced-and-confirmed one.
+Full W2 Windows fixture parity (the rest of `pty_primitive.rs` — raw-mode, resize,
+grandchild/terminate semantics) is still not attempted; only the two fixtures this fix
+specifically targets have Windows coverage so far.
+
+**Engineering implication, now that the root cause is fixed:** the case this section
+worried most about — an agent process that finishes **on its own**, with nobody calling
+`terminate()` — is exactly what the `ConptyDsrProbe` fix restores exit detection for.
+The existing termination policy ([03-pty-layer.md](03-pty-layer.md#termination)) was
+already correct independent of this; what changes is that the Windows leg of `pty.rs`
+no longer needs a heuristic or fallback signal at all, because the actual OS-level exit
+notification now arrives, the same way it always did on Unix.
+
+**Why this no longer blocks M1:** the *common* case — an agent process finishing
+normally — now moves a session to `exited` on Windows correctly, confirmed via the real
+`pty::spawn` code path, not just a spike. The Windows leg of `pty.rs`'s reap/exit-status
+path can proceed on the existing design; W2 (full Windows fixture parity) remains the
+next real gap, not W1.
 
 ## W2 — Windows fixture parity not yet attempted
 

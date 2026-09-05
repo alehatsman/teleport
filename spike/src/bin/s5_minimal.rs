@@ -26,9 +26,16 @@ use std::time::{Duration, Instant};
 fn mini_exit_path() -> Result<PathBuf> {
     let mut path = std::env::current_exe().context("current_exe")?;
     path.pop(); // drop this binary's own filename
-    let name = if cfg!(windows) { "mini_exit.exe" } else { "mini_exit" };
+    let name = if cfg!(windows) {
+        "mini_exit.exe"
+    } else {
+        "mini_exit"
+    };
     path.push(name);
-    anyhow::ensure!(path.exists(), "expected {path:?} to exist -- build the whole spike crate first");
+    anyhow::ensure!(
+        path.exists(),
+        "expected {path:?} to exist -- build the whole spike crate first"
+    );
     Ok(path)
 }
 
@@ -90,7 +97,11 @@ fn main() -> Result<()> {
         std::thread::sleep(Duration::from_millis(200));
         external_kill(pid.expect("pid"));
     }
-    let trigger = if scenario == "sigkill" { Instant::now() } else { trigger };
+    let trigger = if scenario == "sigkill" {
+        Instant::now()
+    } else {
+        trigger
+    };
 
     // Dedicated blocking wait() thread -- the production model.
     let waiter = std::thread::spawn(move || child.wait());

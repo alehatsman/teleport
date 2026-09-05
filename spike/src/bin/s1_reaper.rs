@@ -97,7 +97,10 @@ fn main() -> Result<()> {
             status.success(),
             latency.as_millis()
         ),
-        None => eprintln!("[s1] RESULT exit_code=NONE latency_ms={}", latency.as_millis()),
+        None => eprintln!(
+            "[s1] RESULT exit_code=NONE latency_ms={}",
+            latency.as_millis()
+        ),
     }
 
     Ok(())

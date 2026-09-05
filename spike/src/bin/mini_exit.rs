@@ -8,6 +8,9 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    println!("[mini_exit] pid={} exiting with code {code}", std::process::id());
+    println!(
+        "[mini_exit] pid={} exiting with code {code}",
+        std::process::id()
+    );
     std::process::exit(code);
 }

@@ -100,9 +100,7 @@ fn build_command(scenario: &str) -> CommandBuilder {
         // Linux delivers SIGHUP for the hangup even to a setsid'd descendant if it
         // hasn't ignored SIGHUP *before* the fork races against the exit. `trap ''
         // HUP` ahead of `setsid` is what actually survives.
-        "grandchild" => {
-            "trap '' HUP; setsid sh -c 'trap \"\" HUP; sleep 5' & exit 0"
-        }
+        "grandchild" => "trap '' HUP; setsid sh -c 'trap \"\" HUP; sleep 5' & exit 0",
         "midburst" => "for i in $(seq 1 20000); do echo line$i; done; exit 0",
         other => panic!("unknown scenario {other}"),
     };

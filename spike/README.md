@@ -19,6 +19,7 @@ cargo build
 ./target/debug/s6_job_object <exit0|exit7|sigkill>   # Windows only, see below
 ./target/debug/s7_long_wait <exit0|exit7>            # wait() with a 30s timeout, not 8s
 ./target/debug/s8_never_timeout <exit0|exit7>        # wait() with NO timeout -- never self-exits, kill manually
+./target/debug/s9_dsr_reply <exit0|exit7>            # answers ConPTY's startup DSR query -- the W1 fix, confirmed
 ```
 
 All output goes to stderr (unbuffered), not stdout.
@@ -66,6 +67,16 @@ particular never exits on its own no matter what `wait()` does, so anything it o
 is unambiguously the child's own behavior, not the harness's. Confirmed run: 265+
 seconds, `wait()` never returned, `mini_exit.exe` never disappeared. Kill it manually
 (`taskkill /F` or `Stop-Process`) when done with it -- it will not stop on its own.
+
+`s9_dsr_reply` is the payoff: same as `s8_never_timeout` (no timeout, never self-exits,
+kill manually), plus a reader thread that answers conhost's ConPTY startup DSR
+(cursor-position) query (`ESC[6n`) with a canned reply (`ESC[1;1R`) the moment it sees
+it. `wait()` returns in 6-8ms instead of hanging -- see
+[W1](../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+for the full writeup, the closed-source-conhost caveat, and the community reports it
+lines up with. **This fix is now also in production code**, not just this spike:
+`daemon/src/pty.rs`'s `ConptyDsrProbe`, proven against the real `pty::spawn` path by
+`daemon/tests/pty_primitive_windows.rs`.
 
 Cross-compiled binaries are built from the Linux side
 (`cargo build --target x86_64-pc-windows-gnu`, needs `mingw-w64` +

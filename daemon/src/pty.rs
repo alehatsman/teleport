@@ -17,15 +17,19 @@
 //! must never block (docs/03-pty-layer.md#the-rule) -- pty.rs cannot enforce
 //! that, it is a contract on the caller.
 //!
-//! **Known Windows gap:** a ConPTY child that exits gracefully (not killed)
-//! is not currently observed as exited by this file's reaper thread, and the
-//! pty master never sees EOF either -- see
+//! **Windows: the ConPTY startup handshake.** conhost.exe's `VtIo::StartIfNeeded`
+//! writes a Device Status Report / cursor-position query (`ESC[6n`) to the pty
+//! master as the very first bytes of any session, then blocks
+//! `VtInputThread::DoReadInput`'s `ReadFile` on the input side waiting for the
+//! matching CPR reply (`ESC[row;colR`) -- confirmed via WinDbg, unbounded (ran
+//! 265+s with nothing else changing it), see
 //! [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows).
-//! `terminate()` still resolves correctly on Windows (its hard-kill step uses
-//! `TerminateProcess`, confirmed working), it just always takes the full
-//! bounded-wait-then-kill path rather than reaping early. A child that exits
-//! on its own, with nobody calling `terminate()`, will not currently surface
-//! as exited on Windows at all. Tracked, not fixed here.
+//! A real terminal emulator answers this automatically; `portable_pty`'s raw
+//! `PtyPair` does not -- it does no VT parsing at all. Left unanswered, this
+//! wedges conhost's own startup indefinitely, which is why a gracefully-exiting
+//! child was never observed as exited: exit detection itself is downstream of
+//! a handshake that never finished. `ConptyDsrProbe` below answers this one
+//! startup query and then gets out of the way -- see its doc comment.
 
 use std::io::{Read, Result as IoResult, Write};
 use std::path::Path;
@@ -191,6 +195,12 @@ pub fn spawn(
     let writer = pair.master.take_writer().context("take pty writer")?;
 
     let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_CHANNEL_CAPACITY);
+    // Windows only: wrap the reader so the first bytes of the session pass
+    // through a one-shot ConPTY startup-handshake responder before anything
+    // else sees them -- see ConptyDsrProbe's doc comment and the module doc
+    // above.
+    #[cfg(windows)]
+    let reader: Box<dyn Read + Send> = Box::new(ConptyDsrProbe::new(reader, write_tx.clone()));
     let (control_tx, control_rx) = mpsc::sync_channel::<ControlEvent>(CONTROL_CHANNEL_CAPACITY);
     let (exit_tx, exit_rx) = mpsc::sync_channel::<PtyExit>(1);
     let (eof_tx, eof_rx) = mpsc::sync_channel::<()>(1);
@@ -307,6 +317,104 @@ enum ControlEvent {
     Resize { cols: u16, rows: u16 },
     Terminate { reply_tx: SyncSender<PtyExit> },
     ChildExited(IoResult<ExitStatus>),
+}
+
+/// Windows only: answers conhost's one-time ConPTY startup DSR (cursor
+/// position) query so `VtIo::StartIfNeeded` can finish initializing --
+/// see the module doc's "Windows: the ConPTY startup handshake" note and
+/// [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+/// for the WinDbg evidence and the spike (`spike/src/bin/s9_dsr_reply.rs`)
+/// that confirmed this specific fix: with a reply written back, `wait()`
+/// returns in single-digit milliseconds instead of hanging indefinitely.
+///
+/// Scans only the first `PROBE_BYTE_BUDGET` bytes ever read from the master
+/// for `ESC[6n`; once it either finds and answers that one query, or gives
+/// up without finding it, it stops looking and every later byte -- for the
+/// rest of the session -- passes through completely untouched. That budget
+/// matters for correctness, not just cost: a real interactive program can
+/// itself send `ESC[6n` later, expecting a genuine cursor position back from
+/// whatever terminal the session ends up attached to, and this probe must
+/// never intercept that. It only targets the handshake burst, which -- per
+/// every observed trace -- is the literal first thing conhost ever writes,
+/// before the child's own program has had any chance to produce output of
+/// its own (the child can't write to a console that hasn't finished
+/// starting). If some future/older Windows build doesn't emit this burst at
+/// all, the budget is exhausted harmlessly and this is a no-op.
+#[cfg(windows)]
+struct ConptyDsrProbe {
+    inner: Box<dyn Read + Send>,
+    write_tx: SyncSender<Vec<u8>>,
+    /// Bytes already pulled from `inner` while scanning but not yet handed
+    /// back to the caller -- either genuine output that arrived before/after
+    /// the match, or (once budget-exhausted with no match) everything read
+    /// during scanning, still owed to the caller untouched.
+    pending: Vec<u8>,
+    scanned: usize,
+    done: bool,
+}
+
+#[cfg(windows)]
+impl ConptyDsrProbe {
+    const QUERY: &'static [u8] = b"\x1b[6n";
+    /// A fixed, unverified reply -- portable_pty exposes no way to ask what
+    /// cursor position it actually set, so this claims row 1, col 1
+    /// (`ESC[1;1R`). conhost only needs *a* well-formed reply to unblock its
+    /// startup `ReadFile`; nothing observed in the WinDbg trace or the exit
+    /// status of the fixture below depends on this being accurate.
+    const REPLY: &'static [u8] = b"\x1b[1;1R";
+    /// Generous relative to what's ever been observed (the query arrives
+    /// alone, within single-digit ms, as the very first read) -- this is a
+    /// give-up bound for "future/different conhost build behaves
+    /// differently", not a latency budget.
+    const PROBE_BYTE_BUDGET: usize = 4096;
+
+    fn new(inner: Box<dyn Read + Send>, write_tx: SyncSender<Vec<u8>>) -> Self {
+        Self {
+            inner,
+            write_tx,
+            pending: Vec::new(),
+            scanned: 0,
+            done: false,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Read for ConptyDsrProbe {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        loop {
+            if !self.pending.is_empty() {
+                let n = self.pending.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.pending[..n]);
+                self.pending.drain(..n);
+                return Ok(n);
+            }
+            if self.done {
+                return self.inner.read(buf);
+            }
+
+            let mut tmp = [0u8; 256];
+            let n = self.inner.read(&mut tmp)?;
+            if n == 0 {
+                return Ok(0); // EOF before the handshake ever showed up -- give up quietly
+            }
+            self.pending.extend_from_slice(&tmp[..n]);
+            self.scanned += n;
+
+            if let Some(pos) = self
+                .pending
+                .windows(Self::QUERY.len())
+                .position(|w| w == Self::QUERY)
+            {
+                let _ = self.write_tx.send(Self::REPLY.to_vec());
+                self.pending.drain(pos..pos + Self::QUERY.len());
+                self.done = true;
+            } else if self.scanned >= Self::PROBE_BYTE_BUDGET {
+                self.done = true;
+            }
+            // Loop back around: drain whatever's in `pending` into `buf`.
+        }
+    }
 }
 
 fn reader_thread_main(

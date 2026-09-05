@@ -13,7 +13,11 @@ fn main() {
         .arg("exit 0")
         .spawn()
         .expect("spawn failed");
-    eprintln!("[s0] pid={} spawned at {}ms", child.id(), t0.elapsed().as_millis());
+    eprintln!(
+        "[s0] pid={} spawned at {}ms",
+        child.id(),
+        t0.elapsed().as_millis()
+    );
     let status = child.wait().expect("wait failed");
     eprintln!(
         "[s0] RESULT wait() returned at {}ms exit_code={:?}",
