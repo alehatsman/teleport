@@ -30,20 +30,32 @@ a real shell where possible — `cargo run --bin echo-fixture` style, or `printf
 equivalents chosen per platform.
 
 - spawn a shell, write `echo hello\n`, read `hello` back
-- write large input (1 MiB) without loss or reordering
-- read a large burst (100 MiB from `yes`) without dropping bytes or stalling
+- write large input (1 MiB) without loss or reordering. **Windows has no equivalent**:
+  ConPTY's input direction always passes through conhost's own VT parser, with no raw
+  mode that bypasses it (unlike a Unix pty under `stty raw`), so an arbitrary byte-exact
+  payload including control bytes isn't a meaningful test there — see
+  [W2](15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted). The Windows
+  fixture file instead proves large *text* volume (`large_text_burst_read_drops_nothing`).
+- read a large burst (100 MiB from `yes`) without dropping bytes or stalling — Windows:
+  `for /L` stands in for `yes` (no infinite-repeat builtin reachable in one `/c` script);
+  strip conhost's own VT init/teardown escape sequences before comparing, don't fight
+  them with sentinel lines (see W2)
 - resize and confirm the child observes it (`stty size` on Unix, `mode con` on Windows)
 - child exits normally → exit code `0` recorded. The code comes from the child wait,
   **not** from EOF on the master — the two are separate signals and can arrive in
-  either order ([S2](15-open-questions.md#s2--eof-is-not-exit)). **Windows: blocked
-  on [W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)**
-  — a gracefully-exiting ConPTY child is not currently observed as exited at all;
-  this fixture is expected to fail on Windows until W1 resolves, not silently skipped
-- child exits nonzero → exit code recorded accurately. Same Windows caveat as above
-- terminate a running child → state machine reaches `exited` within the bounded policy
+  either order ([S2](15-open-questions.md#s2--eof-is-not-exit)). Windows coverage:
+  `pty_primitive_windows.rs`, proven against the real fix for
+  [W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows).
+- child exits nonzero → exit code recorded accurately. Same Windows coverage as above
+- terminate a running child → state machine reaches `exited` within the bounded policy.
+  Windows: usually near-instant (`ClosePseudoConsole` returns immediately on this
+  build), but caught once under concurrent load falling through to the full bound
+  instead — assert the documented bound, not the usual fast path
 - terminate a child that is producing output at full rate → no deadlock, no lost tail
 - close a session whose shell has spawned grandchildren → the tree is gone (Windows:
-  attached character-mode clients terminate with the pseudoconsole)
+  attached character-mode clients terminate with the pseudoconsole — confirmed via
+  `start /B` launching an attached grandchild and a real `terminate()` call, see
+  [S4](15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole))
 
 ### 2. Session/offset unit tests
 

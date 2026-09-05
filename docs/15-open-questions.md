@@ -15,11 +15,11 @@ backlog pretending to be a spec.
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
 | [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | M1 | **resolved, same day (2026-09-05)** — root cause: conhost's ConPTY startup handshake sends a DSR/cursor-position query (`ESC[6n`) and blocks its `ConsoleIoThread` on the reply, which nothing ever sent; confirmed by spike (`s9_dsr_reply.rs`, wait() returns in 6-8ms once answered) and fixed in production (`daemon/src/pty.rs`'s `ConptyDsrProbe`), proven via `daemon/tests/pty_primitive_windows.rs` against the real `pty::spawn` path (63 passed, 0 failed); tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
-| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **partial** — the two exit-code fixtures W1's fix targets now have Windows coverage (`pty_primitive_windows.rs`); the rest (raw-mode, resize, grandchild/terminate semantics) still needs a Windows-appropriate rewrite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
+| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **closed, 2026-09-05** — `pty_primitive_windows.rs` now covers echo/write, resize, both exit-code fixtures, and all three terminate fixtures (bounded policy, under load, grandchild-tree-kill), written and run for real on this machine; one Unix fixture (byte-exact raw-mode write) has no Windows equivalent at all and is documented as such, not skipped silently; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **closed** — Linux closed 2026-09-04; Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix, confirmed via `pty_primitive_windows.rs` |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
-| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result was confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), now unblocked but not yet re-run against the fix, see below |
+| [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **closed, 2026-09-05** — Unix closed 2026-09-04; Windows re-run against the real fix via W2's `terminate_kills_the_grandchild_process_tree` (`pty_primitive_windows.rs`): dropping the master takes an attached grandchild down too, in ~0.5s, through the real `terminate()` path |
 | [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware; tracked in [#11](https://github.com/alehatsman/teleport/issues/11) |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
@@ -29,14 +29,16 @@ backlog pretending to be a spec.
 | [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
-W2 and S4-S5 are **blocking**; W1 was too until it resolved. The rest are decisions that
-must be *made* before their milestone, not necessarily *built*. (D1 — replay sharing the
-live subscriber budget — is **closed**: the fix is the catch-up loop in
-[04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early), built and
-gated 2026-09-04.) **W1 was the one that mattered most, and is now resolved** (2026-09-05,
-same day it was found): root cause identified, fixed in production, proven via a real
-integration test against `pty::spawn`, not just a spike. S4's Windows leg is unblocked by
-the fix but not yet re-run to confirm; W2's full fixture-parity gap is what's left.
+S5 is still **blocking**; W1, W2, and S4 all resolved the same day they were found
+blocking. The rest are decisions that must be *made* before their milestone, not
+necessarily *built*. (D1 — replay sharing the live subscriber budget — is **closed**: the
+fix is the catch-up loop in [04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early),
+built and gated 2026-09-04.) **W1 was the one that mattered most, and is now resolved**
+(2026-09-05, same day it was found): root cause identified, fixed in production, proven
+via a real integration test against `pty::spawn`, not just a spike. S4's Windows leg is
+now re-run and confirmed against the real fix (2026-09-05, via W2's
+`terminate_kills_the_grandchild_process_tree`); W2's own fixture-parity gap is closed the
+same day, same machine.
 
 ---
 
@@ -386,9 +388,9 @@ or its console-allocation path hangs indefinitely" is an empirically confirmed, 
 corroborated *behavior*, not something read directly out of Microsoft's source. The reply
 value (`ESC[1;1R`, claiming cursor row/col 1;1) is also unverified as *the* value conhost
 expects — it's a well-formed reply that happens to work, not a traced-and-confirmed one.
-Full W2 Windows fixture parity (the rest of `pty_primitive.rs` — raw-mode, resize,
-grandchild/terminate semantics) is still not attempted; only the two fixtures this fix
-specifically targets have Windows coverage so far.
+Full W2 Windows fixture parity (the rest of `pty_primitive.rs` — resize, terminate/
+grandchild semantics; raw-mode has no Windows equivalent at all, see W2) followed this
+same fix the same day — see [W2](#w2--windows-fixture-parity-not-yet-attempted).
 
 **Engineering implication, now that the root cause is fixed:** the case this section
 worried most about — an agent process that finishes **on its own**, with nobody calling
@@ -401,8 +403,8 @@ notification now arrives, the same way it always did on Unix.
 **Why this no longer blocks M1:** the *common* case — an agent process finishing
 normally — now moves a session to `exited` on Windows correctly, confirmed via the real
 `pty::spawn` code path, not just a spike. The Windows leg of `pty.rs`'s reap/exit-status
-path can proceed on the existing design; W2 (full Windows fixture parity) remains the
-next real gap, not W1.
+path can proceed on the existing design. [W2](#w2--windows-fixture-parity-not-yet-attempted)
+(full Windows fixture parity) followed the same day and is also closed — see there.
 
 ## W2 — Windows fixture parity not yet attempted
 
@@ -420,6 +422,51 @@ someone can actually run and verify it on Windows (same constraint that shaped t
 spike itself -- docs/11-mvp-plan.md's "proceed for Unix now" decision). Until then, treat
 the M1 Gate as Linux-verified only; do not read `cfg(unix)` as "everything else already
 passes elsewhere."
+
+**CLOSED, 2026-09-05, same machine as W1's fix.** `daemon/tests/pty_primitive_windows.rs`
+now carries a full Windows-appropriate rewrite of `pty_primitive.rs`'s suite, written and
+run for real (not cross-compiled, not guessed at from the Unix file):
+
+- `echo_roundtrip` -- interactive `cmd.exe`, same shape as the Unix fixture
+- `large_text_burst_read_drops_nothing` -- a `for /L` loop stands in for `yes`
+  (cmd.exe has no infinite-repeat builtin reachable in one `/c` script); 200,000 lines
+  verified undropped, undamaged, in order, once conhost's own VT init/teardown escape
+  sequences are stripped (see below)
+- `resize_is_observed_by_the_child` -- `mode con` is the Windows equivalent
+  docs/10-testing.md already named for `stty size`
+- `clean_exit_zero_is_recorded_via_wait_not_eof` / `nonzero_exit_is_recorded_accurately`
+  -- unchanged, these already existed to prove W1's fix
+- `terminate_reaches_exited_within_the_bounded_policy`, `terminate_under_output_load_does_not_deadlock`,
+  `terminate_kills_the_grandchild_process_tree` -- the Windows termination mechanism
+  (`ClosePseudoConsole` via dropping the master, killing every attached client) proven
+  through the real `terminate()` path; the last of these also closes
+  [S4](#s4--does-dropping-the-master-close-the-pseudoconsole)'s Windows leg, see there
+
+**One Unix fixture has no Windows equivalent at all, by construction, not by omission:**
+`large_write_arrives_intact_and_in_order`'s intent -- an arbitrary byte-exact payload
+(all 256 byte values, including control bytes) survives a raw-mode round trip -- doesn't
+translate. Unix raw mode (`stty raw -echo`) turns the pty into a plain byte pipe with
+*no* interpretation; ConPTY has no equivalent for its *input* direction -- every byte
+written to the master always passes through conhost's own VT input parser before the
+child ever sees it, regardless of what console mode the child sets on its own stdin.
+A payload built as `(0..N).map(|i| i % 256)` contains `ESC` (0x1B) roughly every 256
+bytes, which conhost's parser reads as the start of a control sequence -- not a corner
+case, guaranteed by the payload's own construction. There is no cmd.exe/PowerShell knob
+and no child-side `SetConsoleMode` that bypasses this. Recorded as a genuine platform
+gap, not a skipped test.
+
+Two things surfaced along the way, folded into other sections rather than left here:
+conhost writes its own VT session-init sequences (`ESC[?9001h`, `ESC[?1004h`, an SGR
+reset, an OSC window-title write, ...) as the first bytes of *every* ConPTY session, and
+separately, whichever `WriteConsole` call is literally last before a process exits races
+conhost's own process-exit teardown sequence (observed directly: a final "y\r\n" arrived
+as "y\r" + an escape byte + a late "\n"). Neither is specific to this fixture's content --
+`large_text_burst_read_drops_nothing`'s fix (strip all VT escape sequences before
+comparing, rather than fight the platform with sentinel lines) is the general answer, and
+is now `strip_vt_sequences` in the test file itself, not documented as a design decision
+elsewhere since it's test-only machinery. The terminate-latency flake this same suite
+surfaced under concurrent load is recorded under [S4](#s4--does-dropping-the-master-close-the-pseudoconsole)
+instead, since it's about `terminate()`'s timing, not fixture parity.
 
 ## S1 — Who reaps the child?
 
@@ -729,6 +776,37 @@ it's the same underlying symptom masking the result. **S4's Windows half stays
 open until W1 is understood**; re-run this specific test once W1 has an answer or a
 workaround, since `drop(master)` returning fast is the only part of this result not
 already explained by W1.
+
+**Re-run against the real fix, 2026-09-05 — closed.** W1's fix makes this directly
+testable through the real production path for the first time:
+`daemon/tests/pty_primitive_windows.rs`'s `terminate_kills_the_grandchild_process_tree`
+(written for [W2](#w2--windows-fixture-parity-not-yet-attempted)) spawns an interactive
+`cmd.exe` under `pty::spawn`, has it `start /B` a `powershell.exe`/`Start-Sleep` grandchild
+(attached to the same console, not a new window — the Windows analogue of a Unix
+grandchild that inherits the pty by not calling `setsid`), confirms the grandchild is
+alive via an out-of-band `Get-CimInstance Win32_Process` query, then calls the real
+`session.terminate()`. Result: the grandchild is gone within ~0.5s, every run. This
+confirms both halves docs/10-testing.md's platform matrix already claimed --
+`ClosePseudoConsole` (via `drop(master)`, `pty.rs`'s control thread) does take down
+*every* attached character-mode client, not just the direct child -- and does so
+through the actual termination policy, not a synthetic single-purpose spike. Combined
+with `terminate_reaches_exited_within_the_bounded_policy` (same file) confirming the
+direct child's own exit is observed via the fixed `ConptyDsrProbe` path, S4's Windows
+half is no longer confounded by anything -- **closed**.
+
+One related timing note surfaced by the same suite, not by this fixture specifically:
+run concurrently with the rest of `pty_primitive_windows.rs` (several ConPTY sessions
+tearing down at once), `terminate_reaches_exited_within_the_bounded_policy` was caught
+once taking the full `GRACEFUL_WAIT` (5.0131867s) rather than the ~10ms it takes solo --
+i.e. under load, `ClosePseudoConsole`'s "returns immediately" property (documented for
+this build, ≥24H2) did not hold for that one run, and termination fell through to the
+hard-kill step instead. Still within the documented bounded policy (that's what the step
+is *for*), just not the fast path this build otherwise shows reliably. Not chased
+further -- reproduced once, under real concurrency, same shape as
+[S2](#s2--eof-is-not-exit)'s ws.rs regression (also only reproducible under real
+scheduling contention, not forceable on demand). Recorded here rather than smoothed
+over: the fixture's own assertion was loosened to match the actual documented contract
+(the full bound) rather than the usual-but-unproven-reliable fast path.
 
 ---
 
