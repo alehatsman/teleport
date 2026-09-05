@@ -738,11 +738,17 @@ reattaches. Browser-only mode remains fully functional.
 > writing `main.rs`, since the framework more commonly expects the reverse.
 >
 > **Edge cases.**
-> - **Windows: sidecar dies with the GUI.** `tauri-plugin-shell`'s sidecar helper has a
->   known history of tying the child to the parent via a Job Object on Windows — which
->   would silently break the one requirement M10 cannot get wrong. Spawn instead with
->   `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` (and `CREATE_BREAKAWAY_FROM_JOB` if
->   needed). **Spike this first, on a packaged Windows build** (not `cargo run`) —
+> - **Windows: sidecar dies with the GUI.** *Correction, made scaffolding this spec
+>   (2026-09-05): checked against `tauri-plugin-shell`'s actual source rather than
+>   trusted from memory — it does not use a Windows Job Object. It sets
+>   `CREATE_NO_WINDOW` and pipes stdio through itself, both wrong for a process meant
+>   to outlive this app, but not the Job Object claim this bullet originally made.*
+>   The real, general Windows risk: if this app's own process is inside a job with
+>   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (common from an IDE, CI runner, or some
+>   installer contexts), children join that job by default since Windows 8 and die
+>   with it. Spawn with plain `std::process::Command` and
+>   `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB`.
+>   **Spike this first, on a packaged Windows build** (not `cargo run`) —
 >   it can look fine in dev and fail only once bundled.
 > - Daemon already running (autostart got there first): health check succeeds before
 >   any spawn fires — no dedup needed.
@@ -769,6 +775,28 @@ reattaches. Browser-only mode remains fully functional.
 > 5. `cargo test` unaffected — no daemon code changes in this milestone.
 > 6. Browser-only regression: `teleportd` + a plain browser tab, no desktop app
 >    installed, still does everything it did pre-M10.
+>
+> **Scaffolded 2026-09-05** (`desktop/src-tauri/`, branch `m10-tauri-shell`) --
+> `cargo check`/`clippy -D warnings`/`fmt --check`/`cargo test` all clean, and a real
+> `tauri build` produces a working `.AppImage` + `.deb`. **Item 1 above run live, not
+> simulated:** launched the built binary against an isolated scratch data dir
+> (`XDG_DATA_HOME` override, not the real `~/.local/share/teleport` -- a real `teleportd`
+> from earlier the same day was already running there and was left untouched) --
+> health-probed, spawned `teleportd` detached, created a real session
+> (`sessions_running: 1`), then `kill -9`'d the GUI process outright (harder than a
+> clean quit). Daemon and the session's own process both survived; relaunching
+> re-probed and reattached (`"attaching to our daemon" sessions_running=1`) without a
+> second daemon spawning. One real bug caught by actually running it rather than only
+> compiling: the tray icon needs an explicit fixed-size 8-bit RGBA image
+> (`tauri::include_image!("icons/32x32.png")`) -- `app.default_window_icon()` and a
+> 16-bit-depth placeholder PNG both panicked at startup with a buffer-size mismatch.
+> Also corrected in the edge-case bullet above: the Windows Job Object claim was
+> checked against `tauri-plugin-shell`'s actual source and turned out to be wrong as
+> originally stated; fixed in place rather than left standing.
+>
+> Not done here, unchanged from the validation list: items 2-6 (Windows/macOS are
+> unverified on real hardware; no CI matrix yet; no signed artifacts, per the
+> not-yet-available-certs answer above). Full gap list in `desktop/README.md`.
 
 ---
 

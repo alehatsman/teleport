@@ -1,0 +1,49 @@
+[package]
+name = "teleport-desktop"
+version = "0.1.0"
+edition = "2021"
+# Not published; a build target only (docs/08-packaging.md, docs/11-mvp-plan.md#m10--tauri-shell).
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri              = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-updater      = "2"
+# Rust-only plugin -- no JS-side API, so no matching @tauri-apps/plugin-single-instance
+# npm package exists (checked 2026-09-05). Must be registered before any other
+# plugin/setup hook per its own docs.
+tauri-plugin-single-instance = "2"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow     = "1"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Same crate + resolution the daemon uses for <data_dir> (daemon/src/main.rs
+# ::resolve_data_dir) -- two independent guesses at the platform data dir is
+# exactly the bug docs/08-packaging.md warns about.
+directories = "5"
+# Startup poll loop's sleep/Instant only -- Tauri's own async runtime is
+# tokio-based already; this just needs to talk to it explicitly rather than
+# assume an API surface tauri::async_runtime doesn't publish.
+tokio = { version = "1", features = ["time"] }
+# Client for the /health probe. json only; TLS is irrelevant (loopback http).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# Tray-quit confirmation (names the session count before stopping the daemon)
+# and the "open logs folder" tray item -- see src/main.rs.
+tauri-plugin-dialog = "2"
+tauri-plugin-opener  = "2"
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM to the daemon's own pid (from an authenticated /health response) --
+# the same graceful-shutdown path daemon/src/main.rs::shutdown_signal()
+# already listens for on Ctrl+C. No daemon change needed on Unix.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# CREATE_NEW_PROCESS_GROUP / DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB for the
+# detached daemon spawn (docs/11-mvp-plan.md#m10 edge cases -- defends against
+# Windows Job Object nesting if this app's own process is inside one).
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }

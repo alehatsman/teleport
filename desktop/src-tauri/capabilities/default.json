@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Intentionally empty. The webview loads the daemon's own web app (the same one a phone's browser gets) and never calls tauri's invoke() -- no @tauri-apps/api usage in web/. Autostart/quit-daemon/etc. are plain Rust functions called from the tray menu, not JS-invoked commands, so no window needs any permission grant. Add capabilities here only if the loaded web content is ever given something to invoke (docs/08-packaging.md's rule: no custom RPC into session state).",
+  "windows": ["main"],
+  "permissions": []
+}
