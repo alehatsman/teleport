@@ -393,7 +393,16 @@
     margin-left: auto;
     font-size: 0.75rem;
     opacity: 0.7;
-    flex-shrink: 0;
+    /* Long client names ("controlled by Chrome on Linux") must lose to the
+       narrow viewport gracefully -- flex-shrink:0 let this get hard-clipped
+       by .session-row__link's overflow:hidden with no ellipsis on mobile.
+       min-width:0 is required for a flex item to actually shrink past its
+       content size. */
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   @media (max-width: 600px) {

@@ -67,14 +67,21 @@
 
   // Observers render the PTY's actual size, then scale the whole terminal
   // element to fit the viewport -- never re-wrap output for a different
-  // width (docs/09-frontend.md#geometry).
+  // width (docs/09-frontend.md#geometry). A desktop-sized PTY watched from a
+  // phone shrinks a lot (scale can land well under 0.3) -- centering the
+  // result is what makes that read as an intentional letterbox instead of a
+  // terminal glued into the corner with the rest of the screen looking broken.
   function letterbox() {
     if (!term?.element) return;
     const scaleX = wrapperEl.clientWidth / term.element.scrollWidth;
     const scaleY = wrapperEl.clientHeight / term.element.scrollHeight;
     const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1);
+    const offsetX = Math.max((wrapperEl.clientWidth - term.element.scrollWidth * scale) / 2, 0);
+    const offsetY = Math.max((wrapperEl.clientHeight - term.element.scrollHeight * scale) / 2, 0);
     containerEl.style.transformOrigin = "top left";
-    containerEl.style.transform = `scale(${scale})`;
+    // translate() composes after scale() here, so the offset is in final
+    // (post-scale) screen pixels -- exactly the centering slack computed above.
+    containerEl.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
   }
 
   export function write(bytes: Uint8Array) {
