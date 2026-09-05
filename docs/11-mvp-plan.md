@@ -864,6 +864,35 @@ reattaches. Browser-only mode remains fully functional.
 > that was actually in question. Running this inside an actual installed `.msi`/`.exe`
 > launched from a real restrictive job is still open, tracked in `desktop/README.md`.
 
+> **Validation item 1 (the gate itself) re-run on macOS, 2026-09-05 -- real hardware
+> (Darwin 24.6.0, arm64, Apple silicon), not CI.** The same box S5 and N5 were
+> root-caused on. Built the real bundle (`npx tauri build --bundles app` ->
+> `Teleport.app`, unsigned) and ran the gate end-to-end against the real default data
+> dir (`~/Library/Application Support/teleport`). No isolation override was needed the
+> way the Linux run needed one -- that directory did not exist on this machine, so
+> there was no live daemon to protect; it was removed again afterwards.
+>
+> | Step | Result |
+> |---|---|
+> | launch | `no daemon reachable; starting teleportd detached`; data dir created `0700`, `token`/`port` `0600` |
+> | detached spawn | daemon's `pgid` equals its own pid and differs from the GUI's, no controlling tty -- `process_group(0)` read out of `ps`, not assumed |
+> | create a session | `POST /api/v1/sessions` -> `running`, `/health` `sessions_running: 1` |
+> | quit | `kill -9` on the GUI's **entire process group**, not just its pid -- strictly harder than the Linux run, and the exact signal path `process_group(0)` exists to survive |
+> | survives | daemon alive and reparented to pid 1; the session's own `/bin/sh` alive under it; `/health` still `sessions_running: 1` |
+> | reopen | `attaching to our daemon ... sessions_running=1`; exactly one `teleportd`, same pid as before -- no second daemon spawned |
+>
+> No new bugs. The tray-icon buffer-size panic the Linux run caught did not recur --
+> startup completed with `build_tray` running -- and the embedded SPA served
+> (`GET /` -> `200 text/html`, so the window had a real UI to load, not a blank page).
+> `POST /api/v1/shutdown` (issue #12), previously exercised only on native Windows and
+> in `shutdown_endpoint.rs`, was also driven live here for the teardown: `202`, then
+> both the daemon and its session process gone.
+>
+> Still not done on macOS, and not claimed by this run: validation item 2 (the tray
+> "Stop daemon" confirmation needs a human click), `autostart/macos.rs`'s launchd
+> LaunchAgent, and M9's `--bg` reboot persistence. macOS moves from "CI build only" to
+> gate-verified in the cross-OS ledger (#8).
+
 ---
 
 ## Small additions this plan makes beyond the original research
