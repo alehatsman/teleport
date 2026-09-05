@@ -1,0 +1,12 @@
+# Every `target_os` gate in daemon/tests/ must appear here, or
+# scripts/check-target-os-gates.sh fails CI. See that script's header for why.
+#
+# A row is a platform that does not run this test. Treat it as a debt with a
+# tracking issue, not a settled fact -- both gates this repo has removed so far
+# turned out to be wrong about the platform (#25/#32, #36).
+#
+# Tab-separated: count, file, attribute, tracking, why.
+# Only the first three are compared; the last two are for whoever reads this next.
+
+1	daemon/tests/pty_primitive.rs	#[cfg(target_os = "linux")]	#11 (S5), closed	Not a platform being skipped: this is one half of a deliberate two-OS split. Linux's disassociate_ctty() exempts ptys, so EOF lags the session leader's exit. The macOS twin below asserts the opposite, and both are correct.
+1	daemon/tests/pty_primitive.rs	#[cfg(target_os = "macos")]	#11 (S5), closed	The macOS half of that split. XNU's proc_exit() calls VNOP_REVOKE on a session leader's ctty, so EOF coincides with exit instead of lagging it. Verified on real hardware, not inferred.

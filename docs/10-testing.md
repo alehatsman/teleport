@@ -21,6 +21,41 @@ synchronous pipe behavior and shutdown semantics genuinely differ from Unix PTYs
 A green Linux build means nothing about ConPTY. Do not merge PTY-layer changes without
 Windows results.
 
+### `target_os` gates are allowlisted
+
+`cfg(unix)` and `cfg(windows)` are the portable idiom — "this fixture drives `/bin/sh`",
+"this one drives ConPTY" — and are unrestricted. A **`target_os` gate is different**: it
+takes one first-class platform out of a test's coverage, usually with a reason that reads
+plausibly at the time.
+
+Twice that reason has been wrong:
+
+- Three fixtures were gated off macOS "pending measurement on real hardware"
+  ([#25](https://github.com/alehatsman/teleport/issues/25)). The measurement found one
+  wrong queue bound — wrong on Linux too, merely invisible there — fixed in
+  [#32](https://github.com/alehatsman/teleport/pull/32), all three un-gated.
+- `reconnect_storm.rs` then shipped Linux-only citing those three as precedent, four
+  commits after that precedent was overturned. It passed 20/20 on macOS the first time
+  anyone ran it ([#36](https://github.com/alehatsman/teleport/pull/36)).
+
+Note what would not have caught either: a check demanding a rationale or an issue link
+near the gate. Both had a rationale; both cited real documents. What was missing was a
+deliberate decision at the moment of gating, visible to a reviewer.
+
+So every `target_os` gate under `daemon/tests/` must be listed in
+[`scripts/allowed-target-os-gates.tsv`](../scripts/allowed-target-os-gates.tsv), with the
+issue that tracks removing it. `scripts/check-target-os-gates.sh` (CI job
+`daemon (target_os gates)`) diffs the tree against that file **in both directions** —
+adding a gate fails until it is listed, and un-gating fails until its row is deleted, so
+an un-gating cannot quietly leave the old reason on the books.
+
+Adding a row is not forbidden, just deliberate. If you have not run the test on the
+platform you are gating it off, that is the cheaper next step: both entries above were
+retired by someone finally running them, and one of them found a real product bug.
+
+Product code under `daemon/src/` may branch on `target_os` freely — that is platform
+logic, not absent coverage.
+
 ## Layers
 
 ### 1. PTY integration fixtures (`daemon/tests/pty_*.rs`)
