@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import * as api from "./api";
+  import { setControlling } from "./identity";
   import type { CreateSessionRequest, Preset, Session, SessionState } from "./types";
 
   let { onOpen }: { onOpen: (id: string) => void } = $props();
@@ -117,6 +118,16 @@
         ? { kind: "agent", preset: selectedPreset, cwd: cwd || "/", cols: 120, rows: 36 }
         : { kind: "shell", command: customCommand, cwd: cwd || "/", cols: 120, rows: 36 };
       const created = await api.createSession(body);
+      // The creator is the only client that could possibly be attached to a
+      // session that didn't exist a moment ago -- the lease is unheld by
+      // construction, so `mode=control` on the very next connect is granted
+      // rather than falling back to observer (docs/04-api-protocol.md#control-lease:
+      // "grants ... when the lease is free"). Without this, even the person
+      // who just launched the session had to click "Take control" themselves,
+      // and until they did, Terminal.svelte's observer path rendered the
+      // fixed launch geometry letterboxed inside the window instead of
+      // filling it.
+      setControlling(created.id, true);
       showLauncher = false;
       onOpen(created.id);
     } catch (e) {

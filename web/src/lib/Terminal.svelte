@@ -131,4 +131,28 @@
     overflow: hidden;
     background: var(--surface-deep);
   }
+  /* fitAddon.fit() measures *this* element (the one passed to term.open()),
+     not .terminal -- without an explicit size here it only ever wraps its
+     own content instead of reporting the space actually available, so the
+     controller's fit-to-viewport silently settles for less than the full
+     window (observed: real, empty space below the terminal even while
+     controlling, not just the intentional observer letterbox). */
+  .terminal__surface {
+    width: 100%;
+    height: 100%;
+    /* xterm.js quantizes to whole rows/cols -- its own root element ends up
+       a few pixels shorter/narrower than this container unless the fitted
+       size happens to divide evenly (it essentially never does). That
+       leftover is unavoidable, but center it instead of leaving it all at
+       the bottom: a symmetric sliver top and bottom reads as deliberate
+       framing, whereas one-sided leftover reads as the terminal drifting
+       when a scrollbar draws attention to that edge (measured ~14px on
+       this build, exact amount depends on font metrics/viewport size).
+       clientWidth/clientHeight -- what fitAddon.fit() reads to decide
+       rows/cols -- come from this flex container itself, not from its
+       (centered) child, so this doesn't feed back into the row count. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 </style>
