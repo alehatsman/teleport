@@ -123,6 +123,20 @@ by W1) and the grandchild-tree-close case, are expected to pass on Windows once 
 > live `kill(pid, 0)` doesn't mean still-running -- asserting otherwise would
 > just be a different flake.
 
+> **...and reopened, then actually closed, 2026-09-05.** The recipe above fixed the
+> `perl`-never-started failure but the fixture still wasn't green on `macos-latest`, so it
+> was `#[cfg(target_os = "linux")]`-gated pending real hardware
+> ([S5](15-open-questions.md#s5--a-detached-grandchild-cannot-hold-a-pty-past-its-parent-on-macos)).
+> Run on an actual Mac, the "flake" turns out to be perfectly deterministic: macOS/XNU
+> `proc_exit` calls `VNOP_REVOKE(ttyvp, REVOKEALL)` on a session leader's controlling
+> terminal, which invalidates every descriptor to that tty in every process no matter
+> what signals anyone is ignoring, whereas Linux's `disassociate_ctty()` explicitly
+> exempts ptys and only sends `SIGHUP`. Not a race — a kernel difference, proven with
+> `spike/src/bin/s10_ctty_revoke.rs` (the grandchild is alive but its writes return
+> `EIO`; a `noctty` control behaves exactly like Linux). The gate is gone, replaced by a
+> macOS twin fixture that asserts the real behaviour *and* that the grandchild survives
+> the revoke. No output is lost — XNU drains before it revokes, measured byte-exact.
+
 ---
 
 ## M2 — Session ownership and backpressure
