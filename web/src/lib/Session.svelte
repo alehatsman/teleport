@@ -221,7 +221,7 @@
     background: var(--surface-raised);
     color: inherit;
     border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     padding: 0.5rem 0;
   }
   .key-bar__button:active {

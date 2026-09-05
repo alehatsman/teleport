@@ -2,25 +2,25 @@
 
 :root {
   color-scheme: dark;
-  --bg: #121212;
-  --fg: #e6e6e6;
-  --muted: #666;
+  --bg: #101014;
+  --fg: #e8e6f0;
+  --muted: #6b6878;
 
   /* Surfaces, darkest to lightest. */
-  --surface-deep: #0c0c0c; /* terminal canvas */
-  --surface: #1a1a1a; /* inputs */
-  --surface-raised: #1e1e1e; /* toast, key-bar buttons */
-  --surface-hover: #232323; /* hover wash over a raised surface */
+  --surface-deep: #0a0a0d; /* terminal canvas */
+  --surface: #18181e; /* inputs */
+  --surface-raised: #1e1e26; /* toast, key-bar buttons */
+  --surface-hover: #262631; /* hover wash over a raised surface */
 
   /* Borders. */
-  --border: #2a2a2a;
-  --border-strong: #333;
+  --border: #26262f;
+  --border-strong: #34343f;
 
-  /* Brand / interactive accent. */
-  --accent: #2563eb;
-  --accent-hover: #3b74f0;
+  /* Brand / interactive accent -- indigo-violet, not the stock framework blue. */
+  --accent: #7c6cf0;
+  --accent-hover: #8f81f7;
   --accent-fg: #fff;
-  --accent-ring: rgb(37 99 235 / 45%);
+  --accent-ring: rgb(124 108 240 / 45%);
 
   /* Status colors -- each pairs a dim background with a legible foreground. */
   --success: #3ecf6a;
@@ -45,13 +45,14 @@
   --space-4: 1rem;
 
   /* Radius scale. */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
 
   /* Depth. */
-  --shadow-raised: 0 1px 2px rgb(0 0 0 / 30%);
-  --shadow-panel: 0 8px 24px rgb(0 0 0 / 40%);
+  --shadow-raised: 0 4px 10px rgb(0 0 0 / 35%);
+  --shadow-panel: 0 12px 32px rgb(0 0 0 / 45%);
+  --shadow-glow: 0 0 0 1px rgb(124 108 240 / 30%), 0 4px 16px rgb(124 108 240 / 25%);
 
   /* Motion -- one duration/easing pair, used everywhere something moves. */
   --transition-fast: 120ms ease;
@@ -69,7 +70,11 @@ body,
 }
 
 body {
-  background: var(--bg);
+  /* A faint accent-tinted vignette off the top -- flat black reads as an
+     unstyled page; this reads as an app without costing any contrast. */
+  background:
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgb(124 108 240 / 8%), transparent),
+    var(--bg);
   color: var(--fg);
   font-family:
     system-ui,
@@ -180,31 +185,44 @@ select:focus-visible {
    --------------------------------------------------------------------- */
 
 /* Block: btn -- the base is the plain/secondary look; --primary and
-   --danger are the only modifiers the app needs. */
+   --danger are the only modifiers the app needs. Borderless by default --
+   depth comes from a background shift and lift on hover, not a boxed
+   outline, which is what read as the stock framework look. */
 .btn {
   background: var(--surface-raised);
   color: inherit;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 0.4rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 0.45rem 0.8rem;
   cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 .btn:hover {
   background: var(--surface-hover);
-  border-color: var(--muted);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.btn:active {
+  transform: translateY(0);
 }
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
+  transform: none;
 }
 .btn--primary {
-  background: var(--accent);
+  background: linear-gradient(180deg, var(--accent-hover), var(--accent));
   color: var(--accent-fg);
   border-color: transparent;
 }
 .btn--primary:hover {
-  background: var(--accent-hover);
+  background: linear-gradient(180deg, var(--accent-hover), var(--accent-hover));
   border-color: transparent;
+  box-shadow: var(--shadow-glow);
 }
 .btn--danger {
   background: var(--danger-bg);

@@ -151,7 +151,7 @@
 
 <div class="sessions">
   <header class="sessions__header">
-    <h1 class="sessions__title">teleport</h1>
+    <h1 class="sessions__title"><span class="sessions__prompt" aria-hidden="true">&rsaquo;</span>teleport</h1>
     <button
       class="btn btn--primary"
       onclick={openLauncher}
@@ -270,15 +270,18 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 1.25rem;
-    padding-bottom: var(--space-3);
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.75rem;
   }
   .sessions__title {
-    font-size: 1.15rem;
+    font-size: 1.2rem;
     font-weight: 700;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.01em;
     margin: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .sessions__prompt {
+    color: var(--accent);
+    margin-right: 0.3rem;
   }
   .sessions__loading {
     opacity: 0.6;
@@ -320,7 +323,8 @@
     align-items: flex-start;
     gap: var(--space-3);
     padding: 2.5rem var(--space-3);
-    border: 1px dashed var(--border-strong);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius-lg);
   }
   .empty__text {
@@ -347,15 +351,19 @@
     gap: var(--space-2);
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    padding: 0.6rem var(--space-3);
+    border-radius: var(--radius-lg);
+    padding: 0.7rem var(--space-3);
     transition:
       border-color var(--transition-fast),
-      background-color var(--transition-fast);
+      background-color var(--transition-fast),
+      transform var(--transition-fast),
+      box-shadow var(--transition-fast);
   }
   .session-row:hover {
     border-color: var(--border-strong);
     background: var(--surface-hover);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-raised);
   }
   .session-row__link {
     flex: 1;
