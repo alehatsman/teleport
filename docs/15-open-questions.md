@@ -26,7 +26,7 @@ backlog pretending to be a spec.
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | **closed, 2026-09-05** — investigated by reading the pinned `axum`/`tungstenite` source directly: neither implements permessage-deflate or any extension negotiation at all (a literal `// TODO` in tungstenite's own handshake code), so this was never a config flag away; not implemented, recorded as infeasible-with-this-stack rather than done |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
-| [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | **closed, 2026-09-05** — measured on real CI: a 40-client concurrent reconnect storm cost a live subscriber a 0.995 throughput ratio (no measurable degradation); the per-round design needs no second mitigation |
+| [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | **closed, 2026-09-05** — measured on real CI: a 40-client concurrent reconnect storm cost a live subscriber a 0.995 throughput ratio (no measurable degradation); the per-round design needs no second mitigation. Re-measured on real macOS hardware 2026-09-05 (20/20, ratio 0.966–1.094) and un-gated from `target_os = "linux"` to `cfg(unix)` |
 | [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound was ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **resolved 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)): one byte budget that charges per-chunk overhead; all three fixtures un-gated |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
@@ -1189,8 +1189,25 @@ of them in the product — recorded in the fixture's own doc comments rather tha
 here: an unbounded (then a paced) producer overflowing the control subscriber's own queue
 before the storm even started (an ordering bug — attach before backlog was static, not a
 rate problem), and a double-counted byte range in this file's own final correctness check.
-`target_os = "linux"`-gated, same reasoning as `session_catchup.rs` and the N5 fixtures —
-not re-tuned for `macos-latest`'s different timing.
+**Gating corrected 2026-09-05, after measurement rather than argument.** This fixture
+shipped `target_os = "linux"`-gated, "same reasoning as `session_catchup.rs` and the N5
+fixtures." That reasoning had already been overturned four commits earlier: #29/#32
+root-caused those gates to the queue bound's *count* half — wrong on Linux too, merely
+invisible there — and un-gated all three to `cfg(unix)`. So the new gate cited, as
+precedent, the pre-#32 state of exactly the files that had stopped being precedent.
+
+Re-run on real macOS hardware (Darwin 24.6.0, arm64) instead of re-guessed: **20/20
+green**, 6.77–6.84s wall clock, storm/baseline ratio 0.966–1.094 — the same
+no-measurable-degradation result `ubuntu-latest` gave, and well inside
+`STORM_CLIENT_TIMEOUT`. Now `cfg(unix)`.
+
+Why it ports, stated so the gate is not reintroduced by reflex: the hard assertions here
+are invariants (no disconnect, no gap, no unbounded stall), never a throughput threshold,
+so there is no tuned number that could need re-tuning. And N5's tiny reads never reach the
+measured window — the trickle is a single 1000-byte `printf` per 10ms, which arrives as
+one 1000-byte chunk on macOS as well (106 chunks / 106,000 bytes, exactly 1000 B each).
+`yes`'s tiny lines shape only the backlog phase, which finishes before anyone attaches and
+which `session_catchup.rs` already exercises on macOS with this same 12 MiB constant.
 
 ---
 
