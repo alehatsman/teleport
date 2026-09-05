@@ -19,6 +19,17 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  # A `target_os` gate on a test is a platform quietly losing coverage, and
+  # this repo has shipped two whose stated reasons did not survive being run
+  # (#25/#32, #36). Cheap, no toolchain needed, so it runs on its own rather
+  # than behind a build.
+  test-gates:
+    name: daemon (target_os gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-target-os-gates.sh
+
   daemon:
     name: daemon (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
