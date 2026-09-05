@@ -51,6 +51,35 @@ pub fn read_token(data_dir: &Path) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Where [`spawn_detached`] redirects the daemon's stdout/stderr.
+/// `teleportd` itself only ever logs to its own stdout/stderr
+/// (`daemon/src/main.rs`'s `tracing_subscriber::fmt()`, no file appender) --
+/// this file is the *only* persisted copy of that output, and exists purely
+/// so this shell has something to show when startup fails
+/// (docs/11-mvp-plan.md#m10, issue #15).
+pub fn log_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("teleportd.log")
+}
+
+/// Best-effort read of the last `max_bytes` of the daemon log, for a "why
+/// didn't it come up" dialog. Never errors the caller -- a missing or
+/// unreadable log just becomes an explanatory string in its place.
+pub fn read_log_tail(data_dir: &Path, max_bytes: usize) -> String {
+    let path = log_path(data_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(max_bytes);
+            let tail = String::from_utf8_lossy(&bytes[start..]).trim().to_string();
+            if tail.is_empty() {
+                format!("(log at {} is empty)", path.display())
+            } else {
+                tail
+            }
+        }
+        Err(e) => format!("(could not read log at {}: {e})", path.display()),
+    }
+}
+
 /// The authenticated slice of `GET /api/v1/health`'s response
 /// (docs/04-api-protocol.md#get-apiv1health). Other fields exist on the
 /// wire; only what this shell needs is modeled here.
@@ -126,12 +155,30 @@ pub async fn probe(data_dir: &Path) -> Probe {
 /// well-trodden one; the Windows path needs the spike in
 /// docs/11-mvp-plan.md#m10 run against an actual packaged build before this
 /// is trusted.
-pub fn spawn_detached() -> Result<()> {
+pub fn spawn_detached(data_dir: &Path) -> Result<()> {
     let path = sidecar_path()?;
+
+    // stdout/stderr go to `log_path` (truncated on every spawn, so it always
+    // holds just the most recent run -- not an unboundedly-growing log)
+    // rather than `Stdio::null()`, so a "didn't come up" dialog has
+    // something real to show (issue #15). `create_dir_all` covers first run,
+    // before `teleportd` itself has ever created this directory.
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("creating data dir {}", data_dir.display()))?;
+    let log_file = std::fs::File::create(log_path(data_dir)).with_context(|| {
+        format!(
+            "creating daemon log file at {}",
+            log_path(data_dir).display()
+        )
+    })?;
+    let log_file_stderr = log_file
+        .try_clone()
+        .context("cloning daemon log file handle")?;
+
     let mut cmd = std::process::Command::new(&path);
     cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file_stderr));
 
     #[cfg(unix)]
     {
