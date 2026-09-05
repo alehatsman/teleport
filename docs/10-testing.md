@@ -118,6 +118,14 @@ equivalents chosen per platform.
 - token compare is constant-time (assert the implementation, not the timing)
 - `POST /sessions` with a nonexistent executable → `422`, not `404`, and no row written
 - `max_sessions + 1` concurrent spawns → `429`, daemon healthy
+- `POST /api/v1/shutdown` with no token/bad Origin → rejected, and never wakes
+  `shutdown_signal()`; with a valid credential → `202` and does wake it
+  (`daemon/tests/shutdown_endpoint.rs`). The same file also spawns the *real*
+  `teleportd` binary and drives it over a raw `TcpStream` the way a curl-based
+  Windows caller would, then asserts the process actually exits and its port file
+  is removed — the Windows-daemon-stop gap (issue #12,
+  [11-mvp-plan.md#m10](11-mvp-plan.md#m10-tauri-shell)) closed and run for real,
+  not just wired up
 
 ### 4. Persistence / restart tests
 

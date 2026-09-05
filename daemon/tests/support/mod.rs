@@ -165,6 +165,7 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
         started_at: Instant::now(),
         version: "test",
         web_dist,
+        shutdown: Arc::new(tokio::sync::Notify::new()),
     });
 
     let app = teleportd::api::build_router(Arc::clone(&state));

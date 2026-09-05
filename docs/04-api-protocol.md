@@ -26,6 +26,8 @@ GET    /api/v1/sessions/{id}/log
 GET    /api/v1/sessions/{id}/stream   # WebSocket upgrade
 
 GET    /api/v1/presets
+
+POST   /api/v1/shutdown
 ```
 
 Everything else is the SPA, served from the same origin at `/`.
@@ -44,7 +46,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach"]
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown"]
 }
 ```
 
@@ -55,7 +57,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach"],
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown"],
   "device_id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
   "device_name": "aleh-macbook",
   "platform": "macos-aarch64",
@@ -206,6 +208,29 @@ commands. See [06-security.md](06-security.md).
 Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
 and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
 needed to spawn the first Claude/Codex CLI.**
+
+### `POST /api/v1/shutdown`
+
+```json
+{ "status": "shutting_down" }
+```
+
+Triggers the same graceful-shutdown path `main.rs` already listens for on Ctrl+C
+(Unix: also SIGTERM) — sessions get the identical persistence-and-close treatment as
+any other planned stop, not an ungraceful kill. Added for Windows (issue #12,
+[11-mvp-plan.md#m10](11-mvp-plan.md#m10-tauri-shell)): a console-less,
+autostart-launched `teleportd` has no `GenerateConsoleCtrlEvent` target, since that API
+needs a console shared with the target process. Wired in on every platform rather than
+made a Windows-only special case — one uniform, curl-testable path — though Unix's
+existing `kill(SIGTERM)` route from the desktop shell is left as-is.
+
+Mutating route: requires the same credential and Origin check as `POST /sessions`
+([06-security.md](06-security.md#browser-origin-defense)). Responds `202` the instant
+the signal is queued, **not** once shutdown has actually finished — the graceful-shutdown
+drain and the PTY layer's own bounded termination policy
+([03-pty-layer.md#concrete-policy](03-pty-layer.md#concrete-policy)) can still take a
+few seconds after this response is sent. A caller that needs to know shutdown is *done*
+should poll `/health` until the connection is refused, not block on this response.
 
 ## WebSocket protocol
 

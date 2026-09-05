@@ -47,7 +47,11 @@ fn temp_dir() -> PathBuf {
 
 /// Spawns `cmd.exe /c script` (a one-shot script, not an interactive shell)
 /// via the production `pty::spawn` path.
-fn spawn_cmd_script(script: &str, cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver<Vec<u8>>) {
+fn spawn_cmd_script(
+    script: &str,
+    cols: u16,
+    rows: u16,
+) -> (pty::SpawnedSession, Receiver<Vec<u8>>) {
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
     let cwd = temp_dir();
     let args = vec!["/c".to_string(), script.to_string()];
@@ -252,11 +256,8 @@ fn large_text_burst_read_drops_nothing() {
     // *exactly* `LINES` copies of "y\r\n" with nothing else interleaved, in
     // order. No sentinel needed because there is nothing left to skip past.
     const LINES: usize = 200_000;
-    let (spawned, out_rx) = spawn_cmd_script(
-        &format!("for /L %i in (1,1,{LINES}) do @echo y"),
-        80,
-        24,
-    );
+    let (spawned, out_rx) =
+        spawn_cmd_script(&format!("for /L %i in (1,1,{LINES}) do @echo y"), 80, 24);
 
     // The script is a one-shot `cmd /c`, so waiting for the process to exit
     // (rather than a content predicate) is the natural "done reading" signal
@@ -292,9 +293,7 @@ fn resize_is_observed_by_the_child() {
     // Unix fixture of the same name.
     std::thread::sleep(Duration::from_millis(200));
     spawned.session.write(b"mode con\r\n").unwrap();
-    let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| {
-        contains(acc, "Columns:")
-    });
+    let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "Columns:"));
     let text = String::from_utf8_lossy(&acc);
     assert_eq!(
         number_after(&text, "Lines:"),

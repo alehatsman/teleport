@@ -162,6 +162,11 @@ async fn main() -> Result<()> {
         None
     };
 
+    // The one trigger `POST /api/v1/shutdown` has (docs/11-mvp-plan.md#m10):
+    // shared into `AppState` so the handler can wake `shutdown_signal()`
+    // below, which otherwise only listens for Ctrl+C / SIGTERM.
+    let shutdown_trigger = Arc::new(tokio::sync::Notify::new());
+
     let state = Arc::new(AppState {
         sessions,
         db: Some(db),
@@ -173,12 +178,13 @@ async fn main() -> Result<()> {
         started_at: Instant::now(),
         version: env!("CARGO_PKG_VERSION"),
         web_dist,
+        shutdown: Arc::clone(&shutdown_trigger),
     });
     spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
 
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_trigger))
         .await;
 
     remove_port_file(&data_dir)?;
@@ -390,8 +396,13 @@ async fn run_gc_pass(
     }
 }
 
-/// Resolves once Ctrl+C or (Unix only) SIGTERM is received.
-async fn shutdown_signal() {
+/// Resolves once Ctrl+C, (Unix only) SIGTERM, or an authenticated
+/// `POST /api/v1/shutdown` (docs/11-mvp-plan.md#m10) is received. The HTTP
+/// trigger exists mainly for Windows, which has no SIGTERM equivalent
+/// reachable from a console-less daemon, but is wired in on every platform
+/// -- one uniform, curl-testable path rather than a Windows-only special
+/// case (`api.rs`'s `shutdown` handler doc comment has the full reasoning).
+async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -415,6 +426,7 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
 }

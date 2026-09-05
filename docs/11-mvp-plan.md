@@ -797,6 +797,24 @@ reattaches. Browser-only mode remains fully functional.
 > Not done here, unchanged from the validation list: items 2-6 (Windows/macOS are
 > unverified on real hardware; no CI matrix yet; no signed artifacts, per the
 > not-yet-available-certs answer above). Full gap list in `desktop/README.md`.
+>
+> **Windows daemon stop, closed 2026-09-05 (issue #12).** The gap this scaffold's
+> `stop_daemon_flow` TODO named -- `GenerateConsoleCtrlEvent` needs a console shared
+> with the target process, which a Task-Scheduler/autostart-launched `teleportd` never
+> has, so Windows had no SIGTERM equivalent and the tray's "Stop daemon" action only
+> logged an error -- is resolved with the first of the two options that TODO listed: a
+> small authenticated `POST /api/v1/shutdown` (docs/04-api-protocol.md#post-apiv1shutdown)
+> that triggers `main.rs`'s existing `shutdown_signal()` via a shared `tokio::sync::Notify`,
+> so Windows gets the exact same persistence-and-close treatment Unix's `kill(SIGTERM)`
+> path already gave. Wired in cross-platform (every OS gets the route, not just
+> Windows) rather than making it a special case; Unix's `terminate_gracefully` is
+> untouched. `desktop/src-tauri/src/daemon.rs::shutdown_gracefully` (`#[cfg(windows)]`)
+> is the new client-side call, replacing the stub in `main.rs::stop_daemon_flow`.
+> Verified for real, not just wired up: `daemon/tests/shutdown_endpoint.rs` spawns the
+> actual `teleportd` binary, sends a plain hand-written HTTP/1.1 request over a raw
+> `TcpStream` the way a curl-based Windows caller would, and asserts the *process*
+> exits and its port file is removed -- run repeatedly on this machine (native Windows),
+> not assumed from the Unix-passing case.
 
 ---
 

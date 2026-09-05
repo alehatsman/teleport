@@ -189,14 +189,10 @@ pub fn sidecar_path() -> Result<PathBuf> {
 /// planned stop. Requires the `pid` from an *authenticated* `/health`
 /// response ([`Health::pid`]), never a pid guessed some other way.
 ///
-/// **Unix only.** Windows has no SIGTERM equivalent for a console-less
-/// background process (`GenerateConsoleCtrlEvent` needs a shared console,
-/// which a Task-Scheduler-launched, detached `teleportd` won't have) --
-/// tracked as an open gap in docs/11-mvp-plan.md#m10, not silently papered
-/// over with an ungraceful `taskkill`. Needs either a small authenticated
-/// `POST /api/v1/shutdown` on the daemon, or a console-ctrl-handler dance;
-/// deferred rather than decided unilaterally since it's a (small) daemon
-/// change this milestone otherwise doesn't need.
+/// **Unix only** -- see [`shutdown_gracefully`] for the Windows leg.
+/// `GenerateConsoleCtrlEvent` needs a shared console, which a
+/// Task-Scheduler-launched, detached `teleportd` won't have, so a plain
+/// `kill(SIGTERM)` has no Windows equivalent at all.
 #[cfg(unix)]
 pub fn terminate_gracefully(pid: u32) -> Result<()> {
     // SAFETY: `kill(2)` with SIGTERM on a pid we read from our own daemon's
@@ -208,6 +204,47 @@ pub fn terminate_gracefully(pid: u32) -> Result<()> {
         Err(anyhow::anyhow!(
             "kill(SIGTERM) on pid {pid} failed: {}",
             std::io::Error::last_os_error()
+        ))
+    }
+}
+
+/// Graceful stop for Windows: `POST /api/v1/shutdown`
+/// (docs/04-api-protocol.md#post-apiv1shutdown, docs/11-mvp-plan.md#m10,
+/// issue #12), reusing the same `shutdown_signal()` path
+/// [`terminate_gracefully`] drives on Unix, just triggered over the
+/// existing authenticated HTTP surface instead of a signal -- a
+/// console-less, autostart-launched `teleportd` has no
+/// `GenerateConsoleCtrlEvent` target (no shared console) and this shell
+/// must never fall back to an ungraceful `taskkill`. Not used on Unix,
+/// which keeps its working `kill(SIGTERM)` path unchanged -- `#[cfg(windows)]`
+/// here, not a shared cross-platform fn, so an accidental call from the
+/// Unix branch is a compile error rather than a silent extra round trip.
+///
+/// Re-reads `port`/`token` from disk rather than widening [`Health`] with
+/// them: whether this shell is *allowed* to ask the daemon to stop is the
+/// daemon's own auth check to make on the request, not something to gate on
+/// here from a struct built for an unrelated purpose.
+#[cfg(windows)]
+pub async fn shutdown_gracefully(data_dir: &Path) -> Result<()> {
+    let port = read_port(data_dir).context("no port file -- is the daemon running?")?;
+    let token = read_token(data_dir).context("no token file -- is the daemon running?")?;
+    let url = format!("http://127.0.0.1:{port}/api/v1/shutdown");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("building HTTP client")?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .context("sending POST /api/v1/shutdown")?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "POST /api/v1/shutdown returned {}",
+            resp.status()
         ))
     }
 }
