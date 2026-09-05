@@ -14,7 +14,7 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed, root cause still open** — general to ConPTY (not `cmd.exe`-specific), spike, Windows (2026-09-04); tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed twice independently, root cause still open, both known workaround leads exhausted** — general to ConPTY (not `cmd.exe`-specific), reproduced on a second, fully-native (non-cross-compiled) build (2026-09-05); Job Objects/IOCP tried and ruled out, no upstream fix found; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
 | [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
@@ -159,25 +159,56 @@ open, not narrowly the process handle. There is currently no independent signal
 available, at the `portable-pty`/Win32-console-API level, that a gracefully-exiting
 child under ConPTY has actually finished.
 
-**Where this leaves root-cause digging:** further progress needs tooling this spike
-doesn't have budget for — WinDbg/ETW tracing of what `mini_exit.exe`'s threads are
-actually blocked on during the hang. Time-boxed here rather than pursued further;
-this was a one-day spike and is now well past that. Two remaining leads, in
-decreasing priority:
+**Where this leaves root-cause digging (as of the original spike):** further progress
+needs tooling this spike didn't have budget for — WinDbg/ETW tracing of what
+`mini_exit.exe`'s threads are actually blocked on during the hang. Time-boxed at the
+time rather than pursued further. Two leads were left, in decreasing priority — both
+now checked, see below.
 
-- **Job Objects + an I/O completion port**, instead of `wait()`/`try_wait()` on the
-  process handle. `JOB_OBJECT_MSG_EXIT_PROCESS`/`_ACTIVE_PROCESS_ZERO` notifications
-  come from the kernel's job-object accounting, a different code path than
-  `GetExitCodeProcess`/`WaitForSingleObject` — worth trying since it's independent
-  of whatever ConPTY-side handshake is stuck, though if the process truly hasn't
-  finished dying at the kernel level, this may not fire either. This is how several
-  other tools (containerd, Docker) track Windows process lifecycle robustly, so
-  there's precedent — but it's a real implementation, not a quick spike script, and
-  a scope decision, not just a technical one.
-- check whether a newer `portable-pty` (0.9.0 is what's pinned in
-  [02-stack-decisions.md](02-stack-decisions.md)) or upstream wezterm `main` carries
-  a workaround for exactly this — lower priority now that the symptom is confirmed
-  general to ConPTY rather than a `portable-pty` wiring bug, but cheap to check.
+**Re-verified independently, 2026-09-05, on different hardware (`DESKTOP-R8O9R54`,
+same build 26200), with a fully native toolchain — no cross-compile from WSL anywhere
+in the chain this time** (`rustup`'s `stable-x86_64-pc-windows-gnu` host toolchain
+installed and run directly on this Windows machine, `cargo build`/`cargo run` from a
+native PowerShell process, not `x86_64-pc-windows-gnu` cross-compiled from Linux). The
+full spike suite reproduced W1 exactly: S1/S2/S4/S5's graceful-exit cases all hung to
+their timeouts identically, S1/S3/S5's externally-killed cases all still reaped
+correctly and fast (0–75ms). This matters because the original run, despite being
+re-tried from "a genuine interactive Windows Terminal / PowerShell session," was still
+built from a cross-compiled binary — a fully independent native build removes one more
+variable. **W1 is not a cross-compilation or WSL-adjacent artifact of any kind.**
+
+**Lead 1 (Job Objects + IOCP) — tried, ruled out (2026-09-05).** New spike,
+`spike/src/bin/s6_job_object.rs`: assigns the ConPTY child to a Job Object wired to an
+I/O completion port (`JobObjectAssociateCompletionPortInformation`), racing
+`JOB_OBJECT_MSG_EXIT_PROCESS` against the same `wait()` and reader-EOF signals as S5.
+**Result: no better than `wait()`.** `exit0`/`exit7` — no `EXIT_PROCESS` (or any other)
+notification arrived within a 13s window; the job object never hears anything past the
+`NEW_PROCESS` message it gets at spawn time. `sigkill` — works correctly and fast,
+`EXIT_PROCESS` observed at 265ms, `wait()` at 75ms on the same run: the kill case was
+never the question. This is a clean, symmetric negative: the externally-killed case
+succeeds identically on *both* signals, the graceful-exit case fails identically on
+*both* signals, which is strong evidence the two failures share the same root cause —
+whatever is stuck blocks *all* kernel-level exit accounting for the process, not just
+the specific `GetExitCodeProcess`/`WaitForSingleObject` path. Job Objects were the
+"independent code path" hope; they turned out not to be independent enough. **Do not
+pursue Job Objects/IOCP as a W1 workaround** — the code is left in the spike crate as a
+documented negative result, not a starting point.
+
+**Lead 2 (a newer `portable-pty`/wezterm fix) — checked, nothing found (2026-09-05).**
+Reviewed wezterm's `pty/src/win/mod.rs` commit history on `main` and open/closed issues
+for anything matching this symptom. The one recent (2026-06-07) Windows-PTY-related
+change, [wezterm#7709](https://github.com/wezterm/wezterm/pull/7709), fixes `kill()`
+misreading `TerminateProcess`'s nonzero-on-success return value — unrelated to exit
+*detection*, and to a code path (`kill()`) this project doesn't even call the same way
+(see [S3](#s3--a-blocking-write-wedges-terminate)'s external-`taskkill` approach). No
+issue or commit found describing this exact symptom (a gracefully-exiting ConPTY child
+never observed via `wait()`, `try_wait()`, EOF, or now Job Objects). Nothing to upgrade
+to.
+
+**Where this leaves root-cause digging, updated:** both cheap leads are exhausted.
+What's left is genuinely WinDbg/ETW-level tracing of `mini_exit.exe`'s own thread state
+during the hang — no shortcut avoids it now. Not attempted yet; needs that tooling
+installed and time budgeted as its own piece of work, not folded into a spike.
 
 **Engineering implication if root cause is never found:** the existing termination
 policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a
@@ -187,11 +218,10 @@ full timeout-then-kill path rather than reaping early. What W1 actually breaks i
 the case nobody is terminating: an agent process that finishes **on its own**. That
 session would sit as `running` indefinitely with no forcing function, and — per the
 finding above — there is no cheap heuristic (CPU, silence) to distinguish "finished
-but stuck exiting" from "legitimately idle and still running." Closing this gap for
-real needs either the root cause, or the Job Object path above; there is no cheap
-heuristic-based shortcut available given what's been ruled out so far.
-determines whether this is "OS hasn't reaped it" (probe-based fallback is sound) or
-something stranger.
+but stuck exiting" from "legitimately idle and still running," and now Job Objects are
+also confirmed not to be that fallback signal. Closing this gap for real needs the
+actual root cause; there is no cheap heuristic-based or alternate-API shortcut left
+that hasn't already been ruled out.
 
 **Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
 *common* case — an agent process finishing normally — would never move a session to

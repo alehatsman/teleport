@@ -1,0 +1,38 @@
+teleport M1 spike -- S6 Job Object/IOCP results (W1 lead 1, ruled out)
+Host: DESKTOP-R8O9R54   OS build: 10.0.26200.0
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+Run at: 2026-09-05 (native, non-cross-compiled, real PowerShell process)
+
+=== s6_job_object exit0 ===
+[s6] scenario=exit0 exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=46772
+[s6] process assigned to job object, IOCP wired
+[s6] IOCP message=6 (NEW_PROCESS) key=0xc0ffee pid=46772 at 0ms
+[s6] wait() TIMEOUT after 12s -- still waiting on IOCP thread
+[s6] wait() never returned (consistent with W1) -- leaving its thread parked, process exits with it
+[s6] GetQueuedCompletionStatus timed out/failed at 13009ms: Os { code: 258, kind: TimedOut, message: "The wait operation timed out." }
+[s6] IOCP RESULT: no exit notification within its own timeout
+
+=== s6_job_object exit7 ===
+[s6] scenario=exit7 exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=42344
+[s6] process assigned to job object, IOCP wired
+[s6] IOCP message=6 (NEW_PROCESS) key=0xc0ffee pid=42344 at 0ms
+[s6] wait() TIMEOUT after 12s -- still waiting on IOCP thread
+[s6] wait() never returned (consistent with W1) -- leaving its thread parked, process exits with it
+[s6] GetQueuedCompletionStatus timed out/failed at 13001ms: Os { code: 258, kind: TimedOut, message: "The wait operation timed out." }
+[s6] IOCP RESULT: no exit notification within its own timeout
+
+=== s6_job_object sigkill ===
+[s6] scenario=sigkill exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=45516
+[s6] process assigned to job object, IOCP wired
+[s6] IOCP message=6 (NEW_PROCESS) key=0xc0ffee pid=45516 at 0ms
+SUCCESS: The process with PID 45516 has been terminated.
+[s6] IOCP message=7 (EXIT_PROCESS) key=0xc0ffee pid=45516 at 265ms
+[s6] wait() RESULT exit_code=1 success=false latency_ms=75
+[s6] IOCP RESULT: EXIT_PROCESS at 265ms (trigger-relative would need trigger=267ms)
+
+=== Interpretation ===
+exit0/exit7 (graceful): neither wait() nor the Job Object/IOCP notification ever
+fires. sigkill (externally killed): both fire correctly and fast (75ms / 265ms).
+Symmetric with every other W1 finding -- Job Objects are not an independent enough
+signal path to work around this. See docs/15-open-questions.md#w1 for the full
+writeup and what this rules out.

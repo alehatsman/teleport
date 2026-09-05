@@ -16,6 +16,7 @@ cargo build
 ./target/debug/s3_blocking_write <shared|separate>
 ./target/debug/s4_drop_master <plain|grandchild>
 ./target/debug/s5_minimal <exit0|exit7|sigkill>
+./target/debug/s6_job_object <exit0|exit7|sigkill>   # Windows only, see below
 ```
 
 All output goes to stderr (unbuffered), not stdout.
@@ -31,7 +32,17 @@ interactive session reproduced the identical hang — see
 It is a real Windows/ConPTY finding, not a bridge artifact.
 
 Easiest path: `run-windows-spike.ps1` in this directory runs every binary with
-timeouts and writes a transcript — see the comment at its top for usage.
+timeouts and writes a transcript — see the comment at its top for usage. It assumes
+cross-compiled binaries under `target\x86_64-pc-windows-gnu\debug`; if you built
+natively on Windows instead (`cargo build` with a `*-pc-windows-gnu` host toolchain,
+output goes to plain `target\debug`), point `$exeDir` at that instead or run the
+binaries directly.
+
+`s6_job_object` is Windows-only (`windows-sys` job-object/IOCP APIs) and isn't part of
+`run-windows-spike.ps1` — run it by hand, see
+[W1](../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+for what it found (a negative result: Job Objects don't see the graceful-exit case
+either, so don't reach for this file as a fix starting point).
 
 Cross-compiled binaries are built from the Linux side
 (`cargo build --target x86_64-pc-windows-gnu`, needs `mingw-w64` +
