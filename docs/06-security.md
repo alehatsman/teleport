@@ -153,16 +153,42 @@ Mitigations, in order of preference:
 
 1. **Native clients must use the header.** They have no excuse.
 2. **Short-lived ticket.** `POST /api/v1/ws-ticket` with the bearer header returns a
-   single-use, 30-second token; the browser puts *that* in the query string. The
-   long-lived secret never enters a URL. Cheap, and the right shape for v2 anyway.
-3. Long-lived token in the query string — acceptable only for a purely local origin.
-
-Ship 1 and 3 in the MVP; add 2 before the daemon is routinely reachable off-host.
+   single-use, 30-second token, scoped to one session id; the browser puts *that* in
+   the query string. The long-lived secret never enters a URL.
+   **Shipped** ([04-api-protocol.md#post-apiv1ws-ticket](04-api-protocol.md#post-apiv1ws-ticket));
+   `stream.ts` fetches one before every connect/reconnect and never sends `?token=`
+   itself. A failed fetch reconnects through the normal backoff path — it does not fall
+   back to the master token.
+3. Long-lived token in the query string — kept server-side (`daemon/src/ws.rs`'s
+   `?token=` fallback) for a native client that has no ticket flow yet; `stream.ts`
+   itself no longer uses it.
 
 A custom username/password system is explicitly out of scope for the MVP
 ([11-mvp-plan.md](11-mvp-plan.md#out-of-scope)). When accounts arrive they come from the
 cloud backend — passkeys or OAuth, never hand-rolled passwords
 ([14-cloud-backend.md](14-cloud-backend.md#what-the-backend-is)).
+
+## Add a strict Content-Security-Policy
+
+This UI controls arbitrary command execution over PTYs, so browser XSS here is
+effectively remote code execution as the local user. `api.rs`'s `build_router` sets one
+CSP, unconditionally, on every response — API and static alike, via a single
+`Router::layer` rather than threading it through just the static-file path:
+
+```text
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
+connect-src 'self' ws: wss:; img-src 'self' data:; object-src 'none';
+base-uri 'none'; frame-ancestors 'none'
+```
+
+**Never add a third-party script tag.** That is the whole point of the policy, and it
+is the one thing no future change to this UI should reach for.
+
+The Tauri shell's window is a plain `WebviewUrl::External` navigation to this same
+daemon URL, not Tauri's own bundled `frontendDist` — so it gets this exact header, the
+same as a browser client does. `tauri.conf.json`'s `security.csp` (which only injects a
+policy into pages served over Tauri's `tauri://` asset protocol) is correctly `null` and
+should stay that way unless the shell ever starts bundling its own frontend.
 
 ## Process spawning
 

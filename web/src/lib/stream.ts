@@ -3,8 +3,8 @@
 // `Terminal.svelte` and `Session.svelte` deal in these callbacks; neither
 // touches a `WebSocket` directly.
 
-import { streamUrl } from "./api";
-import { CLIENT_ID, CLIENT_NAME, getToken } from "./identity";
+import { createWsTicket, streamUrl } from "./api";
+import { CLIENT_ID, CLIENT_NAME } from "./identity";
 import type { ClientMessage, ErrorFrame, ServerFrame, StreamState } from "./types";
 
 const DESKTOP_TAIL = 1024 * 1024; // 1 MiB -- matches the daemon's own default_tail
@@ -46,6 +46,18 @@ export class SessionStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByCaller = false;
   private sawExit = false;
+  /**
+   * Bumped on every `connect()`. `connectWithTicket()` captures its own
+   * value and checks it again after the ticket-fetch `await` -- if a newer
+   * `connect()` ran in the meantime (e.g. `Session.svelte`'s
+   * `onVisibilityChange` firing again while an earlier reconnect's ticket
+   * fetch is still in flight, a race the async ticket fetch made reachable
+   * that didn't exist when `connect()` opened a socket synchronously),
+   * this attempt's socket is closed immediately instead of silently
+   * replacing `this.ws` and leaking the older one still wired to
+   * `onmessage`/`onclose` (code review, PR #22).
+   */
+  private connectGeneration = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -57,7 +69,40 @@ export class SessionStream {
 
   connect(): void {
     if (this.closedByCaller) return;
+    // A reconnect this call preempts (e.g. onVisibilityChange skipping the
+    // backoff wait) shouldn't also go on to open a second socket once its
+    // own ticket fetch resolves -- see connectGeneration's doc.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const generation = ++this.connectGeneration;
     this.callbacks.onState(this.hasCursor ? "reconnecting" : "connecting");
+    void this.connectWithTicket(generation);
+  }
+
+  /**
+   * `POST /api/v1/ws-ticket` first, then open the socket with *that*
+   * instead of the long-lived bearer token
+   * (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2) --
+   * the one HTTP round-trip this adds is invisible next to a human
+   * reconnecting a terminal. A failed fetch (offline, daemon mid-restart)
+   * is handled exactly like a failed socket: the normal jittered-backoff
+   * reconnect, never a fall-back to sending the master token instead.
+   */
+  private async connectWithTicket(generation: number): Promise<void> {
+    let ticket: string;
+    try {
+      ticket = (await createWsTicket(this.sessionId)).ticket;
+    } catch {
+      if (this.closedByCaller || generation !== this.connectGeneration) return;
+      this.scheduleReconnect();
+      return;
+    }
+    // Superseded by a newer connect() while this fetch was in flight, or
+    // torn down outright -- either way, this attempt is stale. Never touch
+    // `this.ws` or open a socket for it.
+    if (this.closedByCaller || generation !== this.connectGeneration) return;
 
     const query = new URLSearchParams();
     if (this.hasCursor) {
@@ -71,8 +116,7 @@ export class SessionStream {
     query.set("mode", this.wantControl ? "control" : "observe");
     query.set("client_id", CLIENT_ID);
     query.set("client_name", CLIENT_NAME);
-    const token = getToken();
-    if (token) query.set("token", token);
+    query.set("ticket", ticket);
 
     const ws = new WebSocket(streamUrl(this.sessionId, query));
     ws.binaryType = "arraybuffer";
@@ -141,10 +185,26 @@ export class SessionStream {
 
   private onMessage(event: MessageEvent): void {
     if (typeof event.data === "string") {
-      this.onControlFrame(JSON.parse(event.data) as ServerFrame);
+      let frame: ServerFrame;
+      try {
+        frame = JSON.parse(event.data) as ServerFrame;
+      } catch {
+        // The daemon is trusted and should never send this, but
+        // network-facing parsing fails deliberately, not with an uncaught
+        // exception in a WebSocket callback.
+        this.protocolViolation("malformed control frame");
+        return;
+      }
+      this.onControlFrame(frame);
       return;
     }
     this.onBinaryFrame(event.data as ArrayBuffer);
+  }
+
+  /** Same posture as a malformed frame: report it, then close deliberately -- never just keep going. */
+  private protocolViolation(detail: string): void {
+    this.callbacks.onError("protocol_violation", detail);
+    this.ws?.close(1002, "protocol violation");
   }
 
   private onControlFrame(frame: ServerFrame): void {
@@ -194,6 +254,10 @@ export class SessionStream {
   }
 
   private onBinaryFrame(buf: ArrayBuffer): void {
+    if (buf.byteLength < 8) {
+      this.protocolViolation("binary frame shorter than the 8-byte offset prefix");
+      return;
+    }
     const view = new DataView(buf);
     const offset = Number(view.getBigUint64(0, false)); // big-endian
     const payload = new Uint8Array(buf, 8);
@@ -219,6 +283,11 @@ export class SessionStream {
     // 1013 (slow_consumer) included -- an expected event, reconnect exactly
     // like any other drop.
     this.callbacks.onState("reconnecting");
+    this.scheduleReconnect();
+  }
+
+  /** Jittered exponential backoff, shared by a dropped socket and a failed ticket fetch. */
+  private scheduleReconnect(): void {
     const jitter = Math.random() * this.backoff * 0.25;
     this.reconnectTimer = setTimeout(() => this.connect(), this.backoff + jitter);
     this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);

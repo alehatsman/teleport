@@ -14,8 +14,17 @@
 //! - [`resolve`] -- the bearer-token credential, required on every
 //!   `/api/v1` request except unauthenticated `/health`
 //!   (docs/06-security.md#authentication).
+//! - [`resolve_ws`]/[`TicketStore`] -- the WS-upgrade-specific credential:
+//!   a short-lived, single-use ticket in place of the bearer token, so the
+//!   long-lived secret never has to ride in a WebSocket URL
+//!   (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use axum::http::{header, HeaderMap};
+
+use crate::session::SessionId;
 
 /// Who is making this request. In the MVP (stage 1) every variant that can
 /// actually be produced authorizes identically -- there is one user -- but
@@ -74,6 +83,121 @@ pub fn resolve(
         }
         _ => Err(AuthError::Unauthorized),
     }
+}
+
+/// Resolves the credential for a WS upgrade specifically: a `ticket` (if
+/// present) redeemed against `store` and scoped to `session_id`, otherwise
+/// the normal bearer/`?token=` path via [`resolve`]. Ticket-checking is
+/// independent of `auth_required` -- a valid ticket already proves a very
+/// recent, separately-authenticated `POST /api/v1/ws-ticket` call, so there
+/// is nothing left for the disabled-auth escape hatch to add
+/// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_ws(
+    store: &TicketStore,
+    session_id: SessionId,
+    ticket: Option<&str>,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    expected_token: &str,
+    auth_required: bool,
+) -> Result<Principal, AuthError> {
+    if let Some(ticket) = ticket {
+        return if store.redeem(ticket, session_id) {
+            Ok(Principal::LocalUser)
+        } else {
+            Err(AuthError::Unauthorized)
+        };
+    }
+    resolve(headers, query_token, expected_token, auth_required)
+}
+
+/// How long an unredeemed ticket stays valid (docs/06-security.md: "30-second
+/// token"). Generous enough for a slow mobile connect, short enough that a
+/// leaked ticket (proxy log, browser history -- the exact exposure this
+/// replaces) is worthless within the minute.
+pub const TICKET_TTL: Duration = Duration::from_secs(30);
+
+/// 128 bits (docs/06-security.md's own floor for the credential this
+/// stands in for).
+const TICKET_BYTES: usize = 16;
+
+struct Ticket {
+    session_id: SessionId,
+    expires_at: Instant,
+}
+
+/// In-memory, single-use tickets for the WS upgrade. Never persisted --
+/// restarting the daemon invalidates every outstanding ticket, which is
+/// correct: nothing durable should ever depend on a 30-second credential.
+pub struct TicketStore {
+    tickets: parking_lot::Mutex<HashMap<String, Ticket>>,
+}
+
+impl Default for TicketStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TicketStore {
+    pub fn new() -> Self {
+        Self {
+            tickets: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Issues a ticket scoped to `session_id`. Sweeps expired entries first
+    /// -- the only cleanup this store needs, since a 30s TTL means the map
+    /// never holds more than a few tens of seconds' worth of issuance even
+    /// if every ticket goes unredeemed.
+    pub fn issue(&self, session_id: SessionId) -> Result<String, getrandom::Error> {
+        let mut bytes = [0u8; TICKET_BYTES];
+        getrandom::getrandom(&mut bytes)?;
+        let ticket = hex_encode(&bytes);
+
+        let mut tickets = self.tickets.lock();
+        let now = Instant::now();
+        tickets.retain(|_, t| t.expires_at > now);
+        tickets.insert(
+            ticket.clone(),
+            Ticket {
+                session_id,
+                expires_at: now + TICKET_TTL,
+            },
+        );
+        Ok(ticket)
+    }
+
+    /// Redeems `ticket` for `session_id`. Single-use: a ticket found in the
+    /// map is removed regardless of whether it actually matches
+    /// `session_id` and hasn't expired -- so a replayed ticket (copied URL,
+    /// proxy log) fails the second time, *and* a wrong-session guess can't
+    /// be retried against the same ticket once it's been tried. Only "found,
+    /// right session, not expired" returns `true`; everything else
+    /// (mismatch, expiry, already redeemed, or simply unknown) is `false`.
+    pub fn redeem(&self, ticket: &str, session_id: SessionId) -> bool {
+        let mut tickets = self.tickets.lock();
+        match tickets.remove(ticket) {
+            Some(t) => t.session_id == session_id && t.expires_at > Instant::now(),
+            None => false,
+        }
+    }
+}
+
+/// Shared by every caller that needs to print random secret bytes as a
+/// credential -- the daemon token (`main.rs::load_or_create_token`) and WS
+/// tickets (`TicketStore::issue`) both go through this one copy, not two
+/// independently-maintained ones (code review, PR #22). `pub`, not
+/// `pub(crate)`: `main.rs` is the separate `teleportd` *binary* crate calling
+/// into this *library* crate, so crate-visibility doesn't reach it.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(s, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    s
 }
 
 fn bearer_from_header(headers: &HeaderMap) -> Option<&str> {
@@ -310,5 +434,93 @@ mod tests {
         ]);
         assert_eq!(debug.check(&h), Ok(()));
         assert_eq!(release.check(&h), Err(AuthError::BadOrigin));
+    }
+
+    fn sid(s: &str) -> SessionId {
+        s.parse().expect("valid ULID literal in test")
+    }
+
+    #[test]
+    fn ticket_redeems_once_for_the_right_session() {
+        let store = TicketStore::new();
+        let session = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let ticket = store.issue(session).unwrap();
+
+        assert!(store.redeem(&ticket, session));
+        // Single-use: the same ticket fails the second time.
+        assert!(!store.redeem(&ticket, session));
+    }
+
+    #[test]
+    fn ticket_rejected_for_the_wrong_session_and_consumed_either_way() {
+        let store = TicketStore::new();
+        let issued_for = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let wrong = sid("01ARZ3NDEKTSV4RRFFQ69G5FAX");
+        let ticket = store.issue(issued_for).unwrap();
+
+        assert!(!store.redeem(&ticket, wrong));
+        // Removed on *any* redeem attempt, matched or not -- otherwise a
+        // wrong-session guess could be retried indefinitely against the
+        // same ticket, turning "single-use" into "single-use per session
+        // guessed correctly." The right session gets nothing back either.
+        assert!(!store.redeem(&ticket, issued_for));
+    }
+
+    #[test]
+    fn unknown_ticket_is_rejected() {
+        let store = TicketStore::new();
+        assert!(!store.redeem("nonexistent", sid("01ARZ3NDEKTSV4RRFFQ69G5FAV")));
+    }
+
+    #[test]
+    fn expired_ticket_is_rejected() {
+        let store = TicketStore::new();
+        let session = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let ticket = store.issue(session).unwrap();
+        // Backdate it past its TTL directly rather than sleeping 30s in a test.
+        store.tickets.lock().get_mut(&ticket).unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
+
+        assert!(!store.redeem(&ticket, session));
+    }
+
+    #[test]
+    fn resolve_ws_accepts_a_valid_ticket_even_with_no_header_or_query_token() {
+        let store = TicketStore::new();
+        let session = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let ticket = store.issue(session).unwrap();
+        let h = HeaderMap::new();
+
+        assert_eq!(
+            resolve_ws(&store, session, Some(&ticket), &h, None, "secret", true),
+            Ok(Principal::LocalUser)
+        );
+    }
+
+    #[test]
+    fn resolve_ws_falls_back_to_bearer_token_when_no_ticket_is_presented() {
+        let store = TicketStore::new();
+        let session = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let h = headers(&[(header::AUTHORIZATION, "Bearer secret")]);
+
+        assert_eq!(
+            resolve_ws(&store, session, None, &h, None, "secret", true),
+            Ok(Principal::LocalUser)
+        );
+    }
+
+    #[test]
+    fn resolve_ws_rejects_an_invalid_ticket_without_falling_back_to_the_token() {
+        let store = TicketStore::new();
+        let session = sid("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        // A header carrying the *correct* master token is present, but an
+        // invalid ticket must still fail closed -- it must never silently
+        // fall through to the token check.
+        let h = headers(&[(header::AUTHORIZATION, "Bearer secret")]);
+
+        assert_eq!(
+            resolve_ws(&store, session, Some("bogus"), &h, None, "secret", true),
+            Err(AuthError::Unauthorized)
+        );
     }
 }

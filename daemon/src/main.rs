@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use teleportd::api::{build_router, AppState};
-use teleportd::auth::OriginPolicy;
+use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::log::LogLimits;
 use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
 use teleportd::{config, now_ms, presets};
@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         web_dist,
         shutdown: Arc::clone(&shutdown_trigger),
+        ws_tickets: TicketStore::new(),
     });
     spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
@@ -237,18 +238,9 @@ fn load_or_create_token(data_dir: &Path) -> Result<String> {
     let mut bytes = [0u8; TOKEN_BYTES];
     getrandom::getrandom(&mut bytes)
         .map_err(|e| anyhow::anyhow!("reading OS CSPRNG for token: {e}"))?;
-    let token = hex_encode(&bytes);
+    let token = teleportd::auth::hex_encode(&bytes);
     write_owner_only(&path, token.as_bytes())?;
     Ok(token)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(s, "{b:02x}").expect("writing to a String cannot fail");
-    }
-    s
 }
 
 /// Writes `contents` to `path`, then (on Unix) restricts it to `0600`.
