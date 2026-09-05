@@ -26,7 +26,7 @@ backlog pretending to be a spec.
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | **closed, 2026-09-05** — investigated by reading the pinned `axum`/`tungstenite` source directly: neither implements permessage-deflate or any extension negotiation at all (a literal `// TODO` in tungstenite's own handshake code), so this was never a config flag away; not implemented, recorded as infeasible-with-this-stack rather than done |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
-| [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
+| [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | **closed, 2026-09-05** — measured on real CI: a 40-client concurrent reconnect storm cost a live subscriber a 0.995 throughput ratio (no measurable degradation); the per-round design needs no second mitigation |
 | [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound is ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **mechanism root-caused 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)); fixtures stay gated, bound calibration is an open design decision |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
@@ -1169,6 +1169,28 @@ whether the trade needs a second mitigation.
 one busy session) and measure reader-thread latency during it. If it stays acceptable,
 record the number and close this. If not, the fix is bounding *concurrent* catch-ups per
 session (an admission limit or a queue), not reworking the per-round design N4 measures.
+
+**Measured, 2026-09-05, real `ubuntu-latest` CI — closed, acceptable as designed.**
+`daemon/tests/reconnect_storm.rs`: a long-lived control subscriber, already attached and
+live, is drained continuously while 40 fresh clients simultaneously `attach(0)` against
+the same session (a static 12 MiB backlog, so each storm client does several real
+1 MiB catch-up rounds — real disk reads, real fan-out-mutex contention, on a genuine
+multi-threaded Tokio runtime rather than cooperative single-thread interleaving).
+Result: **baseline 94000 B/s, during the storm 93500 B/s — a 0.995 ratio, no measurable
+degradation** on the control subscriber's own throughput, and it was never disconnected,
+never stalled past a bounded timeout, and its replay-plus-live bytes stayed a byte-for-byte
+prefix of the on-disk log throughout. The trade this section worried about (many
+concurrent catch-ups competing for the same short-held mutex the reader thread also
+locks) does not show up as observable jitter on the live path at this concurrency level,
+confirming the per-round design over the rejected up-front-registration alternative was
+the right call without needing a second mitigation (an admission limit or a queue).
+Getting a clean number took three real bugs found and fixed against actual CI first, none
+of them in the product — recorded in the fixture's own doc comments rather than repeated
+here: an unbounded (then a paced) producer overflowing the control subscriber's own queue
+before the storm even started (an ordering bug — attach before backlog was static, not a
+rate problem), and a double-counted byte range in this file's own final correctness check.
+`target_os = "linux"`-gated, same reasoning as `session_catchup.rs` and the N5 fixtures —
+not re-tuned for `macos-latest`'s different timing.
 
 ---
 
