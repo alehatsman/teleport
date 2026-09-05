@@ -1,0 +1,12 @@
+# Rust build output
+src-tauri/target/
+
+# Tauri-generated, regenerated on every build (docs/08-packaging.md#build-pipeline)
+src-tauri/gen/schemas/
+
+# The daemon sidecar, copied in by scripts/copy-sidecar.sh -- never hand-edited,
+# never committed (it's a build product of daemon/, per target triple).
+src-tauri/binaries/
+
+# npm
+node_modules/
