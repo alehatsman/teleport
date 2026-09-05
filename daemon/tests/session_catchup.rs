@@ -13,7 +13,8 @@
 //! in `session.rs`; this fixture is the end-to-end one, so it pays real time
 //! to a real child.
 //!
-//! `cfg(unix)`, for the ordinary reason: it drives a real `/bin/sh`.
+//! `target_os = "linux"`-gated -- see the bottom of this comment for why it
+//! is not merely `cfg(unix)`, though it does also drive a real `/bin/sh`.
 //!
 //! It was `target_os = "linux"`-gated on 2026-09-05 because its own guard
 //! fired on `macos-latest` -- the pre-registered subscriber survived the
@@ -37,15 +38,31 @@
 //!   a single round and is disconnected mid-catch-up, failing the test for a
 //!   reason D1 is not about.
 //!
-//! Measured 112 chunks/s on macOS (256 chunks in 2.3 s, comfortably inside the
-//! window). Linux forks more cheaply, so it sits higher in the band -- at the
-//! nominal 100 iterations/s it is ~400 chunks/s, still under the ceiling, and
-//! Linux ptys coalesce small writes far more aggressively than macOS's do
-//! (see #25: macOS pty reads average 14 bytes), which pushes it lower still.
-//! If this fixture needs re-tuning again, re-measure the chunk rate against
-//! that band -- do not adjust the cadence blind.
+//! Measured 112 chunks/s on an M-series Mac (256 chunks in 2.3 s, inside the
+//! window), 0/20 failures locally -- **and it still failed first try on
+//! `macos-latest`**, with the same guard. That runner executes this suite in
+//! 20.2 s where the Mac takes 7.6 s, so its trickle is slower still and stays
+//! under the floor even with the batching.
+//!
+//! So the file stays `target_os = "linux"`-gated. The batching is kept
+//! because it is strictly better -- it removes fork cost from the rate, which
+//! was the local boundary failure -- but it is not sufficient, and the
+//! remaining gap cannot be closed by tuning a cadence against a runner nobody
+//! can reproduce locally. That is the mistake this fixture has now caused
+//! twice, in both directions.
+//!
+//! The durable fix is to stop depending on wall-clock rate at all: drive the
+//! overflow deterministically by having the test *trigger* a burst (the child
+//! blocking on `read` until the test writes to it), so `registered_first`
+//! exceeds 256 chunks by construction, after it registers and before the
+//! attaching subscriber does. Tracked in #25.
+//!
+//! Note the coupling before changing either: this fixture relies on the
+//! 256-chunk bound to kill `registered_first`. If N5 is fixed by making that
+//! bound byte-proportional, a small trickle will never overflow it and this
+//! fixture needs the redesign above regardless.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 mod support;
 

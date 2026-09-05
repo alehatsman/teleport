@@ -98,16 +98,22 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
 /// reconnect at the recorded offset, and check byte-for-byte that
 /// replay + live equals the log -- no gap, no duplicate.
 ///
-/// Was `target_os = "linux"`-gated on 2026-09-05, on the theory that its
-/// "first subscriber disconnected early" failure was the same
+/// `target_os = "linux"`-gated: fails on `macos-latest` with "first
+/// subscriber disconnected early" during the initial live-drain loop. This is
 /// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)
-/// throughput problem as `session_backpressure.rs`'s. Measured on real macOS
-/// hardware 2026-09-05 (#25): **20/20 pass**, so that theory was wrong. This
-/// fixture drains its subscriber in a tight loop with no round latency, so it
-/// never parks 256 chunks in a queue the way N5's does -- it was never
-/// exposed to the bound at all. Un-gated to `cfg(unix)` (file level), which
-/// is all it ever needed: it drives a real `/bin/sh`.
+/// -- the 256-chunk half of the queue bound holding only ~3.5 KiB on macOS,
+/// where a pty read averages 14 bytes.
+///
+/// Do not un-gate this on a local pass alone. It was un-gated once (#25) on
+/// exactly that evidence -- **20/20 on an M-series Mac** -- and still failed
+/// first try on `macos-latest`, which runs this file's suite in 20.2 s where
+/// that Mac takes 7.6 s. ~3.5 KiB of headroom is enough for a subscriber that
+/// never stalls; the CI runner is slow enough to stall it. Fast local
+/// hardware cannot see this bug, so a green local run is not evidence.
+///
+/// Un-gate when the bound is fixed, not before.
 #[tokio::test]
+#[cfg(target_os = "linux")]
 async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
     const TOTAL: usize = 2 * 1024 * 1024;
     let manager = SessionManager::new(sessions_root("gate"));

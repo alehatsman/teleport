@@ -26,7 +26,7 @@ backlog pretending to be a spec.
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
-| [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound is ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **root-caused on real hardware 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)); bound calibration is a design decision, still open |
+| [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound is ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **mechanism root-caused 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)); fixtures stay gated, bound calibration is an open design decision |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
 No S/W question is blocking any more: S5 — the last one — is **closed** (2026-09-05,
@@ -1131,9 +1131,10 @@ macOS (2026-09-05) rather than shipped false-green or silently weakened.
 throttled `macos-latest` box, plausibly not representative of any real
 client. That predicted a fast local Mac would not reproduce it.
 
-**Root cause (measured, 2026-09-05, M-series Mac).** It reproduces on fast
-hardware -- 3 failures in 20 unloaded runs -- so it was never about runner
-speed, and it is not about `should_register`'s round-trip either. The queue
+**Root cause (measured, 2026-09-05, M-series Mac).** It reproduces even on
+fast hardware -- 3 failures in 20 unloaded runs -- so runner speed is an
+*aggravator, not the cause*, and it is not about `should_register`'s
+round-trip either. The queue
 bound in [`fanout.rs`](../daemon/src/session/fanout.rs) is *whichever trips
 first* of `MAX_QUEUE_CHUNKS = 256` and `MAX_QUEUE_BYTES = 8 MiB`. Those two
 halves are calibrated against wildly different realities:
@@ -1170,34 +1171,52 @@ and the choice is a real trade-off rather than a bug fix:
    needs a replacement for that.
 
 Not guessed at a third time. Tracked in
-[#25](https://github.com/alehatsman/teleport/issues/25); the fixture stays
-`target_os`-gated off macOS until the bound is decided, rather than shipped
-false-green.
+[#25](https://github.com/alehatsman/teleport/issues/25); all three fixtures
+stay `target_os`-gated off macOS until the bound is decided, rather than
+shipped false-green.
 
-**The other two fixtures gated the same day did *not* share this root cause.**
-That was the third wrong assumption, and measurement separated them:
+**The two fixtures gated the same day: measured, and the picture is not what
+either the original theory or the first correction said.**
 
-* `daemon/tests/session_catchup.rs`'s
-  `attaching_far_behind_a_producing_session_reaches_live` (the D1 gate) failed
-  10/20 on macOS with its own guard tripping -- the pre-registered subscriber
-  surviving the catch-up window, i.e. the fixture no longer reproducing D1.
-  The cause was the trickle's rate, not the bound: `sleep 0.01` nominally
-  ticks 100x/s, but forks `sleep` every iteration, and macOS fork+exec holds
-  it to ~31 iterations/s -- **51 chunks/s**, needing 5.0 s to overflow 256
-  chunks against a catch-up window of ~4.8 s. It sat exactly on the boundary.
-  Fixed by emitting several writes per fork so the rate no longer inherits
-  fork cost (112 chunks/s measured, inside a documented band), and **un-gated
-  to `cfg(unix)`**: 0/20 failures.
 * `daemon/tests/session_replay.rs`'s
   `disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate` (the M3
-  gate) passes **20/20 on macOS** and was gated for a cause it never had. It
-  drains its subscriber in a tight loop with no round latency, so it never
-  parks chunks in a queue and was never exposed to the bound. **Un-gated to
-  `cfg(unix)`.**
+  gate) **is** N5, and the original gating was right. It passes **20/20 on an
+  M-series Mac** -- which is why it was briefly un-gated -- and then failed
+  first try on `macos-latest`. ~3.5 KiB of headroom is enough for a subscriber
+  that never stalls; a slow runner stalls it. **Fast local hardware cannot
+  observe this bug at all**, so a green local run is not evidence about it.
+  Stays gated until the bound is fixed.
+* `daemon/tests/session_catchup.rs`'s
+  `attaching_far_behind_a_producing_session_reaches_live` (the D1 gate) is a
+  *different* problem: it fails on its own guard, meaning it has stopped
+  reproducing D1 rather than found a bug. The cause is the trickle's rate.
+  `sleep 0.01` nominally ticks 100x/s but forks `sleep` every iteration, and
+  macOS fork+exec holds it to ~31 iterations/s -- **51 chunks/s**, needing
+  5.0 s to overflow 256 chunks against a catch-up window of ~4.8 s, exactly on
+  the boundary (10/20 locally). Batching writes per fork removes fork cost
+  from the rate and fixes it locally (112 chunks/s, 0/20) but **not** on
+  `macos-latest`, which is slower still. Stays gated.
 
-The lesson worth keeping: "three fixtures failed the same day, therefore one
-root cause" was the assumption that made all three get gated together. One was
-a real product bug, one was a mis-paced fixture, and one was collateral.
+**The methodological lesson, which cost two wrong turns.** "Three fixtures
+failed the same day, therefore one root cause" was the first error -- there
+were two causes, not one. "It passes 20/20 on real hardware, therefore the
+gate was wrong" was the second, and it is the more dangerous of the two: a
+fast M-series Mac is not a slow CI runner, and for a bug whose whole mechanism
+is *a subscriber stalling*, the fast machine is precisely the one that cannot
+reproduce it. Measuring on real hardware settled the *mechanism* (14-byte
+reads, count bound) but could not settle *exposure*. Both need checking, and
+only CI can check the second.
+
+**Do not un-gate either fixture on a local pass.** For the M3 gate, un-gate
+when the bound is fixed. For the D1 gate, the durable fix is to stop depending
+on wall-clock rate: have the test *trigger* the burst (child blocking on
+`read` until the test writes), so `registered_first` exceeds 256 chunks by
+construction, after it registers and before the attaching subscriber does.
+
+Note the coupling: the D1 fixture relies on the 256-chunk bound to kill
+`registered_first`. If N5 is fixed by making that bound byte-proportional, a
+small trickle will never overflow it, and that fixture needs the redesign
+above regardless of which N5 fix is chosen.
 
 ---
 
