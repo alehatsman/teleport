@@ -16,6 +16,7 @@ backlog pretending to be a spec.
 |---|---|---|---|
 | [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | M1 | **resolved, same day (2026-09-05)** — root cause: conhost's ConPTY startup handshake sends a DSR/cursor-position query (`ESC[6n`) and blocks its `ConsoleIoThread` on the reply, which nothing ever sent; confirmed by spike (`s9_dsr_reply.rs`, wait() returns in 6-8ms once answered) and fixed in production (`daemon/src/pty.rs`'s `ConptyDsrProbe`), proven via `daemon/tests/pty_primitive_windows.rs` against the real `pty::spawn` path (63 passed, 0 failed); tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
 | [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **closed, 2026-09-05** — `pty_primitive_windows.rs` now covers echo/write, resize, both exit-code fixtures, and all three terminate fixtures (bounded policy, under load, grandchild-tree-kill), written and run for real on this machine; one Unix fixture (byte-exact raw-mode write) has no Windows equivalent at all and is documented as such, not skipped silently; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
+| [W3](#w3--pty_primitive_windowsrss-own-tests-were-oversubscribing-the-ci-runner) | `pty_primitive_windows.rs`'s own 8 tests ran concurrently, and one precondition's timeout didn't match this runner's real ConPTY throughput | M1 | **closed, 2026-09-05** — two-round fix: serializing the file's tests (contention, real but partial: 161432→193109/262144 bytes) plus giving one precondition the same class of budget its own sibling test already uses for a comparable workload (10s→30s); tracked in [#27](https://github.com/alehatsman/teleport/issues/27) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **closed** — Linux closed 2026-09-04; Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix, confirmed via `pty_primitive_windows.rs` |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
@@ -468,6 +469,71 @@ is now `strip_vt_sequences` in the test file itself, not documented as a design 
 elsewhere since it's test-only machinery. The terminate-latency flake this same suite
 surfaced under concurrent load is recorded under [S4](#s4--does-dropping-the-master-close-the-pseudoconsole)
 instead, since it's about `terminate()`'s timing, not fixture parity.
+
+---
+
+## W3 — `pty_primitive_windows.rs`'s own tests were oversubscribing the CI runner
+
+**Tracked in [alehatsman/teleport#27](https://github.com/alehatsman/teleport/issues/27). Found and
+closed same day, 2026-09-05, same suite as W2.**
+
+Three CI runs in a row failed on `windows-latest` only, always the same test, always the
+same line: `terminate_under_output_load_does_not_deadlock` (`pty_primitive_windows.rs:397`)
+panicking at its own precondition (`pty_primitive_windows.rs:106`, `recv_until`'s timeout
+branch) -- *before* reaching the `terminate()` call the test actually exists to check.
+100% green every time on a dev machine (32 logical CPUs), 3/3 red on the hosted runner.
+
+**Wrong first instinct: just raise the byte target or the timeout.** That's tuning a
+number against a runner this repo cannot reproduce locally, exactly the mistake
+[N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) already warns against --
+"not one to guess... with no way to reproduce this runner's speed locally." Before
+touching the budget, the CI log's own panic payload was pulled (raw job log, not the
+rendered one -- GitHub's own log renderer silently drops an oversized line rather than
+erroring, which is why `gh run view --log` looked truncated) to get the actual number:
+**161432 of the 262144 bytes needed, within the 10s budget** -- about 62% of target, a
+real but *moderate* shortfall, not the 20-for-20-identical wall N5 hit. That distinction
+matters: N5's retries failed identically because retrying doesn't change a relative-speed
+race; this number pointed somewhere fixable instead.
+
+**Root cause:** all 8 tests in this file spawn a real ConPTY child each and `cargo test`'s
+default `--test-threads` (= logical CPUs) runs every `#[test]` in a binary concurrently.
+Invisible on a 32-core dev box; on a hosted `windows-latest` runner (2 vCPUs, shared,
+plausibly slowed further by realtime AV scanning on process/pipe I/O) that's 8-way
+contention for real conhost/ConPTY work on 2 real cores -- explains a ~40% throughput
+deficit far better than "the runner is generically slow," and unlike N5's case, is a cause
+this repo could actually remove rather than work around.
+
+**First fix, round one:** a single `std::sync::Mutex<()>` (`SERIAL` in the test file
+itself, no new dependency -- `std::sync::Mutex::new` is `const`), acquired as the first
+line of all 8 tests, forcing them to run one at a time regardless of `--test-threads`.
+Poisoning is absorbed (`.unwrap_or_else(PoisonError::into_inner)`) on purpose: one test
+panicking while holding the lock must not take the other seven down with it and turn one
+real failure into eight confusing ones. Pushed and re-run against real CI (the only way to
+check anything about this runner's speed) -- **still red, same test, same line**, but
+moved: 193109 of the 262144 bytes now, up from 161432 (62% -> 74%). Contention was real
+and the fix measurably helped; it just wasn't the whole story.
+
+**Round two, same CI run's own log:** `large_text_burst_read_drops_nothing`, serialized
+and running alone (no other test contending), took **30 seconds** for its own for-loop-
+through-ConPTY workload -- near-instant locally. That test already carries a 60s budget
+for that exact reason (`spawned.exit_rx.recv_timeout(Duration::from_secs(60))`, written
+before this precondition was). `terminate_under_output_load_does_not_deadlock`'s
+precondition, by contrast, was reusing `DEFAULT_TIMEOUT` (10s) -- a budget sized for
+"does the child respond at all" checks (echo roundtrip, exit code), never re-examined
+against sustained ConPTY throughput. This runner is genuinely slower at raw ConPTY I/O, not
+only oversubscribed; serializing was necessary but not sufficient.
+
+**Fix, complete:** keep the `SERIAL` mutex (real, measured improvement, addresses genuine
+contention), and give this one precondition its own `BURST_PRECONDITION_TIMEOUT` (30s) --
+matching, not guessing past, the budget its own sibling test already established for a
+bigger comparable workload (200,000 lines / ~1.4 MB vs. this precondition's 256 KiB) in the
+same file. The actual invariant under test -- `terminate()` must return in under 8s,
+`exit_rx`/`eof_rx` bounded at 1s/5s -- is untouched; only the "make sure a real burst is
+already in flight before racing it" precondition got more realistic room. Verified locally
+(8/8 pass, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean);
+real confirmation is this fix's own next `windows-latest` CI run, same as every other
+W-series entry in this file -- this runner's speed still can't be reproduced locally, only
+measured one real run at a time.
 
 ## S1 — Who reaps the child?
 
