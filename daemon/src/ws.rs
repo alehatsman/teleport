@@ -60,20 +60,23 @@ enum StreamMode {
     Control,
 }
 
-/// The route handler: validates the upgrade (credential, Origin/Host,
+/// The route handler: validates the upgrade (Origin/Host, credential,
 /// session existence, mutually-exclusive `after`/`tail`) and, only once all
 /// of that holds, upgrades and hands off to [`run`]. Everything before the
 /// upgrade can still return an ordinary HTTP error response; nothing after
 /// it can, which is exactly why these checks come first.
 ///
+/// Origin/Host is checked *before* the id is even parsed, unconditionally,
+/// same as every other mutating route -- a code-review finding on the PR
+/// this shipped in caught an earlier draft skipping it for a malformed id.
+///
 /// Unlike every other route, the credential isn't resolved through the
 /// generic [`Principal`](crate::auth::Principal) extractor: a ticket is
 /// scoped to a session id, which only this handler's own `Path<String>` has
-/// -- so credential resolution happens explicitly, via
-/// [`auth::resolve_ws`], instead. `id` is parsed (format only, not looked up
-/// yet) before that call for exactly this reason; a malformed id is not
-/// sensitive, so resolving it first leaks nothing a `404` wouldn't already
-/// tell an unauthenticated caller.
+/// -- so credential resolution happens explicitly, via [`auth::resolve_ws`],
+/// once the id is parsed (format only, not looked up yet -- a malformed id
+/// is not sensitive, so it's fine for that parse to happen before the
+/// credential check, just not before Origin).
 pub async fn upgrade(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -81,10 +84,12 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if let Err(e) = state.origin_policy.check(&headers) {
+        return crate::api::ApiError::from(e).into_response();
+    }
     let Ok(session_id) = id.parse::<SessionId>() else {
         return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
     };
-
     if let Err(e) = auth::resolve_ws(
         &state.ws_tickets,
         session_id,
@@ -94,10 +99,6 @@ pub async fn upgrade(
         &state.token,
         state.config.auth_token,
     ) {
-        return crate::api::ApiError::from(e).into_response();
-    }
-
-    if let Err(e) = state.origin_policy.check(&headers) {
         return crate::api::ApiError::from(e).into_response();
     }
     if q.after.is_some() && q.tail.is_some() {

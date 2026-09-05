@@ -212,16 +212,28 @@ fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
 /// origin from being framed by anyone; the rest constrains what the page
 /// itself may load or run. No third-party script/style host is ever in this
 /// list -- that is the whole point.
-const CONTENT_SECURITY_POLICY: &str = concat!(
-    "default-src 'self'; ",
-    "script-src 'self'; ",
-    "style-src 'self' 'unsafe-inline'; ",
-    "connect-src 'self' ws: wss:; ",
-    "img-src 'self' data:; ",
-    "object-src 'none'; ",
-    "base-uri 'none'; ",
+///
+/// `connect-src 'self'` alone -- no bare `ws:`/`wss:` -- covers the app's own
+/// WebSocket: a browser resolves `'self'` for a `ws(s)://` target against the
+/// scheme-mapped origin (ws->http, wss->https), so `stream.ts`'s same-origin
+/// socket already matches it. A bare `ws:`/`wss:` token carries no host
+/// restriction at all -- it would let an XSS payload open a socket to *any*
+/// host, exactly the exfiltration channel this policy exists to close
+/// (caught in code review on the PR this shipped in, before merge).
+///
+/// A plain array, joined once at router-build time, not a hand-punctuated
+/// `concat!` string -- a directive added or reordered here can't silently
+/// merge into its neighbor for want of a trailing `"; "`.
+const CSP_DIRECTIVES: &[&str] = &[
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'none'",
     "frame-ancestors 'none'",
-);
+];
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -239,7 +251,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .fallback(spa_fallback)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+            HeaderValue::from_str(&CSP_DIRECTIVES.join("; "))
+                .expect("CSP directives are all valid header-value bytes"),
         ))
         .with_state(state)
 }
