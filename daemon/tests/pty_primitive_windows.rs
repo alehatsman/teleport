@@ -41,6 +41,20 @@ use teleportd::pty::{self, SpawnSpec, TerminalSession};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+// `terminate_under_output_load_does_not_deadlock`'s own precondition (a real
+// burst in flight before terminate() races it) needs more room than
+// `DEFAULT_TIMEOUT` -- that budget is sized for "does the child respond at
+// all" checks (echo roundtrip, exit code), not sustained ConPTY throughput.
+// `large_text_burst_read_drops_nothing`, right below it in this same file,
+// already gives its own comparable for-loop-through-ConPTY workload (200,000
+// lines, ~1.4 MB, bigger than this precondition's 256 KiB) a 60s budget for
+// exactly this reason. Measured directly on the CI runner this matters for
+// (windows-latest, three failing runs, 2026-09-05): 161432 and, once
+// serialized against W3's contention fix, 193109 of the 262144 bytes needed
+// within the old 10s -- a real, moderate, single-runner throughput deficit,
+// not a guess. This is that same file's own precedent, not a new one.
+const BURST_PRECONDITION_TIMEOUT: Duration = Duration::from_secs(30);
+
 // Every test in this file spawns a real ConPTY child and drives it for real
 // -- there is no mock underneath any of this. `cargo test`'s default
 // `--test-threads` (= logical CPUs) runs all 8 of them concurrently, which
@@ -425,7 +439,9 @@ fn terminate_under_output_load_does_not_deadlock() {
 
     // Let it produce a real burst before terminating, so terminate() is
     // racing an active reader, not an idle one.
-    recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| acc.len() >= 256 * 1024);
+    recv_until(&out_rx, BURST_PRECONDITION_TIMEOUT, |acc| {
+        acc.len() >= 256 * 1024
+    });
 
     let t0 = Instant::now();
     spawned
