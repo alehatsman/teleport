@@ -861,8 +861,19 @@ reattaches. Browser-only mode remains fully functional.
 >
 > Not literally a packaged `tauri build` artifact under a real IDE/CI job -- the spike
 > exercises the identical Win32 call and identical flags standalone, which is the part
-> that was actually in question. Running this inside an actual installed `.msi`/`.exe`
-> launched from a real restrictive job is still open, tracked in `desktop/README.md`.
+> that was actually in question.
+>
+> **Closed, 2026-09-06.** `daemon.rs`'s `job_breakaway_tests` calls the real
+> `spawn_detached`/`spawn_windows_with_breakaway_retry` (not reimplemented flags) against
+> a real `teleportd.exe`, from a test process self-assigned to a real restrictive Job
+> Object -- both the restrictive-job and no-job cases pass, run for real on this machine.
+> Turned up one more real thing along the way: `spawn_detached` accepted `data_dir` but
+> never forwarded it to the child, relying on the daemon's own default resolution to
+> independently land on the same path -- harmless in production, but made isolated
+> testing impossible without running a real daemon against the developer's actual data
+> directory. Fixed by passing `--data-dir` explicitly. Full detail and remaining scope
+> (literally inside a built `.msi`/`.exe`, or a genuine IDE/CI job rather than a
+> self-assigned equivalent) in `desktop/README.md`.
 
 ---
 
