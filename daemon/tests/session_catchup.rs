@@ -4,65 +4,54 @@
 //! docs/10-testing.md#2-sessionoffset-unit-tests.
 //!
 //! The failure this guards against is a livelock, not a crash: register the
-//! subscriber first and it spends its 8 MiB / 256-chunk queue buffering live
-//! output for the whole duration of a replay it has not finished writing,
-//! overflows, and is disconnected *before it ever goes live*. It then
-//! reconnects further behind and fails again. An idle session never shows it.
+//! subscriber first and it spends its whole queue buffering live output for
+//! the duration of a replay it has not finished writing, overflows, and is
+//! disconnected *before it ever goes live*. It then reconnects further behind
+//! and fails again. An idle session never shows it.
 //!
 //! The convergence arithmetic is covered deterministically by the unit tests
 //! in `session.rs`; this fixture is the end-to-end one, so it pays real time
 //! to a real child.
 //!
-//! `target_os = "linux"`-gated -- see the bottom of this comment for why it
-//! is not merely `cfg(unix)`, though it does also drive a real `/bin/sh`.
+//! **This fixture used to depend on a wall-clock rate, and that cost two
+//! wrong turns.** The control subscriber was killed by a trickle out-running
+//! the queue bound during the catch-up window, which made the fixture correct
+//! only inside a rate band: too slow and its own guard fired because nothing
+//! was being reproduced; too fast and the *attaching* subscriber was
+//! disconnected mid-catch-up for a reason D1 is not about. It was tuned
+//! twice -- once by slowing the rounds, once by batching the trickle's writes
+//! to take `fork` cost out of the rate -- and both times it passed locally and
+//! failed on `macos-latest`, a runner nobody can reproduce. Chasing a third
+//! calibration was not going to work.
 //!
-//! It was `target_os = "linux"`-gated on 2026-09-05 because its own guard
-//! fired on `macos-latest` -- the pre-registered subscriber survived the
-//! catch-up window, so the fixture was no longer reproducing D1. Measured on
-//! real macOS hardware 2026-09-05 (#25): the cause was the trickle's rate,
-//! not the platform. `sleep 0.01` nominally ticks 100x/s, but each iteration
-//! forks `sleep`, and on macOS fork+exec is expensive enough to hold the loop
-//! to ~31 iterations/s -- **51 chunks/s**, needing 5.0 s to reach the 256-chunk
-//! bound against a catch-up window of only ~4.8 s. The fixture sat directly on
-//! that boundary and failed about half of 20 runs.
+//! It is now driven by **bytes, not rate**. The child blocks on a read from
+//! its pty until the test writes to it, then emits a `BURST` larger than the
+//! whole queue bound. The control subscriber is registered across all of it
+//! and never drains, so it is disconnected by construction on any hardware,
+//! at any speed. Nothing here is calibrated against how fast anything runs.
 //!
-//! The trickle now emits `TICKS_PER_SLEEP` writes per fork, which decouples
-//! the rate from fork cost. The rate must stay inside a band, and both edges
-//! are real failures rather than flakes:
+//! The trade that buys: the burst is drained to completion *before* the
+//! catch-up walk starts, so the control dies just before the window rather
+//! than inside it. That is deliberate. Letting the burst land during the walk
+//! reintroduces a rate dependency in the other direction -- a producer that
+//! out-runs the client for four consecutive rounds trips
+//! `MAX_STALLED_ROUNDS`, `should_register` clamps and reports a hole, and
+//! `support::catch_up`'s `caught_up` assertion fires. What the control proves
+//! is that the register-first ordering is fatal; *when* it dies was never the
+//! claim, and it is no longer load-bearing.
 //!
-//! * **> ~53 chunks/s** -- or `registered_first` never overflows its
-//!   256-chunk queue inside the catch-up window, and the guard below fires
-//!   because nothing is being reproduced.
-//! * **< ~640 chunks/s** -- or the *attaching* subscriber, which is not
-//!   draining for `ROUND_LATENCY` at a time, overflows the same bound during
-//!   a single round and is disconnected mid-catch-up, failing the test for a
-//!   reason D1 is not about.
+//! The session is still producing throughout the walk -- that is the trickle,
+//! which now only has to be non-zero rather than land inside a band.
 //!
-//! Measured 112 chunks/s on an M-series Mac (256 chunks in 2.3 s, inside the
-//! window), 0/20 failures locally -- **and it still failed first try on
-//! `macos-latest`**, with the same guard. That runner executes this suite in
-//! 20.2 s where the Mac takes 7.6 s, so its trickle is slower still and stays
-//! under the floor even with the batching.
-//!
-//! So the file stays `target_os = "linux"`-gated. The batching is kept
-//! because it is strictly better -- it removes fork cost from the rate, which
-//! was the local boundary failure -- but it is not sufficient, and the
-//! remaining gap cannot be closed by tuning a cadence against a runner nobody
-//! can reproduce locally. That is the mistake this fixture has now caused
-//! twice, in both directions.
-//!
-//! The durable fix is to stop depending on wall-clock rate at all: drive the
-//! overflow deterministically by having the test *trigger* a burst (the child
-//! blocking on `read` until the test writes to it), so `registered_first`
-//! exceeds 256 chunks by construction, after it registers and before the
-//! attaching subscriber does. Tracked in #25.
-//!
-//! Note the coupling before changing either: this fixture relies on the
-//! 256-chunk bound to kill `registered_first`. If N5 is fixed by making that
-//! bound byte-proportional, a small trickle will never overflow it and this
-//! fixture needs the redesign above regardless.
+//! Un-gated from `target_os = "linux"` to `cfg(unix)` once the queue bound
+//! became a byte budget
+//! ([N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)).
+//! The old count half is what this fixture used to reach: `tick\n` is 5 bytes,
+//! so 256 chunks tripped at ~5 KiB -- on Linux too, not just macOS. Fixing the
+//! bound removed that, which is why the redesign above shipped in the same
+//! change rather than after it.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod support;
 
@@ -70,19 +59,29 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teleportd::pty::SpawnSpec;
-use teleportd::session::SessionManager;
+use teleportd::session::{SessionManager, MAX_QUEUE_BYTES};
 
-const RECV_TIMEOUT: Duration = Duration::from_secs(10);
-/// Backlog to attach behind: more than the 8 MiB queue bound, so a
-/// pre-registered subscriber could not have held it even if it were idle.
+const RECV_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backlog to attach behind. Sized in catch-up rounds rather than against the
+/// queue bound: it is what makes this attach take many bounded rounds instead
+/// of one, which is the shape D1 is about.
 const BACKLOG: u64 = 12 * 1024 * 1024;
-/// What one catch-up round costs this "client". Twelve rounds of it is ~3 s,
-/// during which the trickle below emits well past the 256-chunk half of the
-/// bound -- which is what makes the old ordering fail here, and fail fast.
-const ROUND_LATENCY: Duration = Duration::from_millis(400);
-/// Writes the trickle emits between forks of `sleep`. Keeps the live chunk
-/// rate inside the band documented in the module doc on both platforms,
-/// instead of inheriting whatever `fork` happens to cost.
+/// Live output the child emits on demand, once the control subscriber is
+/// registered. Half again the queue bound, so that subscriber overflows on
+/// any platform whatever its pty read granularity happens to be -- the whole
+/// point of driving this with bytes instead of a rate.
+const BURST: u64 = 3 * MAX_QUEUE_BYTES as u64 / 2;
+/// The byte the test writes to release the burst. Newline because the child
+/// waits on `read`, and the pty is in raw mode with echo off so it neither
+/// needs translating nor lands back in the output log.
+const TRIGGER: &[u8] = b"\n";
+/// What one catch-up round costs this "client" -- a slow link, so the walk is
+/// a real sequence of bounded rounds rather than a memcpy. Its value is no
+/// longer load-bearing: nothing is racing it.
+const ROUND_LATENCY: Duration = Duration::from_millis(50);
+/// Writes the trickle emits between forks of `sleep`, so its rate is set by
+/// the batch rather than by what `fork` costs on this OS. Only has to be
+/// non-zero now.
 const TICKS_PER_SLEEP: u32 = 4;
 
 fn sessions_root(name: &str) -> PathBuf {
@@ -98,12 +97,17 @@ fn sessions_root(name: &str) -> PathBuf {
 
 /// A session in exactly the shape D1 is about: a large backlog already on
 /// disk, and a child that is *still emitting* while the client catches up.
-/// The trickle is deliberately many small writes rather than a few large
-/// ones -- a slow consumer trips the count half of the queue bound long
-/// before the byte half, and the count half is the cheaper one to reach in a
-/// test. `TICKS_PER_SLEEP` writes go out per fork so the rate is set by the
-/// batch rather than by what `fork` costs on this OS; see the module doc for
-/// the band it has to stay inside.
+///
+/// Three phases, in order. The backlog, so there is something to walk. Then a
+/// blocking `read` on the pty, which is the whole trick -- it lets the test
+/// decide, rather than guess, when live output starts, so the control
+/// subscriber below is provably registered for all of it. Then `BURST`, and
+/// finally the trickle that keeps the session producing for the rest of the
+/// walk.
+///
+/// `read` rather than `head -n 1`: it is a shell builtin that consumes one
+/// byte at a time from a non-seekable fd, so it cannot swallow output the
+/// test has not accounted for.
 fn spawn_backlog_then_trickle(
     manager: &SessionManager,
 ) -> std::sync::Arc<teleportd::session::Session> {
@@ -112,6 +116,8 @@ fn spawn_backlog_then_trickle(
         "-c".to_string(),
         format!(
             "stty raw -echo; yes | head -c {BACKLOG}; \
+             read _trigger; \
+             yes | head -c {BURST}; \
              while :; do i=0; \
              while [ $i -lt {TICKS_PER_SLEEP} ]; do printf 'tick\\n'; i=$((i+1)); done; \
              sleep 0.01; done"
@@ -150,26 +156,40 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     }
 
     // A subscriber registered *before* its replay is written -- the ordering
-    // D1 rejects. Nothing reads it until catch-up is over, which is exactly
-    // what a client on a slow link does to its own queue. It must not
-    // survive; if it does, this fixture has stopped reproducing the failure
-    // it exists to guard against, and the assertions below prove nothing.
+    // D1 rejects. Nothing reads it, ever, which is exactly what a client on a
+    // slow link does to its own queue while it writes a replay out.
     let registered_first = session.subscribe();
+
+    // Release the burst, and let it land in full before the walk starts.
+    // `registered_first` is registered across every byte of it and drains
+    // none, and `BURST` is half again the entire queue bound, so it overflows
+    // on any platform at any speed. This is the one thing the fixture used to
+    // leave to a wall-clock race; see the module doc.
+    session.write(TRIGGER).expect("write the burst trigger");
+    let deadline = Instant::now() + RECV_TIMEOUT;
+    while session.next_offset() < BACKLOG + BURST {
+        assert!(
+            Instant::now() < deadline,
+            "the child never emitted the burst"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let replay = session.attach(0).expect("attach at 0");
     assert_eq!(replay.replay_from, 0);
     let ready_next_offset = replay.next_offset;
-    assert!(ready_next_offset >= BACKLOG);
+    assert!(ready_next_offset >= BACKLOG + BURST);
 
     // Catch up the way a client on a slow link does: write each round out
-    // before asking for the next. `ROUND_LATENCY` is the "network" -- slow
-    // enough that the trickle above outpaces the count half of the queue
-    // bound during the walk, which is what makes the old ordering fail here.
+    // before asking for the next, with `ROUND_LATENCY` standing in for the
+    // network. The child keeps trickling throughout, so this is a catch-up
+    // against a session that is still producing, which is the D1 shape.
     let (mut acc, attach, rounds) = support::catch_up(replay, ROUND_LATENCY).await;
 
     assert!(
         rounds > 8,
-        "a {BACKLOG}-byte backlog must take several bounded rounds, got {rounds}"
+        "a {BACKLOG}-byte backlog plus a {BURST}-byte burst must take several \
+         bounded rounds, got {rounds}"
     );
     let mut end = attach.replay_to();
     assert_eq!(
@@ -200,8 +220,9 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
         end += chunk.bytes.len() as u64;
     }
 
-    // The control: the up-front subscriber blew its queue during the same
-    // catch-up window this attach walked through unharmed.
+    // The control: the up-front subscriber blew its queue on live output it
+    // had to buffer while owing its client a replay -- the same session this
+    // attach walked through unharmed. Draining to `None` is the disconnect.
     let old_ordering_died = tokio::time::timeout(RECV_TIMEOUT, async {
         let mut sub = registered_first;
         while sub.recv().await.is_some() {}
@@ -209,8 +230,8 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     .await;
     assert!(
         old_ordering_died.is_ok(),
-        "the pre-registered subscriber survived the catch-up window, so this fixture is no \
-         longer reproducing D1 -- make the child noisier or the rounds slower before trusting it"
+        "the pre-registered subscriber survived a {BURST}-byte burst against a \
+         {MAX_QUEUE_BYTES}-byte queue bound -- the bound is not being enforced"
     );
 
     let on_disk = std::fs::read(session.log_path()).expect("read output.vt");
