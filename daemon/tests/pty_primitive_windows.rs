@@ -41,6 +41,30 @@ use teleportd::pty::{self, SpawnSpec, TerminalSession};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Every test in this file spawns a real ConPTY child and drives it for real
+// -- there is no mock underneath any of this. `cargo test`'s default
+// `--test-threads` (= logical CPUs) runs all 8 of them concurrently, which
+// is invisible on a dev box but not on GitHub's `windows-latest` runner
+// (2 vCPUs): `terminate_under_output_load_does_not_deadlock` was measured
+// there reaching only 161432 of the 262144 bytes its precondition needs
+// within `DEFAULT_TIMEOUT`, three CI runs in a row, same line, every time --
+// while passing instantly, every time, on any box with real headroom (see
+// [W2](../../docs/15-open-questions.md#w2--windows-fixture-parity-not-yet-attempted)).
+// That is 8-way oversubscription on 2 real cores, not a broken assumption
+// about ConPTY throughput. Serializing this file's tests removes the
+// contention at its source instead of padding the byte/time budget to
+// survive it blind against a runner this repo cannot reproduce locally.
+// `.unwrap_or_else(...)` rather than `.unwrap()`: one test panicking while
+// holding this must not poison the lock and take the rest of the file down
+// with it -- that would turn one real failure into eight confusing ones.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn temp_dir() -> PathBuf {
     std::env::temp_dir()
 }
@@ -218,6 +242,7 @@ fn pids_matching(marker: &str) -> Vec<u32> {
 
 #[test]
 fn echo_roundtrip() {
+    let _guard = serialize();
     let (spawned, out_rx) = spawn_interactive_cmd(80, 24);
     spawned.session.write(b"echo hello\r\n").unwrap();
     recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "hello"));
@@ -225,6 +250,7 @@ fn echo_roundtrip() {
 
 #[test]
 fn large_text_burst_read_drops_nothing() {
+    let _guard = serialize();
     // No `yes`, and no raw mode to avoid ONLCR inflation (see the module doc
     // on why raw-mode byte-exactness isn't attempted at all here) -- a
     // `for /L` loop is cmd.exe's own repeat-N-times primitive, and CRLF line
@@ -285,6 +311,7 @@ fn large_text_burst_read_drops_nothing() {
 
 #[test]
 fn resize_is_observed_by_the_child() {
+    let _guard = serialize();
     let (spawned, out_rx) = spawn_interactive_cmd(80, 24);
     spawned.session.resize(120, 40).unwrap();
     // resize() hands off to the control thread and returns immediately
@@ -309,6 +336,7 @@ fn resize_is_observed_by_the_child() {
 
 #[test]
 fn clean_exit_zero_is_recorded_via_wait_not_eof() {
+    let _guard = serialize();
     let (spawned, _out_rx) = spawn_cmd_script("exit 0", 80, 24);
     let exit = spawned
         .exit_rx
@@ -324,6 +352,7 @@ fn clean_exit_zero_is_recorded_via_wait_not_eof() {
 
 #[test]
 fn nonzero_exit_is_recorded_accurately() {
+    let _guard = serialize();
     let (spawned, _out_rx) = spawn_cmd_script("exit 7", 80, 24);
     let exit = spawned
         .exit_rx
@@ -336,6 +365,7 @@ fn nonzero_exit_is_recorded_accurately() {
 
 #[test]
 fn terminate_reaches_exited_within_the_bounded_policy() {
+    let _guard = serialize();
     // A direct child with nothing else attached, blocked well past any
     // bound this test waits on -- `ping`'s own countdown, not a background
     // job (that's the next fixture).
@@ -386,6 +416,7 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
 
 #[test]
 fn terminate_under_output_load_does_not_deadlock() {
+    let _guard = serialize();
     // A large-but-finite loop stands in for Unix's `yes`: cmd.exe has no
     // infinite-repeat builtin reachable in one `/c` script, but 50 million
     // iterations of `echo y` produces output continuously for far longer
@@ -421,6 +452,7 @@ fn terminate_under_output_load_does_not_deadlock() {
 
 #[test]
 fn terminate_kills_the_grandchild_process_tree() {
+    let _guard = serialize();
     // Windows equivalent of the Unix fixture of the same name -- but the
     // mechanism under test is different, per docs/10-testing.md's platform
     // matrix note ("Windows: attached character-mode clients terminate with
