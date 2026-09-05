@@ -19,6 +19,12 @@ use super::fanout::{Fanout, Subscription};
 /// live output while the client writes that last stretch out -- which is the
 /// headroom D1 says the design was missing
 /// (docs/04-api-protocol.md#catch-up--register-late-not-early).
+///
+/// This derivation is only honest while the queue bound is *actually* a byte
+/// budget. It was not, until [N5](../../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half): a
+/// second, count-based half of the bound governed on macOS at ~3.5 KiB, so
+/// this handed subscribers live with a debt 300x larger than the queue they
+/// were about to be given.
 pub const LIVE_GAP_BYTES: u64 = super::fanout::MAX_QUEUE_BYTES as u64 / 8;
 
 /// Bytes one catch-up round reads off the fan-out mutex. Doubles as the

@@ -27,7 +27,7 @@ backlog pretending to be a spec.
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
-| [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound is ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **mechanism root-caused 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)); fixtures stay gated, bound calibration is an open design decision |
+| [N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) | The `min(256 chunks, 8 MiB)` queue bound was ~2300x tighter on macOS than on Linux, because macOS pty reads are tiny | M4 | **resolved 2026-09-05** ([#25](https://github.com/alehatsman/teleport/issues/25)): one byte budget that charges per-chunk overhead; all three fixtures un-gated |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
 No S/W question is blocking any more: S5 — the last one — is **closed** (2026-09-05,
@@ -485,7 +485,7 @@ branch) -- *before* reaching the `terminate()` call the test actually exists to 
 
 **Wrong first instinct: just raise the byte target or the timeout.** That's tuning a
 number against a runner this repo cannot reproduce locally, exactly the mistake
-[N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) already warns against --
+[N5](#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half) already warns against --
 "not one to guess... with no way to reproduce this runner's speed locally." Before
 touching the budget, the CI log's own panic payload was pulled (raw job log, not the
 rendered one -- GitHub's own log renderer silently drops an oversized line rather than
@@ -1221,25 +1221,49 @@ Confirmed by discrimination, not inference: raising `MAX_QUEUE_CHUNKS` alone
 (65536 slots, byte budget untouched) takes the fixture from 3/20 failures to
 **20/20 passing**.
 
-**Still open -- a design decision, not a diagnosis.** Two candidate fixes,
-and the choice is a real trade-off rather than a bug fix:
+**Resolved (2026-09-05): the bound is now a single byte budget that charges
+per-chunk overhead.** Option 2 below, mechanised so it needs no second number.
+`publish` acquires `payload.len() + CHUNK_OVERHEAD` permits (64 B: a channel
+slot plus that queue's share of the shared `Arc<[u8]>` header) and
+`Subscription::recv` returns exactly that, so the semaphore bounds *memory*
+rather than payload bytes. The channel's capacity is derived from the same
+budget (`MAX_QUEUE_BYTES / CHUNK_OVERHEAD`) and so cannot trip first -- it
+exists because `mpsc::channel` needs a number, not as a second bound.
 
-1. **Coalesce reads in `pty.rs`** before publishing. This also addresses the
-   throughput half of the problem -- 737k chunks per 10 MiB means 737k log
-   appends, mutex acquisitions, `Arc` allocations and per-subscriber channel
-   sends, which is genuine overhead this design pays only on macOS. But
-   coalescing buys throughput with latency, on the interactive echo path,
-   which is the one place this product cannot afford it.
-2. **Make the count bound byte-proportional**, or drop it in favour of the
-   byte budget the semaphore already enforces precisely. Cheaper and safer,
-   but the count bound is what caps per-chunk overhead (each queued chunk
-   costs its `Arc` plus a channel slot regardless of payload), so removing it
-   needs a replacement for that.
+| chunk size | headroom before | after |
+| --- | --- | --- |
+| 14 B (macOS) | 3.5 KiB | ~1.5 MiB of payload, 8 MiB accounted |
+| 64 KiB (Linux) | 8 MiB | 8 MiB -- overhead is 0.1%, unchanged |
 
-Not guessed at a third time. Tracked in
-[#25](https://github.com/alehatsman/teleport/issues/25); all three fixtures
-stay `target_os`-gated off macOS until the bound is decided, rather than
-shipped false-green.
+**What decided it between the two candidates** was not the measurement, which
+fits either. It was that `replay.rs` already derives the entire catch-up
+convergence policy from the byte half:
+`LIVE_GAP_BYTES = MAX_QUEUE_BYTES / 8`, with `should_register` handing a
+subscriber live at `gap <= 1 MiB` on the stated premise that seven eighths of
+its queue stay free. On macOS that subscriber's queue held 3.5 KiB. The count
+bound was not merely a second bound disagreeing with the first -- it silently
+invalidated a documented invariant belonging to another module. Bytes is the
+unit this design reasons in; `256` was an artifact of `mpsc::channel`
+requiring a capacity argument. Coalescing reads would have *hidden* that
+rather than made `LIVE_GAP_BYTES` true.
+
+Regression coverage is `fanout.rs`'s
+`tiny_chunks_get_the_budget_not_a_slot_count`, which is deterministic and
+needs no pty: a never-drained subscriber must accept exactly
+`MAX_QUEUE_BYTES / queue_cost(14)` chunks and then be dropped -- both that it
+is far past 256, and that it is still bounded.
+
+**The remaining candidate, now its own question.** *Coalesce reads in
+`pty.rs`* before publishing: 737k chunks per 10 MiB means 737k log appends,
+mutex acquisitions, `Arc` allocations and per-subscriber sends, genuine
+overhead paid only on macOS. That is a *throughput* question, not a bound
+question, and it is cheaper than this section first assumed -- `libc` is
+already a `cfg(unix)` dependency, so a zero-timeout `poll()` could merge only
+*already-available* bytes and cost the interactive echo path nothing, which is
+the objection that made coalescing look unaffordable. Unverified blocker:
+`try_clone_reader()` hands back a bare `Box<dyn Read + Send>` with no fd, so
+whether this is reachable through portable_pty 0.9 is unknown. Filed
+separately.
 
 **The two fixtures gated the same day: measured, and the picture is not what
 either the original theory or the first correction said.**
@@ -1273,16 +1297,29 @@ reproduce it. Measuring on real hardware settled the *mechanism* (14-byte
 reads, count bound) but could not settle *exposure*. Both need checking, and
 only CI can check the second.
 
-**Do not un-gate either fixture on a local pass.** For the M3 gate, un-gate
-when the bound is fixed. For the D1 gate, the durable fix is to stop depending
-on wall-clock rate: have the test *trigger* the burst (child blocking on
-`read` until the test writes), so `registered_first` exceeds 256 chunks by
-construction, after it registers and before the attaching subscriber does.
+**All three fixtures are un-gated as of the fix**, and the D1 one was
+redesigned in the same change rather than after it, because the coupling ran
+deeper than first recorded: `session_catchup.rs` relied on the *count* half to
+kill its control subscriber, and its trickle is `tick\n` -- 5 bytes -- so it
+was tripping 256 chunks at ~5 KiB **on Linux too**, not only on macOS. Making
+the bound a byte budget would have needed ~890 s of trickle against a ~4.8 s
+window there. It now drives the kill with bytes instead of a rate: the child
+blocks on `read` until the test writes to it, then emits a burst half again
+the size of the whole bound, with the control subscriber registered across all
+of it. Nothing in that fixture is calibrated against how fast anything runs
+any more.
 
-Note the coupling: the D1 fixture relies on the 256-chunk bound to kill
-`registered_first`. If N5 is fixed by making that bound byte-proportional, a
-small trickle will never overflow it, and that fixture needs the redesign
-above regardless of which N5 fix is chosen.
+That redesign front-loads the burst -- it lands before the catch-up walk
+rather than during it, because letting it land during the walk reintroduces a
+rate dependency in the other direction (a producer out-running the client for
+four consecutive rounds trips `MAX_STALLED_ROUNDS`, and the walk clamps with a
+reported hole). The control's claim is that the register-first ordering is
+fatal; *when* it dies was never the claim.
+
+**The bar this section set for itself, met:** green on `macos-latest`, not
+just locally. 20/20 local iterations of all three fixtures is recorded here
+only because it is necessary, not because it was ever sufficient -- that is
+the mistake above, and it is exactly the evidence that misled once already.
 
 ---
 

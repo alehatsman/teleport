@@ -79,7 +79,7 @@ mod manager;
 mod replay;
 mod types;
 
-pub use fanout::Subscription;
+pub use fanout::{Subscription, MAX_QUEUE_BYTES};
 pub use manager::{CreateError, LiveSessions, SessionManager};
 pub use replay::{
     Attach, AttachError, HistoryReplay, Replay, ReplayStep, LIVE_GAP_BYTES, REPLAY_ROUND_BYTES,
@@ -176,10 +176,10 @@ pub struct Session {
 
 impl Session {
     /// Registers a new subscriber and returns its receive end, with no
-    /// replay. Bounded to `MAX_QUEUE_CHUNKS` chunks / `MAX_QUEUE_BYTES`
-    /// bytes, whichever trips first (docs/03-pty-layer.md#backpressure); a
-    /// subscriber that falls behind is disconnected (`recv()` returns
-    /// `None`), never blocks the reader.
+    /// replay. Bounded to [`MAX_QUEUE_BYTES`] of queued output, counting a
+    /// fixed per-chunk overhead alongside each payload
+    /// (docs/03-pty-layer.md#backpressure); a subscriber that falls behind is
+    /// disconnected (`recv()` returns `None`), never blocks the reader.
     ///
     /// Use [`attach`](Self::attach) for anything that needs history -- this
     /// one has no defined starting offset, so what happened before the call

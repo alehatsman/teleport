@@ -156,8 +156,19 @@ timer.
 
 ## Backpressure
 
-Every subscriber has a **bounded** outbound queue (start at 256 chunks / 8 MiB,
-whichever trips first). Overflow closes that connection; it never blocks the reader.
+Every subscriber has a **bounded** outbound queue: one 8 MiB memory budget, which
+each queued chunk is charged its payload *plus* a fixed per-chunk overhead against
+(a channel slot and its share of the shared `Arc` header). Overflow closes that
+connection; it never blocks the reader.
+
+One bound, in one unit, deliberately. It used to be two — 256 chunks *or* 8 MiB,
+whichever tripped first — and the two halves were calibrated against different
+realities: a Linux pty read coalesces into tens of KiB, a macOS one averages 14
+bytes, so the count half governed there at ~3.5 KiB against a design promising
+8 MiB ([N5](15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)).
+Charging the overhead is what the count half was actually protecting — per-chunk
+cost — and it does that without a second number to get wrong. The channel's own
+capacity remains only as a backstop that cannot trip first.
 
 ```text
 PTY output

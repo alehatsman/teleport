@@ -98,22 +98,21 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
 /// reconnect at the recorded offset, and check byte-for-byte that
 /// replay + live equals the log -- no gap, no duplicate.
 ///
-/// `target_os = "linux"`-gated: fails on `macos-latest` with "first
-/// subscriber disconnected early" during the initial live-drain loop. This is
+/// Was `target_os = "linux"`-gated: it failed on `macos-latest` with "first
+/// subscriber disconnected early" during the initial live-drain loop, which
+/// was
 /// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)
 /// -- the 256-chunk half of the queue bound holding only ~3.5 KiB on macOS,
-/// where a pty read averages 14 bytes.
+/// where a pty read averages 14 bytes. Un-gated with the fix that made the
+/// bound a byte budget.
 ///
-/// Do not un-gate this on a local pass alone. It was un-gated once (#25) on
-/// exactly that evidence -- **20/20 on an M-series Mac** -- and still failed
-/// first try on `macos-latest`, which runs this file's suite in 20.2 s where
-/// that Mac takes 7.6 s. ~3.5 KiB of headroom is enough for a subscriber that
-/// never stalls; the CI runner is slow enough to stall it. Fast local
-/// hardware cannot see this bug, so a green local run is not evidence.
-///
-/// Un-gate when the bound is fixed, not before.
+/// It was also un-gated once *before* that fix, on 20/20 local passes, and
+/// failed first try on the runner. Worth keeping in mind if this ever goes
+/// red again: this file's suite takes 20.2 s on `macos-latest` and 7.6 s on
+/// an M-series Mac, and a subscriber that never stalls never trips a queue
+/// bound, so a green local run says very little here. Whatever the next
+/// theory is, get it green on the runner before believing it.
 #[tokio::test]
-#[cfg(target_os = "linux")]
 async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
     const TOTAL: usize = 2 * 1024 * 1024;
     let manager = SessionManager::new(sessions_root("gate"));
