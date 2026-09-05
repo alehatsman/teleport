@@ -123,10 +123,19 @@ rather than silently papered over:
   `bundle.windows.nsis.installMode`/a distinct install dir, or a
   stop-daemon-before-upgrade hook, are the candidate fixes, but this needs a
   real upgrade-over-a-running-daemon repro first, not a guessed fix.
-- **macOS/Windows autostart** (`src/autostart/{macos,windows}.rs`) are
-  templated but unverified on real hardware. Unchanged by the macOS gate run
-  above -- that exercised the launch/detach/reattach path, which never touches
-  the LaunchAgent.
+- **Windows autostart** (`src/autostart/windows.rs`) is templated but
+  unverified on real hardware.
+  **macOS autostart closed, 2026-09-06**: `autostart/macos.rs`'s
+  `launchagent_tests` drives the real `install()`/`uninstall()` against a real
+  `~/Library/LaunchAgents`, `launchctl` and `teleportd`. `RunAtLoad` brings a
+  serving daemon up, `KeepAlive` relaunches it after a crash, and a graceful
+  SIGTERM is *not* undone by the agent -- so the tray's "Stop daemon" is not
+  silently defeated by having autostart on. `#[ignore]`d (needs a real GUI
+  login session): `cargo test -- --ignored --test-threads=1`. One gap found
+  and documented rather than fixed: `KeepAlive { Crashed: true }` does not
+  treat `SIGKILL` as a crash, so a force-quit or OOM kill leaves the daemon
+  down until next login -- details in
+  [11-mvp-plan.md#m10](../docs/11-mvp-plan.md#m10--tauri-shell).
 - **Tray "Stop daemon" confirmation** (validation item 2) has only been run on
   Linux; it needs a human click, so the macOS pass above could not cover it.
   The endpoint underneath it (`POST /api/v1/shutdown`) *was* driven live on
