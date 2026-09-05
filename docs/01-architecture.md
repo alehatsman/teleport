@@ -83,14 +83,15 @@ bug.
 
 ## Repository layout
 
-One repo holds the whole product: daemon, web app, desktop shell, native apps, and the
-cloud infrastructure that arrives in v2. Directories that are empty in the MVP are listed
-anyway, so nobody has to guess where a thing goes.
+One repo holds the whole product: daemon, web app, CLI client, desktop shell, native
+apps, and the cloud infrastructure that arrives in v2. Directories that are empty in
+the MVP are listed anyway, so nobody has to guess where a thing goes.
 
 ```text
 teleport/
 ├── daemon/       teleportd — the only component that owns a PTY        [MVP]
 ├── web/          Svelte SPA, served by the daemon                      [MVP]
+├── cli/          teleport — ssh-like attach from a terminal             [MVP — doc 11#m11]
 ├── desktop/      thin Tauri shell                                      [MVP, last]
 ├── mobile/       native iOS + Android shells (WebView terminal)        [v2 — doc 13]
 ├── cloud/        identity, device directory, pairing, relay, push      [v2 — doc 14]

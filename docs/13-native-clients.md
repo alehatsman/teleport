@@ -44,6 +44,12 @@ This is not an accident and it should be preserved deliberately:
 The only thing that would break this is adding a browser assumption to the protocol.
 Do not.
 
+**The CLI client** ([11-mvp-plan.md#m11](11-mvp-plan.md#m11--cli-client), MVP scope —
+unlike everything else in this doc) is the proof: it needs none of the WebView
+discussion below, because the user's own terminal already is the VT emulator. If the
+CLI ever needed a special case from the daemon, that would be this doc's warning sign
+firing for real.
+
 ## Four obligations the MVP must honor
 
 Each is small, and each is expensive to retrofit.
