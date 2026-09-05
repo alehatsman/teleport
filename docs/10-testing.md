@@ -43,7 +43,12 @@ equivalents chosen per platform.
 - resize and confirm the child observes it (`stty size` on Unix, `mode con` on Windows)
 - child exits normally → exit code `0` recorded. The code comes from the child wait,
   **not** from EOF on the master — the two are separate signals and can arrive in
-  either order ([S2](15-open-questions.md#s2--eof-is-not-exit)). Windows coverage:
+  either order ([S2](15-open-questions.md#s2--eof-is-not-exit)). *How far* apart they
+  can land is OS-specific, and the fixture is split accordingly: Linux exempts ptys from
+  the session-leader vhangup, so EOF can lag exit indefinitely, while macOS/XNU revokes
+  the controlling tty outright and EOF coincides with exit
+  ([S5](15-open-questions.md#s5--a-detached-grandchild-cannot-hold-a-pty-past-its-parent-on-macos)).
+  Windows coverage:
   `pty_primitive_windows.rs`, proven against the real fix for
   [W1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows).
 - child exits nonzero → exit code recorded accurately. Same Windows coverage as above

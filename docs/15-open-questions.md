@@ -20,7 +20,7 @@ backlog pretending to be a spec.
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows unblocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows)'s fix |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **closed, 2026-09-05** — Unix closed 2026-09-04; Windows re-run against the real fix via W2's `terminate_kills_the_grandchild_process_tree` (`pty_primitive_windows.rs`): dropping the master takes an attached grandchild down too, in ~0.5s, through the real `terminate()` path |
-| [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware; tracked in [#11](https://github.com/alehatsman/teleport/issues/11) |
+| [S5](#s5--a-detached-grandchild-cannot-hold-a-pty-past-its-parent-on-macos) | A detached grandchild's survival on macOS | M1 | **closed** — root-caused on real hardware 2026-09-05: XNU revokes the ctty on session-leader exit; not a flake, a kernel difference. Fixture un-gated with a macOS twin; [#11](https://github.com/alehatsman/teleport/issues/11) |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
@@ -29,8 +29,9 @@ backlog pretending to be a spec.
 | [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
-S5 is still **blocking**; W1, W2, and S4 all resolved the same day they were found
-blocking. The rest are decisions that must be *made* before their milestone, not
+No S/W question is blocking any more: S5 — the last one — is **closed** (2026-09-05,
+root-caused on real macOS hardware rather than guessed at from CI), joining W1, W2 and
+S4, all of which resolved the same day they were found blocking. The rest are decisions that must be *made* before their milestone, not
 necessarily *built*. (D1 — replay sharing the live subscriber budget — is **closed**: the
 fix is the catch-up loop in [04-api-protocol.md](04-api-protocol.md#catch-up--register-late-not-early),
 built and gated 2026-09-04.) **W1 was the one that mattered most, and is now resolved**
@@ -810,50 +811,130 @@ over: the fixture's own assertion was loosened to match the actual documented co
 
 ---
 
-## S5 — A detached grandchild's survival is non-deterministic on macOS
+## S5 — A detached grandchild cannot hold a pty past its parent on macOS
 
 **Tracked in [alehatsman/teleport#11](https://github.com/alehatsman/teleport/issues/11).**
 
-**Found in CI, 2026-09-05, open -- not a spike result, a real flake.**
+**Found in CI 2026-09-05; root-caused and closed the same day on real macOS hardware
+(Darwin 24.6.0, arm64, Apple silicon).**
 
-S2 (above) verified on Linux that a detached grandchild ignoring `SIGHUP` keeps a pty's
-master open past the direct child's exit, and `daemon/tests/pty_primitive.rs`'s
-`eof_and_exit_are_independent_signals` encodes exactly that. It has never been reliably
-green on `macos-latest`:
+### What it looked like
 
-- First recipe (`perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- sh -c '...'`): failed
-  outright -- the grandchild produced *zero bytes* of output, meaning `perl` itself never
-  started.
-- Second recipe (plain `trap '' HUP; sleep 2 & ...`, no external interpreter, verified
-  correct on Linux via a direct `pty.fork()` reproduction): **flaky, not fixed** --
-  passed once, then failed again with "EOF arrived suspiciously early: 20ms", despite an
-  added assertion confirming the grandchild's pid was genuinely alive moments before.
+S2 verified on Linux that a detached grandchild ignoring `SIGHUP` keeps a pty's master
+open past the direct child's exit, and `daemon/tests/pty_primitive.rs`'s
+`eof_and_exit_are_independent_signals` encoded exactly that. It was never reliably green
+on `macos-latest`: one detach recipe (`perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV'`)
+produced zero bytes, another (`trap '' HUP; sleep 2 &`) passed once and then failed with
+"EOF arrived suspiciously early: 20ms". Two independently-reasoned recipes, neither
+reliable, was read as a scheduling race.
 
-Two different, independently-reasoned recipes, neither reliable. The pattern (sometimes
-surviving the full 2s sleep, sometimes dying within 10-20ms of the direct parent's exit)
-does not look like a scripting mistake -- it looks like a race between whatever tears
-down the pty when its session leader exits and the grandchild's own signal-disposition
-setup, decided by scheduling, not logic. A plausible mechanism, unconfirmed: BSD-derived
-kernels have historically used `revoke(2)`-style semantics on session-leader exit for a
-controlling terminal, which would invalidate other descriptors referencing it regardless
-of *any* userspace signal handling -- categorically different from Linux, where the
-master stays open until every slave fd is actually closed. Not verified against real
-hardware or documentation; recorded as the leading hypothesis, not a finding.
+**It is not a race, and it was never flaky.** On real hardware the "flaky" behaviour is
+perfectly deterministic — 5/5 identical runs of the `grandchild` scenario, EOF and
+`wait()` landing in the same millisecond. What varied in CI was which side of a
+0-vs-2000ms assertion a *deterministic* 0ms landed on once the surrounding fixture
+noise moved; the timing assertion made a hard, reproducible kernel behaviour look
+stochastic.
 
-**Not diagnosable further without real macOS access to iterate against** -- every attempt
-here has been a guess pushed to real CI with no way to reproduce or verify offline first.
+### Root cause
 
-**Current state:** `eof_and_exit_are_independent_signals` is `#[cfg(target_os =
-"linux")]`-gated (2026-09-05) rather than shipped flaky or silently weakened. Not run on
-macOS at all until this is actually understood -- same posture as W1 for Windows, and for
-the same reason: a guessed fix that appears to pass is worse than an honest gap, since it
-would silently reintroduce this exact flake the next time CI got unlucky.
+Both kernels tear down a session leader's controlling terminal when it exits. Only Linux
+exempts ptys.
 
-**Open:** does macOS need a fundamentally different mechanism for "outlive the direct
-parent while holding the pty" (if the revoke hypothesis holds, none exists in userspace,
-and S2's grandchild scenario may simply not be reproducible there at all), or is there a
-correct macOS-specific recipe this hasn't found yet? Needs real hardware, not another
-guess.
+**Linux** — `drivers/tty/tty_jobctrl.c`, `disassociate_ctty()`:
+
+```c
+if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY) {
+        tty_vhangup_session(tty);
+} else {
+        struct pid *tty_pgrp = tty_get_pgrp(tty);
+        if (tty_pgrp) {
+                kill_pgrp(tty_pgrp, SIGHUP, on_exit);
+```
+
+A pty takes the `else` branch, so the teardown is *only* a `SIGHUP` to the foreground
+process group. A grandchild that ignores `SIGHUP` shrugs it off and keeps its inherited
+slave fd, the master stays open, and EOF lags exit for as long as that grandchild lives.
+
+**macOS/XNU** — `bsd/kern/kern_exit.c`, `proc_exit()`, under the comment *"Controlling
+process. Signal foreground pgrp, drain controlling terminal and revoke access to
+controlling terminal."*:
+
+```c
+pgsignal(tpgrp, SIGHUP, 1);
+...
+VNOP_REVOKE(ttyvp, REVOKEALL, &context);
+```
+
+No pty exemption, and `REVOKEALL` is not a signal — it invalidates *every descriptor
+pointing at that tty, in every process*, regardless of anyone's signal disposition. The
+master hits EOF the instant the session leader exits. The `revoke(2)` hypothesis recorded
+here previously was right; it is now confirmed rather than assumed.
+
+### How it was verified
+
+`spike/src/bin/s10_ctty_revoke.rs` — a hand-built pty (`posix_openpt`/`grantpt`/
+`unlockpt`/`ptsname`, no `portable-pty` in the way, so the slave's *path* and the ctty
+setup are both visible) plus a grandchild that `setsid()`s, ignores `SIGHUP`, and reports
+to a log file instead of to the pty it is being measured on. It discriminates the two
+hypotheses S5 could not separate from CI:
+
+| Observation | `ctty` (real config) | `noctty` control |
+| --- | --- | --- |
+| Direct child reaped | 9ms | 9ms |
+| Master EOF | **9ms** | **4181ms** (grandchild's own exit) |
+| Grandchild alive after EOF | **yes**, for seconds; runs to completion | n/a — it outlives the master |
+| Grandchild `write(inherited pty fd)` | **`EIO`, from the very first attempt** | succeeds, every byte reaches the master |
+| Grandchild `open("/dev/tty")` | `ENXIO` | `ENXIO` (it `setsid`'d) |
+| Fresh `open("/dev/ttysNNN")` | **succeeds**, `write` returns 22 | succeeds |
+
+Three things fall out of that table:
+
+- **It is a revoke, not a kill.** The grandchild is demonstrably alive (`kill(pid, 0)`
+  succeeds for seconds afterwards, and it logs its own normal exit) while every write to
+  its inherited pty fd fails with `EIO`. No amount of `trap ''`/`nohup`/`setsid` changes
+  this, because none of it is about signals.
+- **It is specifically the controlling terminal.** The `noctty` control — identical
+  setup minus `setsid` + `TIOCSCTTY` — behaves exactly like Linux. So the mechanism is
+  ctty teardown, not fd accounting and not `SIGHUP`.
+- **There is no userspace workaround.** A fresh `open()` of the same `/dev/ttysNNN`
+  succeeds and accepts writes, so the *device* survives — but the master is already
+  permanently at EOF by then (a post-EOF `read(master)` returns 0 again, even after the
+  reopened slave has been written to), so nothing sent through it can ever be read. The
+  only way to avoid the revoke is to not have a controlling terminal at all, which is
+  not on the table for a terminal product: no ctty means no job control, no `Ctrl-C`, no
+  `SIGWINCH`.
+
+### Does this cost the product anything?
+
+**No.** The obvious worry is truncation — if the kernel yanks the tty at exit, does the
+command's last output survive? XNU drains before it revokes (that is what "drain
+controlling terminal *and* revoke" in the comment means), and it holds up under
+measurement: a 20 000-line burst arrives as 208894/208894 bytes, deterministically across
+runs, both with a prompt reader and with one deliberately stalled a full second before it
+started reading. Nothing is lost.
+
+What actually changes is a scenario that was never a product promise: on macOS a
+backgrounded process cannot keep a teleport session's stream alive after the shell that
+started it exits. Anyone wanting that wants `tmux`/`screen` — which work fine, because
+they hold their *own* pty and are not descendants of this one.
+
+### Resolution
+
+`eof_and_exit_are_independent_signals` is no longer `#[cfg(target_os = "linux")]`-gated
+with a hypothesis attached. It is now a documented two-OS split — the same question with
+two different *correct* answers:
+
+- Linux: `eof_and_exit_are_independent_signals` — EOF lags exit by the grandchild's
+  lifetime.
+- macOS: `eof_follows_the_session_leaders_exit_even_with_a_live_grandchild` — EOF
+  coincides with exit, **and the grandchild is asserted to still be alive**. That
+  liveness assertion is the load-bearing one: it is what distinguishes a revoked
+  descriptor from a dead process, and it is what fails the day either kernel changes its
+  mind.
+
+Green 30/30 on the targeted fixture and 15/15 on the full `pty_primitive` suite under
+12-way CPU saturation — the stress the original "scheduling race" theory predicted would
+break it.
 
 ---
 

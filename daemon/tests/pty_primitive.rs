@@ -201,14 +201,56 @@ fn nonzero_exit_is_recorded_accurately() {
     assert!(!status.success());
 }
 
-// `target_os = "linux"`, not just `cfg(unix)`: this fixture has never been
-// reliably green on macOS. Two independently-reasoned detach recipes both
-// failed there -- one outright (perl never started), the other flaky (passed
-// once, then failed again with the same "EOF arrived suspiciously early"
-// shape a fixed grandchild-pid liveness check couldn't explain away). That
-// pattern looks like a genuine race in how macOS tears down a pty when its
-// session leader exits, not a scripting mistake -- tracked, not guessed at
-// further, as [S5](../../docs/15-open-questions.md#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos).
+// The next two fixtures are the same question -- "does a detached grandchild
+// keep the pty's master open past the direct child's exit?" -- with two
+// different, *correct* answers, because Linux and macOS genuinely differ here.
+// Split by `target_os` for that reason, not because macOS is flaky. This
+// resolves [S5](../../docs/15-open-questions.md#s5--a-detached-grandchild-cannot-hold-a-pty-past-its-parent-on-macos),
+// which was previously a `#[cfg(target_os = "linux")]` gate with an unverified
+// hypothesis attached.
+//
+// Both kernels tear down a session leader's controlling terminal when it
+// exits. Only one of them exempts ptys:
+//
+//   Linux -- drivers/tty/tty_jobctrl.c, `disassociate_ctty()`:
+//       if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY)
+//               tty_vhangup_session(tty);
+//       else { ... kill_pgrp(tty_pgrp, SIGHUP, on_exit); ... }
+//     PTYs take the `else` branch: the foreground process group just gets
+//     SIGHUP. A grandchild that ignores SIGHUP survives it still holding its
+//     inherited slave fd, so the master stays open and EOF lags exit by
+//     however long that grandchild lives.
+//
+//   macOS/XNU -- bsd/kern/kern_exit.c, `proc_exit()`, under the comment
+//   "Controlling process. Signal foreground pgrp, drain controlling terminal
+//   and revoke access to controlling terminal.":
+//       pgsignal(tpgrp, SIGHUP, 1);
+//       ...
+//       VNOP_REVOKE(ttyvp, REVOKEALL, &context);
+//     No pty exemption, and `REVOKEALL` is not a signal -- it invalidates
+//     every descriptor pointing at that tty, in every process, whatever their
+//     signal disposition. The master sees EOF the instant the session leader
+//     exits.
+//
+// Verified on real hardware (Darwin 24.6.0, arm64) rather than inferred, via
+// `spike/src/bin/s10_ctty_revoke.rs`: after the direct child's `exit 0` the
+// detached grandchild is still *alive* -- `kill(pid, 0)` succeeds for seconds
+// afterwards and it runs to completion -- but every write to its inherited
+// pty fd fails with `EIO` from the very first attempt, and `open("/dev/tty")`
+// fails with `ENXIO`. A fresh `open()` of the same `/dev/ttysNNN` path still
+// succeeds, so the device is fine and it is specifically the *descriptors*
+// that were revoked; the master is already permanently at EOF by then, so
+// nothing written through that reopened fd can ever be read. That answers
+// S5's open question in the negative: there is no userspace recipe on macOS
+// for "outlive the direct parent while still holding the pty". The same
+// spike's `noctty` control -- identical setup minus `setsid` + `TIOCSCTTY` --
+// behaves exactly like Linux, which pins the mechanism to controlling-terminal
+// teardown specifically rather than to fd accounting or to SIGHUP.
+//
+// This costs the product nothing: XNU drains the tty before revoking it, so
+// no output is lost on the way out. Measured at 208894/208894 bytes of a
+// 20k-line burst, both with a prompt reader and with one deliberately stalled
+// a full second before it started reading.
 #[test]
 #[cfg(target_os = "linux")]
 fn eof_and_exit_are_independent_signals() {
@@ -281,6 +323,71 @@ fn eof_and_exit_are_independent_signals() {
         }
         Err(_) => panic!("EOF never arrived within 5s of the grandchild's sleep ending"),
     }
+}
+
+/// macOS's half of the split documented above: `exit_rx` and `eof_rx` are
+/// still two independent channels, but a `REVOKEALL` on the controlling tty
+/// means EOF *coincides* with the session leader's exit instead of lagging it.
+///
+/// The grandchild-liveness assertion is the load-bearing one. It is what
+/// separates "the kernel revoked a descriptor out from under a healthy
+/// process" (the actual behaviour) from "the grandchild died and its fd
+/// closed the ordinary way" -- the two hypotheses S5 could not distinguish
+/// without hardware -- and it is what would fail the day either kernel
+/// changes its mind.
+#[test]
+#[cfg(target_os = "macos")]
+fn eof_follows_the_session_leaders_exit_even_with_a_live_grandchild() {
+    let (spawned, out_rx) = spawn_sh(
+        "trap '' HUP; sleep 5 & pid=$!; echo GRANDCHILD_PID:$pid; exit 0",
+        24,
+        80,
+    );
+
+    let t0 = Instant::now();
+    let exit = spawned
+        .exit_rx
+        .recv_timeout(DEFAULT_TIMEOUT)
+        .expect("exit_rx should fire promptly");
+    let exit_latency = t0.elapsed();
+    assert!(
+        exit_latency < Duration::from_millis(500),
+        "wait() should not wait on the grandchild: took {exit_latency:?}"
+    );
+    assert_eq!(exit.status.unwrap().exit_code(), 0);
+
+    // The pid still reaches us despite the revoke: XNU drains the tty before
+    // revoking it, so the direct child's output is never truncated.
+    let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| {
+        contains(acc, "GRANDCHILD_PID:")
+    });
+    let text = String::from_utf8_lossy(&acc);
+    let pid: i32 = text
+        .split("GRANDCHILD_PID:")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .expect("should have parsed the detached grandchild's pid from output");
+
+    // EOF promptly, *not* at the end of the grandchild's `sleep 5`: the revoke
+    // is what ends the stream here, not the last slave fd being closed.
+    spawned
+        .eof_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("EOF should follow the session leader's exit, well inside the grandchild's sleep");
+    let eof_latency = t0.elapsed();
+    assert!(
+        eof_latency < Duration::from_secs(2),
+        "EOF should coincide with the session leader's exit on macOS, not lag it: {eof_latency:?}"
+    );
+
+    // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the grandchild must still be alive after EOF -- macOS revoked its pty \
+         descriptor, it did not kill the process (docs/15-open-questions.md#s5)"
+    );
 }
 
 #[test]
