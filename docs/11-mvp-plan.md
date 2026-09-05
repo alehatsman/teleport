@@ -906,9 +906,47 @@ reattaches. Browser-only mode remains fully functional.
 > both the daemon and its session process gone.
 >
 > Still not done on macOS, and not claimed by this run: validation item 2 (the tray
-> "Stop daemon" confirmation needs a human click), `autostart/macos.rs`'s launchd
-> LaunchAgent, and M9's `--bg` reboot persistence. macOS moves from "CI build only" to
-> gate-verified in the cross-OS ledger (#8).
+> "Stop daemon" confirmation needs a human click) and M9's `--bg` reboot persistence
+> ([#7](https://github.com/alehatsman/teleport/issues/7)). macOS moves from "CI build
+> only" to gate-verified in the cross-OS ledger (#8). `autostart/macos.rs` was still
+> unverified after this run and is covered separately, below.
+
+> **`autostart/macos.rs`'s LaunchAgent verified on real hardware, 2026-09-06** (Darwin
+> 24.6.0 arm64, real `~/Library/LaunchAgents`, real `launchctl`, real `teleportd`).
+> `autostart/macos.rs`'s `launchagent_tests` module drives the *real*
+> `install()`/`uninstall()` -- not a hand-rolled plist -- and is `#[ignore]`d, because
+> it needs a genuine GUI login session, a prebuilt daemon, and the single global plist
+> path per user. Three tests, run twice, 3/3 both times: `install()` writes a plist
+> `plutil -lint` accepts and `launchctl print gui/<uid>/<label>` knows about;
+> `RunAtLoad` brings a *serving* daemon up; `KeepAlive` relaunches it after a crash;
+> and a graceful SIGTERM is **not** undone by the agent.
+>
+> That last one is why this was worth doing: the tray's "Stop daemon" sends SIGTERM
+> (`daemon::terminate_gracefully`), and an over-eager `KeepAlive` would have brought the
+> daemon straight back and made the menu item look broken. It does not.
+>
+> **Found, and documented rather than fixed: `KeepAlive { Crashed: true }` does not
+> cover every death.** Measured:
+>
+> | signal | died | relaunched |
+> |---|---|---|
+> | `SIGKILL` | 0.1 s | **no**, within 40 s |
+> | `SIGABRT` | 0.1 s | yes, after 9.9 s (launchd's ~10 s throttle) |
+> | `SIGTERM` | 0.1 s | no -- correct, see above |
+> | `SIGSEGV` | *still alive after 40 s* | -- |
+>
+> So `kill -9`, a force-quit or an OOM kill leaves the daemon down until the next
+> login. The obvious "fix", an unconditional `KeepAlive`, is worse: it would also
+> resurrect the daemon after a deliberate stop. A Rust panic exits 101 -- an exit code,
+> not a signal -- so launchd would not relaunch that either; inferred from
+> `launchd.plist(5)` and consistent with the `SIGKILL` row, not separately measured,
+> since the plist runs `teleportd` with no arguments and cannot be made to exit
+> non-zero from outside. `SIGSEGV` is unusable as a test signal on macOS at all: the
+> crash reporter suspends the process while it collects a report.
+>
+> Login-scoped by construction -- `gui/<uid>/` is a per-login-session domain, so this
+> starts at login, not at boot. That half is
+> [#40](https://github.com/alehatsman/teleport/issues/40), not an M10 gap.
 
 > **Validation item 1 (the gate itself) re-run on Windows, 2026-09-06 -- real hardware
 > (Windows 11 Pro, build 26200), not CI.** The same box W1-W3/N5/the job-breakaway item
