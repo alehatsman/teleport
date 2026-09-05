@@ -249,13 +249,25 @@ fn contains(acc: &[u8], needle: &str) -> bool {
 /// disconnected (bounded queue, docs/03-pty-layer.md#backpressure) instead
 /// of accumulating unboundedly.
 ///
-/// `target_os` gated off macOS: found 2026-09-05 that this fixture's fast
-/// subscriber can itself get disconnected there, not intermittently but
-/// consistently (20/20 retries with a since-reverted mitigation) -- a
-/// sustained throughput mismatch between `yes`'s production rate and this
-/// runner's catch-up processing, not a narrow one-off race a retry can
-/// out-narrow. Tracked, not guessed at further, as
-/// [N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner).
+/// `target_os` gated off macOS: this fixture's *fast* subscriber gets
+/// disconnected there too, 3 times in 20 runs on real hardware.
+///
+/// Root-caused 2026-09-05 on an M-series Mac (#25), and it is not the
+/// "slow CI runner" this comment previously blamed -- the queue bound is
+/// `min(256 chunks, 8 MiB)`, and on macOS a pty read averages **14 bytes**
+/// (max 1024, the tty output buffer), so 256 chunks holds ~3.5 KiB. The
+/// count half trips roughly 2300x earlier than the byte half was designed to
+/// allow, and any subscriber that stalls even briefly is dropped. Linux ptys
+/// coalesce far more, so the byte half governs there and the bound behaves as
+/// documented. Confirmed by raising `MAX_QUEUE_CHUNKS` alone: 20/20 pass.
+///
+/// So this is a real bound-calibration bug in `fanout.rs`, not a test
+/// problem, and the fix is a design decision about what the bound should be
+/// (coalesce reads in `pty.rs`, or make the count bound
+/// byte-proportional) -- deliberately out of scope for #25, which is why the
+/// gate is still here rather than the fixture being un-gated.
+/// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half),
+/// tracked in #25.
 #[tokio::test]
 #[cfg(not(target_os = "macos"))]
 async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {

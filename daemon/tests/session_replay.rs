@@ -98,14 +98,20 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
 /// reconnect at the recorded offset, and check byte-for-byte that
 /// replay + live equals the log -- no gap, no duplicate.
 ///
-/// `target_os = "linux"`-gated: found 2026-09-05, failing on `macos-latest`
-/// with "first subscriber disconnected early" during the initial live-drain
-/// loop -- same category as
-/// [N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner),
-/// a `yes`-driven producer racing this runner's catch-up throughput. A
-/// `cargo test --no-fail-fast` diagnostic pass (2026-09-05) confirms this is
-/// the *only* remaining macOS failure across the whole suite once S5 and N5's
-/// fixtures are gated -- not diagnosed further blind against real CI.
+/// `target_os = "linux"`-gated: fails on `macos-latest` with "first
+/// subscriber disconnected early" during the initial live-drain loop. This is
+/// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)
+/// -- the 256-chunk half of the queue bound holding only ~3.5 KiB on macOS,
+/// where a pty read averages 14 bytes.
+///
+/// Do not un-gate this on a local pass alone. It was un-gated once (#25) on
+/// exactly that evidence -- **20/20 on an M-series Mac** -- and still failed
+/// first try on `macos-latest`, which runs this file's suite in 20.2 s where
+/// that Mac takes 7.6 s. ~3.5 KiB of headroom is enough for a subscriber that
+/// never stalls; the CI runner is slow enough to stall it. Fast local
+/// hardware cannot see this bug, so a green local run is not evidence.
+///
+/// Un-gate when the bound is fixed, not before.
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
