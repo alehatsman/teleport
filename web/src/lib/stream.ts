@@ -46,6 +46,18 @@ export class SessionStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByCaller = false;
   private sawExit = false;
+  /**
+   * Bumped on every `connect()`. `connectWithTicket()` captures its own
+   * value and checks it again after the ticket-fetch `await` -- if a newer
+   * `connect()` ran in the meantime (e.g. `Session.svelte`'s
+   * `onVisibilityChange` firing again while an earlier reconnect's ticket
+   * fetch is still in flight, a race the async ticket fetch made reachable
+   * that didn't exist when `connect()` opened a socket synchronously),
+   * this attempt's socket is closed immediately instead of silently
+   * replacing `this.ws` and leaking the older one still wired to
+   * `onmessage`/`onclose` (code review, PR #22).
+   */
+  private connectGeneration = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -57,8 +69,16 @@ export class SessionStream {
 
   connect(): void {
     if (this.closedByCaller) return;
+    // A reconnect this call preempts (e.g. onVisibilityChange skipping the
+    // backoff wait) shouldn't also go on to open a second socket once its
+    // own ticket fetch resolves -- see connectGeneration's doc.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const generation = ++this.connectGeneration;
     this.callbacks.onState(this.hasCursor ? "reconnecting" : "connecting");
-    void this.connectWithTicket();
+    void this.connectWithTicket(generation);
   }
 
   /**
@@ -70,16 +90,19 @@ export class SessionStream {
    * is handled exactly like a failed socket: the normal jittered-backoff
    * reconnect, never a fall-back to sending the master token instead.
    */
-  private async connectWithTicket(): Promise<void> {
+  private async connectWithTicket(generation: number): Promise<void> {
     let ticket: string;
     try {
       ticket = (await createWsTicket(this.sessionId)).ticket;
     } catch {
-      if (this.closedByCaller) return;
+      if (this.closedByCaller || generation !== this.connectGeneration) return;
       this.scheduleReconnect();
       return;
     }
-    if (this.closedByCaller) return; // disconnect() can race the fetch
+    // Superseded by a newer connect() while this fetch was in flight, or
+    // torn down outright -- either way, this attempt is stale. Never touch
+    // `this.ws` or open a socket for it.
+    if (this.closedByCaller || generation !== this.connectGeneration) return;
 
     const query = new URLSearchParams();
     if (this.hasCursor) {

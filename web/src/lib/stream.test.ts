@@ -188,6 +188,37 @@ describe("ws-ticket handshake (#18)", () => {
       vi.useRealTimers();
     }
   });
+
+  it("a connect() that races an earlier one's in-flight ticket fetch never opens a second socket", async () => {
+    // Session.svelte's onVisibilityChange calls connect() again whenever
+    // state isn't "live"/"connecting" -- which includes "reconnecting", the
+    // exact state a pending ticket fetch leaves the stream in. Reproduces
+    // that: connect() twice before the first fetch ever resolves.
+    let resolveFirst!: (v: { ticket: string; expires_in: number }) => void;
+    vi.mocked(createWsTicket).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveFirst = resolve)),
+    );
+    vi.mocked(createWsTicket).mockResolvedValueOnce({ ticket: "tkt-second", expires_in: 30 });
+
+    const { callbacks } = harness();
+    const stream = mkStream("s1", callbacks);
+
+    stream.connect(); // generation 1 -- ticket fetch left pending, no socket yet
+    expect(FakeWebSocket.instances.length).toBe(0);
+
+    stream.connect(); // generation 2 -- supersedes generation 1 before it ever resolved
+    await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0));
+    expect(FakeWebSocket.instances.length).toBe(1);
+    expect(FakeWebSocket.latest().url).toContain("ticket=tkt-second");
+
+    // Generation 1's fetch finally resolves -- it must be a no-op: no
+    // second socket, and it must not clobber `this.ws` out from under the
+    // real (generation 2) connection.
+    resolveFirst({ ticket: "tkt-first-stale", expires_in: 30 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(FakeWebSocket.instances.length).toBe(1);
+  });
 });
 
 describe("protocol parser hardening (#19)", () => {
