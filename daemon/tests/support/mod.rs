@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teleportd::api::AppState;
-use teleportd::auth::OriginPolicy;
+use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::config::Config;
 use teleportd::device::Device;
 use teleportd::session::{Attach, Replay, ReplayStep, SessionManager};
@@ -166,6 +166,7 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
         version: "test",
         web_dist,
         shutdown: Arc::new(tokio::sync::Notify::new()),
+        ws_tickets: TicketStore::new(),
     });
 
     let app = teleportd::api::build_router(Arc::clone(&state));

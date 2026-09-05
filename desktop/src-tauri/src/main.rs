@@ -141,6 +141,14 @@ fn open_main_window(app: &AppHandle, dir: &Path) -> anyhow::Result<()> {
         None => format!("http://127.0.0.1:{port}/"),
     };
 
+    // `WebviewUrl::External`, not a bundled `frontendDist` -- this window is
+    // just a webview navigated to the daemon's own server, the same page a
+    // browser would load. `tauri.conf.json`'s `security.csp` only injects a
+    // policy into pages Tauri itself serves over its `tauri://` asset
+    // protocol, so it has no effect here and is deliberately left `null`;
+    // the CSP this page actually gets is the daemon's own response header
+    // (docs/06-security.md#add-a-strict-content-security-policy, `api.rs`'s
+    // `CONTENT_SECURITY_POLICY`), same as it is for a browser client.
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
         .title("Teleport")
         .inner_size(1100.0, 720.0)

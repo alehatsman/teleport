@@ -39,7 +39,13 @@ class SessionStream {
   private backoff = 250;           // ms, →8000 with jitter
   private wantControl = false;     // sticky user intent, not connection state
 
-  connect() {
+  async connect() {
+    // POST /api/v1/ws-ticket first (docs/06-security.md#token-on-the-websocket-upgrade,
+    // mitigation 2) -- the long-lived TOKEN authenticates *that* call; the socket
+    // itself only ever sees a 30s, session-scoped ticket. A failed fetch reconnects
+    // through the normal backoff path below, never falls back to sending TOKEN.
+    const { ticket } = await createWsTicket(this.id);
+
     // With a cursor, resume exactly. Without one, take a bounded tail —
     // never after=0, which asks for the entire log.
     const cursor = this.hasCursor ? `after=${this.nextOffset}` : `tail=${DEFAULT_TAIL}`;
@@ -50,7 +56,7 @@ class SessionStream {
     const ws = new WebSocket(
       `${wsBase}/api/v1/sessions/${this.id}/stream` +
         `?${cursor}&mode=${mode}&client_id=${CLIENT_ID}` +
-        `&client_name=${encodeURIComponent(CLIENT_NAME)}&token=${TOKEN}`
+        `&client_name=${encodeURIComponent(CLIENT_NAME)}&ticket=${ticket}`
     );
     ws.binaryType = "arraybuffer";
     // ...
@@ -101,6 +107,11 @@ Rules:
   sequence. Reset fixes the state and costs at most one garbled line. Show a
   "scrollback truncated" marker with a link to the full `/log`.
 - On `slow_consumer` (close 1013), reconnect normally — it is an expected event.
+- **Every frame is untrusted input, not just wire content.** A binary frame shorter
+  than 8 bytes, or a text frame that isn't valid JSON, closes the socket as a
+  deliberate protocol violation (close 1002) rather than throwing inside the
+  `onmessage` callback. The daemon should never send either; this is defense against
+  the parsing code itself, not the daemon.
 - **Reconnect never preempts.** `mode=control` on attach asks the server to give back a
   lease that is still ours during the grace window; if someone else took control while
   we were offline, `ready` comes back `control:false` and we render as an observer.
@@ -132,6 +143,12 @@ The token is. The daemon prints a `?token=…` URL at startup; on first load the
 stores the token and **strips it from the address bar** (`history.replaceState`) so it
 does not sit in the URL or leak through `Referer`
 ([06-security.md](06-security.md#token-on-the-websocket-upgrade)).
+
+It's used as the `Authorization` header on every plain HTTP call (`api.ts`). `stream.ts`
+does **not** put it on the WebSocket URL: it calls `POST /api/v1/ws-ticket` first and
+uses the short-lived, session-scoped ticket that comes back instead
+([06-security.md](06-security.md#token-on-the-websocket-upgrade), mitigation 2) — the
+long-lived token itself never appears in a `ws://…` URL.
 
 ## Geometry
 
