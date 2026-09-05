@@ -1323,17 +1323,42 @@ needs no pty: a never-drained subscriber must accept exactly
 `MAX_QUEUE_BYTES / queue_cost(14)` chunks and then be dropped -- both that it
 is far past 256, and that it is still bounded.
 
-**The remaining candidate, now its own question.** *Coalesce reads in
-`pty.rs`* before publishing: 737k chunks per 10 MiB means 737k log appends,
-mutex acquisitions, `Arc` allocations and per-subscriber sends, genuine
-overhead paid only on macOS. That is a *throughput* question, not a bound
-question, and it is cheaper than this section first assumed -- `libc` is
-already a `cfg(unix)` dependency, so a zero-timeout `poll()` could merge only
-*already-available* bytes and cost the interactive echo path nothing, which is
-the objection that made coalescing look unaffordable. Unverified blocker:
-`try_clone_reader()` hands back a bare `Box<dyn Read + Send>` with no fd, so
-whether this is reachable through portable_pty 0.9 is unknown. Filed
-separately.
+**The remaining candidate, measured and declined (2026-09-06,
+[#33](https://github.com/alehatsman/teleport/issues/33)).** *Coalesce reads in
+`pty.rs`* before publishing. This section proposed it on the theory that 737k
+chunks per 10 MiB means 737k log appends, mutex acquisitions, `Arc`
+allocations and per-subscriber sends, and that a zero-timeout `poll()` merging
+only *already-available* bytes would collect that win while costing the
+interactive echo path nothing. `spike/src/bin/s12_read_coalescing.rs` measures
+all three loops against a real pty. Both halves of the theory are wrong.
+
+| loop | reads / 10 MiB | B per read | publishes | reader CPU | echo p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline (today) | 3,161,392 | 3.3 | 3,161,392 | 4.97 s | 7.6 us |
+| non-blocking drain | 3,585,536 | 2.9 | 39,704 | 4.75 s | 10.3 us |
+| blocking drain | 250,208 | 41.9 | 570 | 0.96 s | **2837.6 us** |
+
+The per-chunk downstream work is not the cost. The non-blocking drain removes
+**98.8%** of the publishes and buys **6% CPU**. What costs is the three
+million `read(2)` calls returning ~3 bytes each, and the only thing that makes
+a pty read bigger is *waiting* for it -- the blocking drain gets 41.9 B/read
+and 80% of the CPU back precisely by blocking, while the same stream drained
+without blocking still averages 2.9 B/read. That wait is what the echo column
+charges for: **p99 2.8 ms against a 7.6 us baseline, ~400x**. The original
+objection recorded in the design docs -- that coalescing buys throughput with
+latency on the one path this product cannot afford it -- holds, and the
+non-blocking escape hatch does not exist.
+
+Throughput never moved at all: 1.6-1.9 MiB/s in every mode. The tty is the
+ceiling, not the reader, so there was no throughput win on the table to begin
+with -- only a CPU one, and only during a sustained flood.
+
+The one blocker this did clear: `MasterPty::as_raw_fd()` (portable_pty 0.9
+`lib.rs:114`, `cfg(unix)`) does expose the fd, so the mechanism was never the
+obstacle. If a flood-only CPU win is ever wanted, the shape would be adaptive
+-- engage a waiting drain only after sustained output and drop it the moment
+the stream goes quiet -- which trades a heuristic and some state for CPU in a
+case (`cat` of a huge file) where nobody is typing. Not built.
 
 **The two fixtures gated the same day: measured, and the picture is not what
 either the original theory or the first correction said.**
