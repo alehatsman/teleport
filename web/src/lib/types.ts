@@ -68,6 +68,12 @@ export interface PresetsResponse {
   presets: Preset[];
 }
 
+/** `POST /api/v1/ws-ticket` (docs/06-security.md#token-on-the-websocket-upgrade). */
+export interface WsTicketResponse {
+  ticket: string;
+  expires_in: number;
+}
+
 export interface HealthResponse {
   status: string;
   version: string;

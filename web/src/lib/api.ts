@@ -3,7 +3,7 @@
 // (docs/09-frontend.md#dev-workflow) -- so this never needs a base URL.
 
 import { getToken } from "./identity";
-import { ApiError, type ApiErrorBody, type CreateSessionRequest, type CreateSessionResponse, type HealthResponse, type PresetsResponse, type Session, type SessionsResponse } from "./types";
+import { ApiError, type ApiErrorBody, type CreateSessionRequest, type CreateSessionResponse, type HealthResponse, type PresetsResponse, type Session, type SessionsResponse, type WsTicketResponse } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -63,6 +63,16 @@ export async function getLog(id: string, range?: { from?: number; to?: number })
 
 export function listPresets(): Promise<PresetsResponse> {
   return request("/presets");
+}
+
+/**
+ * Trades the master bearer token (sent the normal way, as `Authorization`)
+ * for a short-lived, single-use ticket scoped to `sessionId` --
+ * `stream.ts` puts *that* in the WebSocket URL instead
+ * (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
+ */
+export function createWsTicket(sessionId: string): Promise<WsTicketResponse> {
+  return request("/ws-ticket", { method: "POST", body: JSON.stringify({ session_id: sessionId }) });
 }
 
 /** Builds the `ws://…/api/v1/sessions/{id}/stream` URL `stream.ts` connects to. */

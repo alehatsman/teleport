@@ -5,7 +5,7 @@
 mod support;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
 fn get(uri: &str) -> Request<Body> {
@@ -98,6 +98,40 @@ async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
         .expect("router call");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_ne!(body_string(response).await, "<html>spa shell</html>");
+
+    std::fs::remove_dir_all(&dist).ok();
+}
+
+/// docs/06-security.md's CSP applies to *every* response -- a single
+/// `Router::layer`, not threaded through the static path alone -- so this
+/// checks it on both an API response and the SPA shell, not just one.
+#[tokio::test]
+async fn every_response_carries_the_content_security_policy() {
+    let dist = std::env::temp_dir().join(format!("teleportd-web-dist-{}-csp", std::process::id()));
+    write_dist(&dist);
+    let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+
+    let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
+    let api_response = router
+        .clone()
+        .oneshot(get("/api/v1/health"))
+        .await
+        .expect("router call");
+    let csp = api_response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .expect("CSP header on an API response")
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("object-src 'none'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+
+    let spa_response = router.oneshot(get("/")).await.expect("router call");
+    assert!(spa_response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .is_some());
 
     std::fs::remove_dir_all(&dist).ok();
 }

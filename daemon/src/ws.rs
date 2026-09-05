@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::AppState;
-use crate::auth::Principal;
+use crate::auth;
 use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId, Subscription};
 
 /// Server sends a `Ping` on this cadence (docs/04-api-protocol.md#keepalive-and-reconnection).
@@ -42,6 +42,14 @@ pub struct StreamQuery {
     mode: StreamMode,
     client_id: Option<String>,
     client_name: Option<String>,
+    /// Path 3 (docs/06-security.md#token-on-the-websocket-upgrade): the
+    /// long-lived bearer token directly in the query string. Ignored when
+    /// `ticket` is also present -- `stream.ts` no longer sends both, but a
+    /// future/native client that does gets the safer credential honored.
+    token: Option<String>,
+    /// Path 2, preferred: a short-lived, single-use ticket from
+    /// `POST /api/v1/ws-ticket`, scoped to this exact session id.
+    ticket: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
@@ -52,20 +60,42 @@ enum StreamMode {
     Control,
 }
 
-/// The route handler: validates the upgrade (Origin/Host, credential,
+/// The route handler: validates the upgrade (credential, Origin/Host,
 /// session existence, mutually-exclusive `after`/`tail`) and, only once all
 /// of that holds, upgrades and hands off to [`run`]. Everything before the
 /// upgrade can still return an ordinary HTTP error response; nothing after
 /// it can, which is exactly why these checks come first.
+///
+/// Unlike every other route, the credential isn't resolved through the
+/// generic [`Principal`](crate::auth::Principal) extractor: a ticket is
+/// scoped to a session id, which only this handler's own `Path<String>` has
+/// -- so credential resolution happens explicitly, via
+/// [`auth::resolve_ws`], instead. `id` is parsed (format only, not looked up
+/// yet) before that call for exactly this reason; a malformed id is not
+/// sensitive, so resolving it first leaks nothing a `404` wouldn't already
+/// tell an unauthenticated caller.
 pub async fn upgrade(
     State(state): State<Arc<AppState>>,
-    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<StreamQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let _: Principal = principal; // resolved for its side effect: a bad/missing credential already produced a 401 rejection before this handler ran.
+    let Ok(session_id) = id.parse::<SessionId>() else {
+        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+    };
+
+    if let Err(e) = auth::resolve_ws(
+        &state.ws_tickets,
+        session_id,
+        q.ticket.as_deref(),
+        &headers,
+        q.token.as_deref(),
+        &state.token,
+        state.config.auth_token,
+    ) {
+        return crate::api::ApiError::from(e).into_response();
+    }
 
     if let Err(e) = state.origin_policy.check(&headers) {
         return crate::api::ApiError::from(e).into_response();
@@ -77,9 +107,6 @@ pub async fn upgrade(
         )
             .into_response();
     }
-    let Ok(session_id) = id.parse::<SessionId>() else {
-        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
-    };
     let Some(session) = state.sessions.get(session_id) else {
         return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
     };

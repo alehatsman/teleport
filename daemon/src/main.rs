@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use teleportd::api::{build_router, AppState};
-use teleportd::auth::OriginPolicy;
+use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::log::LogLimits;
 use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
 use teleportd::{config, now_ms, presets};
@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         web_dist,
         shutdown: Arc::clone(&shutdown_trigger),
+        ws_tickets: TicketStore::new(),
     });
     spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);

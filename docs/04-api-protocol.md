@@ -28,6 +28,7 @@ GET    /api/v1/sessions/{id}/stream   # WebSocket upgrade
 GET    /api/v1/presets
 
 POST   /api/v1/shutdown
+POST   /api/v1/ws-ticket
 ```
 
 Everything else is the SPA, served from the same origin at `/`.
@@ -46,7 +47,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown"]
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket"]
 }
 ```
 
@@ -57,7 +58,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown"],
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket"],
   "device_id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
   "device_name": "aleh-macbook",
   "platform": "macos-aarch64",
@@ -232,10 +233,31 @@ drain and the PTY layer's own bounded termination policy
 few seconds after this response is sent. A caller that needs to know shutdown is *done*
 should poll `/health` until the connection is refused, not block on this response.
 
+### `POST /api/v1/ws-ticket`
+
+```json
+{ "session_id": "<id>" }
+```
+
+```json
+{ "ticket": "<hex>", "expires_in": 30 }
+```
+
+Mitigation 2 from [06-security.md](06-security.md#token-on-the-websocket-upgrade):
+trades the master bearer token -- presented here the normal way, `Authorization`
+header or `?token=` -- for a short-lived (30s), single-use ticket scoped to exactly
+this session id. `stream.ts` calls this before every connect/reconnect and puts the
+returned ticket, not the master token, on the WebSocket URL
+([`?ticket=`](#websocket-protocol) below) -- the long-lived credential no longer rides
+in a URL that lands in proxy logs, browser history, or `Referer`. Requires the session
+to exist (`404`, same as every other `{id}`-taking route) and the same Origin check as
+any other mutating route. Issued tickets are in-memory only, per-daemon-process; a
+restart invalidates every outstanding one.
+
 ## WebSocket protocol
 
 ```text
-GET /api/v1/sessions/{id}/stream?after=<u64>|tail=<bytes>&mode=control|observe
+GET /api/v1/sessions/{id}/stream?after=<u64>|tail=<bytes>&mode=control|observe&ticket=<hex>
 ```
 
 | Param | Default | Meaning |
