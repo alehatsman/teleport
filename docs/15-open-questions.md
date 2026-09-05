@@ -14,13 +14,13 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed, root cause still open** — general to ConPTY (not `cmd.exe`-specific), spike, Windows (2026-09-04) |
-| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed, root cause still open** — general to ConPTY (not `cmd.exe`-specific), spike, Windows (2026-09-04); tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
+| [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S3](#s3--a-blocking-write-wedges-terminate) | Can a blocking PTY write wedge `terminate`? | M1 | **closed** — spike, Linux + Windows (2026-09-04) |
 | [S4](#s4--does-dropping-the-master-close-the-pseudoconsole) | Does dropping the master close the pseudoconsole on Windows? | M1 | **partial** — Unix closed; Windows result confounded by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows), see below |
-| [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware |
+| [S5](#s5--a-detached-grandchilds-survival-is-non-deterministic-on-macos) | A detached grandchild's survival on macOS | M1 | **open, real flake** — found 2026-09-05, `#[cfg(target_os = "linux")]`-gated, not diagnosable without real hardware; tracked in [#11](https://github.com/alehatsman/teleport/issues/11) |
 | [D2](#d2--session-list-freshness) | How does the session list stay fresh? | M5 | decision |
 | [N1](#n1--keystroke-latency) | Keystroke latency over a relayed tailnet | — | **partial** — direct-path case measured 2026-09-05 (~36ms, instant feel); relayed/DERP case still needs a sample |
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
@@ -54,6 +54,8 @@ and waiting on the child. That arithmetic does not work, and every question belo
 consequence of it.
 
 ## W1 — ConPTY children are never observed as exited on Windows
+
+**Tracked in [alehatsman/teleport#9](https://github.com/alehatsman/teleport/issues/9).**
 
 **Not one of the original four questions.** Found while running S1/S2/S4 for real on
 Windows (2026-09-04, Windows 11 build 26200, ≥24H2, `portable-pty` 0.9.0, run from a
@@ -202,6 +204,8 @@ against the current design until W1 is understood.** The Unix leg (S1-S4, fully
 closed on Linux) is unaffected and can proceed.
 
 ## W2 — Windows fixture parity not yet attempted
+
+**Tracked in [alehatsman/teleport#10](https://github.com/alehatsman/teleport/issues/10).**
 
 `daemon/tests/pty_primitive.rs` (docs/10-testing.md#1-pty-integration-fixtures-daemontestspty_rs)
 is written entirely around Unix shell mechanics -- `/bin/sh -c` scripts, `stty`,
@@ -528,6 +532,8 @@ already explained by W1.
 ---
 
 ## S5 — A detached grandchild's survival is non-deterministic on macOS
+
+**Tracked in [alehatsman/teleport#11](https://github.com/alehatsman/teleport/issues/11).**
 
 **Found in CI, 2026-09-05, open -- not a spike result, a real flake.**
 
