@@ -91,6 +91,43 @@ pub async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach
     }
 }
 
+/// Like [`catch_up`], but for a caller that expects some of its concurrent
+/// clients to lose the race against the producer -- N4's reconnect-storm
+/// fixture, where `STORM_SIZE` clients all attach at once against an
+/// unbounded `yes` and some are expected to hit the same
+/// stalled/total-round clamp D1's own fixture in `session_catchup.rs`
+/// exercises deliberately. Always paced at `Duration::ZERO`: a storm client
+/// is modeling "reconnect as fast as possible," not a slow network.
+pub async fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
+    let mut acc = Vec::new();
+    let mut next = replay.replay_from;
+    let mut rounds = 0u32;
+    let mut step = replay.next_round().expect("first catch-up round");
+    loop {
+        match step {
+            ReplayStep::History {
+                offset,
+                bytes,
+                replay,
+            } => {
+                assert_eq!(offset, next, "catch-up rounds must be contiguous");
+                next = offset + bytes.len() as u64;
+                acc.extend_from_slice(&bytes);
+                rounds += 1;
+                assert!(
+                    rounds <= MAX_TEST_ROUNDS,
+                    "catch-up did not converge within {MAX_TEST_ROUNDS} rounds"
+                );
+                step = replay.written(bytes).expect("catch-up round");
+            }
+            ReplayStep::Live(attach) => {
+                acc.extend_from_slice(&attach.replay);
+                return (acc, attach, rounds);
+            }
+        }
+    }
+}
+
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 pub struct Daemon {
