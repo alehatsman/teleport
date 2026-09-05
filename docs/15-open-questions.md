@@ -26,7 +26,7 @@ backlog pretending to be a spec.
 | [N2](#n2--websocket-compression) | WebSocket compression | M4 | half-day investigation |
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
-| [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
+| [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed; tracked in [#25](https://github.com/alehatsman/teleport/issues/25) |
 | [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
 No S/W question is blocking any more: S5 — the last one — is **closed** (2026-09-05,
@@ -1076,6 +1076,13 @@ session (an admission limit or a queue), not reworking the per-round design N4 m
 ---
 
 ## N5 — A fast producer can outrun catch-up on a slow runner
+
+**Tracked in [alehatsman/teleport#25](https://github.com/alehatsman/teleport/issues/25),
+together with the two other fixtures gated off macOS for the same reason on the same
+day: the [D1 gate](../daemon/tests/session_catchup.rs) (`session_catchup.rs`, gated at
+file level, so it is absent on Windows too) and the [M3 gate](../daemon/tests/session_replay.rs)
+(`disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate`). Two of the three are
+milestone gates currently verified on Linux only.**
 
 **Found in CI, 2026-09-05, not yet designed. Diagnosis revised once, below --
 the first theory was wrong; recorded to save the next person from the same
