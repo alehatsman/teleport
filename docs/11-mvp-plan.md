@@ -829,6 +829,40 @@ reattaches. Browser-only mode remains fully functional.
 > `TcpStream` the way a curl-based Windows caller would, and asserts the *process*
 > exits and its port file is removed -- run repeatedly on this machine (native Windows),
 > not assumed from the Unix-passing case.
+>
+> **Validation item 4 (Windows detached-spawn spike), run 2026-09-05, native Windows
+> hardware -- found a real bug, fixed it.** `spike/src/bin/s11_windows_job_breakaway.rs`:
+> a harness process assigns itself to a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job
+> (simulating "launched inside an IDE/CI runner/installer job," per this section's own
+> edge-case bullet, without needing an actual one), spawns a long-lived child with
+> `spawn_detached`'s exact creation flags, and exits normally -- which is exactly the
+> event under test, since it drops the harness's only handle to that job. Four arms, all
+> run for real:
+>
+> | Arm | Result |
+> |---|---|
+> | `no_breakaway` (control: detached, no breakaway flag) | child dies essentially instantly -- confirms the job's kill-on-close genuinely fires here |
+> | `breakaway` (the flags `spawn_detached` shipped with) | **the spawn itself fails**, `ERROR_ACCESS_DENIED` -- not a silent no-op |
+> | `breakaway_allowed` (same job, `JOB_OBJECT_LIMIT_BREAKAWAY_OK` also set) | spawn succeeds, child outlives the parent |
+> | `no_job` (no containing job at all -- a plain double-clicked launch) | spawn succeeds, child outlives the parent |
+>
+> The finding: `CREATE_BREAKAWAY_FROM_JOB` only works if the *containing* job itself
+> grants `JOB_OBJECT_LIMIT_BREAKAWAY_OK`/`_SILENT_BREAKAWAY_OK` -- many real restrictive
+> jobs (some IDE debuggers, CI runners, some installer/sandboxing contexts) do not set
+> it, and in that case `CreateProcess` fails outright rather than degrading gracefully.
+> Shipped as-is, this would have meant the daemon never starts under precisely the
+> launch contexts this flag was added to defend against -- worse than the
+> kill-with-the-job risk it exists to prevent. Fixed the same day:
+> `daemon.rs::spawn_windows_with_breakaway_retry` tries the breakaway spawn first and,
+> only on `io::ErrorKind::PermissionDenied`, retries once without the flag (accepting the
+> narrower kill-with-the-job risk only in the specific case where the OS has just said
+> breakaway isn't available anyway). `cargo check`/`clippy -D warnings`/`fmt --check`
+> clean on the desktop crate.
+>
+> Not literally a packaged `tauri build` artifact under a real IDE/CI job -- the spike
+> exercises the identical Win32 call and identical flags standalone, which is the part
+> that was actually in question. Running this inside an actual installed `.msi`/`.exe`
+> launched from a real restrictive job is still open, tracked in `desktop/README.md`.
 
 ---
 

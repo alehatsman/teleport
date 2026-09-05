@@ -38,9 +38,20 @@ only exercised by hand, per above.
 Known gaps, tracked in [11-mvp-plan.md#m10](../docs/11-mvp-plan.md#m10--tauri-shell)
 rather than silently papered over:
 
-- **Windows detached-spawn** (`daemon::spawn_detached`) is written defensively
-  (`CREATE_BREAKAWAY_FROM_JOB` et al.) but unverified on real Windows --
-  spike this against a packaged build before trusting it.
+- **Windows detached-spawn** (`daemon::spawn_detached`) -- spiked for real on
+  real native Windows hardware, 2026-09-05
+  (`spike/src/bin/s11_windows_job_breakaway.rs`). Found a real bug along the
+  way: `CREATE_BREAKAWAY_FROM_JOB` doesn't silently no-op when the
+  *containing* job disallows breakaway, it fails the whole spawn with
+  `ERROR_ACCESS_DENIED` -- exactly the launch contexts (an IDE debugger, a
+  CI runner, some installer/sandboxing contexts) this flag exists to defend
+  against. Fixed with a retry-without-the-flag fallback
+  (`daemon.rs::spawn_windows_with_breakaway_retry`); the no-containing-job
+  case (a plain double-clicked launch, the common one) and the
+  containing-job-permits-it case both already worked and are unaffected.
+  Not yet run inside an actual packaged `.msi`/`.exe` installer or a real
+  IDE/CI job (the spike simulates one directly via the same Win32 APIs) --
+  that packaging-level pass is still open.
 - **macOS/Windows autostart** (`src/autostart/{macos,windows}.rs`) are
   templated but unverified on real hardware.
 - **Updater** is wired in (`tauri-plugin-updater`) but inactive
