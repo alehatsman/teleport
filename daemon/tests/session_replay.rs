@@ -98,16 +98,16 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
 /// reconnect at the recorded offset, and check byte-for-byte that
 /// replay + live equals the log -- no gap, no duplicate.
 ///
-/// `target_os = "linux"`-gated: found 2026-09-05, failing on `macos-latest`
-/// with "first subscriber disconnected early" during the initial live-drain
-/// loop -- same category as
-/// [N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner),
-/// a `yes`-driven producer racing this runner's catch-up throughput. A
-/// `cargo test --no-fail-fast` diagnostic pass (2026-09-05) confirms this is
-/// the *only* remaining macOS failure across the whole suite once S5 and N5's
-/// fixtures are gated -- not diagnosed further blind against real CI.
+/// Was `target_os = "linux"`-gated on 2026-09-05, on the theory that its
+/// "first subscriber disconnected early" failure was the same
+/// [N5](../../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half)
+/// throughput problem as `session_backpressure.rs`'s. Measured on real macOS
+/// hardware 2026-09-05 (#25): **20/20 pass**, so that theory was wrong. This
+/// fixture drains its subscriber in a tight loop with no round latency, so it
+/// never parks 256 chunks in a queue the way N5's does -- it was never
+/// exposed to the bound at all. Un-gated to `cfg(unix)` (file level), which
+/// is all it ever needed: it drives a real `/bin/sh`.
 #[tokio::test]
-#[cfg(target_os = "linux")]
 async fn disconnect_between_chunks_and_reconnect_has_no_gap_or_duplicate() {
     const TOTAL: usize = 2 * 1024 * 1024;
     let manager = SessionManager::new(sessions_root("gate"));

@@ -13,19 +13,39 @@
 //! in `session.rs`; this fixture is the end-to-end one, so it pays real time
 //! to a real child.
 //!
-//! `target_os = "linux"`-gated: it drives a real `/bin/sh` (same reason as
-//! `session_replay.rs`'s `cfg(unix)`), but also, found 2026-09-05, its pacing
-//! (`ROUND_LATENCY`, the trickle's `sleep 0.01` cadence) is tuned against
-//! Linux timing and doesn't reliably reproduce D1's failure mode on
-//! `macos-latest` -- the fixture's own guard caught this ("the pre-registered
-//! subscriber survived the catch-up window ... make the child noisier or the
-//! rounds slower before trusting it") rather than silently passing having
-//! tested nothing. Same category as
-//! [N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner):
-//! timing assumptions calibrated on one platform's CI runner, not diagnosed
-//! further without real macOS hardware to re-tune them against.
+//! `cfg(unix)`, for the ordinary reason: it drives a real `/bin/sh`.
+//!
+//! It was `target_os = "linux"`-gated on 2026-09-05 because its own guard
+//! fired on `macos-latest` -- the pre-registered subscriber survived the
+//! catch-up window, so the fixture was no longer reproducing D1. Measured on
+//! real macOS hardware 2026-09-05 (#25): the cause was the trickle's rate,
+//! not the platform. `sleep 0.01` nominally ticks 100x/s, but each iteration
+//! forks `sleep`, and on macOS fork+exec is expensive enough to hold the loop
+//! to ~31 iterations/s -- **51 chunks/s**, needing 5.0 s to reach the 256-chunk
+//! bound against a catch-up window of only ~4.8 s. The fixture sat directly on
+//! that boundary and failed about half of 20 runs.
+//!
+//! The trickle now emits `TICKS_PER_SLEEP` writes per fork, which decouples
+//! the rate from fork cost. The rate must stay inside a band, and both edges
+//! are real failures rather than flakes:
+//!
+//! * **> ~53 chunks/s** -- or `registered_first` never overflows its
+//!   256-chunk queue inside the catch-up window, and the guard below fires
+//!   because nothing is being reproduced.
+//! * **< ~640 chunks/s** -- or the *attaching* subscriber, which is not
+//!   draining for `ROUND_LATENCY` at a time, overflows the same bound during
+//!   a single round and is disconnected mid-catch-up, failing the test for a
+//!   reason D1 is not about.
+//!
+//! Measured 112 chunks/s on macOS (256 chunks in 2.3 s, comfortably inside the
+//! window). Linux forks more cheaply, so it sits higher in the band -- at the
+//! nominal 100 iterations/s it is ~400 chunks/s, still under the ceiling, and
+//! Linux ptys coalesce small writes far more aggressively than macOS's do
+//! (see #25: macOS pty reads average 14 bytes), which pushes it lower still.
+//! If this fixture needs re-tuning again, re-measure the chunk rate against
+//! that band -- do not adjust the cadence blind.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod support;
 
@@ -43,6 +63,10 @@ const BACKLOG: u64 = 12 * 1024 * 1024;
 /// during which the trickle below emits well past the 256-chunk half of the
 /// bound -- which is what makes the old ordering fail here, and fail fast.
 const ROUND_LATENCY: Duration = Duration::from_millis(400);
+/// Writes the trickle emits between forks of `sleep`. Keeps the live chunk
+/// rate inside the band documented in the module doc on both platforms,
+/// instead of inheriting whatever `fork` happens to cost.
+const TICKS_PER_SLEEP: u32 = 4;
 
 fn sessions_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -60,14 +84,21 @@ fn sessions_root(name: &str) -> PathBuf {
 /// The trickle is deliberately many small writes rather than a few large
 /// ones -- a slow consumer trips the count half of the queue bound long
 /// before the byte half, and the count half is the cheaper one to reach in a
-/// test.
+/// test. `TICKS_PER_SLEEP` writes go out per fork so the rate is set by the
+/// batch rather than by what `fork` costs on this OS; see the module doc for
+/// the band it has to stay inside.
 fn spawn_backlog_then_trickle(
     manager: &SessionManager,
 ) -> std::sync::Arc<teleportd::session::Session> {
     let cwd = std::env::temp_dir();
     let args = vec![
         "-c".to_string(),
-        format!("stty raw -echo; yes | head -c {BACKLOG}; while :; do printf 'tick\\n'; sleep 0.01; done"),
+        format!(
+            "stty raw -echo; yes | head -c {BACKLOG}; \
+             while :; do i=0; \
+             while [ $i -lt {TICKS_PER_SLEEP} ]; do printf 'tick\\n'; i=$((i+1)); done; \
+             sleep 0.01; done"
+        ),
     ];
     manager
         .create(
