@@ -1,0 +1,83 @@
+name: Desktop
+
+# issue #13: build-coverage only for desktop/src-tauri (M10) on macOS and
+# Windows, on every push/PR -- Linux is already exercised by hand per
+# desktop/README.md, and macOS/Windows had no CI coverage at all, so a
+# change here could silently break either without anyone finding out until
+# a real release.
+#
+# Deliberately its own file, not folded into release.yml: release.yml is
+# tag-triggered only ("never on every push", by its own comment) and exists
+# to publish signed release artifacts once those are set up -- this job
+# builds unsigned bundles on every push purely to prove the crate still
+# compiles and bundles. Not part of the release pipeline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos-aarch64
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-latest
+            name: macos-x86_64
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - os: windows-latest
+            name: windows
+            target: x86_64-pc-windows-msvc
+            bundles: msi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            daemon -> target
+            desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: build daemon sidecar
+        working-directory: daemon
+        run: cargo build --release --features embedded-web --target ${{ matrix.target }}
+
+      - name: stage sidecar
+        shell: bash
+        run: scripts/copy-sidecar.sh ${{ matrix.target }}
+
+      - name: npm ci (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: tauri build
+        working-directory: desktop
+        shell: bash
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error

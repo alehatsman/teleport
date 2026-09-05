@@ -30,13 +30,14 @@ process is `kill -9`'d → daemon and session both survive → relaunching
 re-probes and reattaches without spawning a second daemon. That's the M10
 gate, met on one platform.
 
+CI: `.github/workflows/desktop.yml` builds `desktop/src-tauri` (unsigned) on
+macOS (both arches) and Windows on every push/PR -- build coverage only, not
+part of the release pipeline (`release.yml` stays tag-only). Linux is still
+only exercised by hand, per above.
+
 Known gaps, tracked in [11-mvp-plan.md#m10](../docs/11-mvp-plan.md#m10--tauri-shell)
 rather than silently papered over:
 
-- **Windows "Stop daemon"** has no implementation yet -- no console-ctrl-event
-  path exists for a console-less, autostart-launched `teleportd`. Needs
-  either a small authenticated `POST /api/v1/shutdown` on the daemon or a
-  console-ctrl-handler dance.
 - **Windows detached-spawn** (`daemon::spawn_detached`) is written defensively
   (`CREATE_BREAKAWAY_FROM_JOB` et al.) but unverified on real Windows --
   spike this against a packaged build before trusting it.
@@ -48,8 +49,3 @@ rather than silently papered over:
 - **Signing/notarization**: not set up. Certs aren't in hand (confirmed with
   the user before scaffolding this); unsigned Linux builds work today,
   mac/Windows builds are unsigned until certs land.
-- **Icons** (`src-tauri/icons/`) are a placeholder solid-color "T" mark
-  generated for this scaffold -- swap before any real release.
-- **"NotOurs" / daemon-didn't-come-up** cases only log a warning today; the
-  spec calls for surfacing them in-app (the dialog plugin is already wired
-  in, just not used for this yet).
