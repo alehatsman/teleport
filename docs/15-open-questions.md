@@ -14,7 +14,7 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed repeatedly, workaround leads exhausted, first real stack trace obtained** — reproduced on a fully-native build (2026-09-05); Job Objects/IOCP ruled out as a workaround, no upstream fix found; a WinDbg trace then overturned the working "stuck in `ExitProcess`" theory — the real stack points at `conhost`'s own connection-handling thread blocked in a synchronous `ReadFile` inside `VtIo::StartIfNeeded`, not yet confirmed as *the* cause; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed genuinely unbounded (4+ min, no natural resolution), workaround leads exhausted, real stack trace obtained** — reproduced on a fully-native build (2026-09-05); Job Objects/IOCP ruled out as a workaround, no upstream fix found; WinDbg traces overturned the working "stuck in `ExitProcess`" theory (the real stack points at `conhost`'s own connection thread blocked in `VtIo::StartIfNeeded`'s `ReadFile`, not yet confirmed as *the* cause) and corrected an earlier "~12s natural resolution" misreading — that was the test harness's own process exit tearing down the tree, not the child; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
 | [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
@@ -271,36 +271,66 @@ This is a specific, named, searchable candidate for the actual mechanism — a s
 step up from "some ConPTY-side handshake," though not yet confirmed as *the* cause
 rather than *a* symptom caught at the same moment.
 
-**Not yet confirmed, flagged rather than overstated:**
-- **Single snapshot.** This is one stack, ~2s into one hang. Whether `ConsoleIoThread`
-  sits at exactly this line for the whole hang duration, or passes through it and gets
-  stuck somewhere else later, needs multiple snapshots across the window, not one.
-- **The process actually exited within ~1s of the non-invasive dump.** Unclear whether
-  that's coincidence (it was about to resolve anyway) or the act of attaching — even
-  non-invasively — nudged something loose (e.g. `NtReadFile` returning on a signal
-  delivered as a side effect of the attach). Worth a trial with no debugger at all,
-  timed the same way, to see whether ~2-5s is actually typical here or whether prior
-  8-12s-timeout runs are the norm and this run was already about to resolve on its own.
-- **A loosely similar historical bug exists**: [microsoft/terminal#1810](https://github.com/microsoft/terminal/issues/1810),
-  "ClosePseudoConsole API hanging," closed 2023/Terminal v1.17, whose report also
-  mentions "many leftover conhosts in the task manager" — the same visible symptom this
-  machine has accumulated over a day of spike runs (a dozen-plus orphaned `conhost.exe`/
-  `mini_exit.exe`/`OpenConsole.exe` processes at the time of this trace, none from this
-  run). Not confirmed as the same underlying bug — the issue's own thread isn't
-  documented beyond the report — and this build (26200) postdates its fix. Recorded as a
-  loose lead, not a match: the *symptom name* overlaps, the *mechanism* is unconfirmed.
-- **This machine's accumulated zombie processes are an uncontrolled variable.** Every
-  run this session has left its stuck `conhost.exe`/`mini_exit.exe` behind (nothing
-  reaps them — that's the whole bug). A clean reboot before the next trace would rule
-  out resource contention among a growing pile of already-wedged sessions as a
-  confound, even though a blocking `ReadFile` with no writer doesn't look like a
-  contention symptom on its face.
+**Follow-up, same day, after a clean reboot — the single-snapshot concerns above are now
+resolved, and one of them exposed a real mistake in this section's own reasoning.**
 
-**Next step, not yet done:** repeat this trace 3-5 times across a single hang's full
-duration (not just once at +2s) to confirm `ConsoleIoThread` is parked at this exact
-call chain for the whole window rather than caught mid-transition, ideally after a
-clean reboot to remove the zombie-process variable, and once with no debugger attached
-at all timed identically to check whether attaching changes the outcome.
+Rebooted to clear the zombie-process pile-up (confirmed clean: 0 leftover `conhost`/
+`mini_exit` after reboot), then ran a **multi-snapshot** trace: attach-and-dump
+`conhost`'s `ConsoleIoThread` roughly every 1.5s across a single hang, six snapshots
+from 8ms to 11177ms. **`ConsoleIoThread` sits at the exact same `VtIo::StartIfNeeded →
+VtInputThread::DoReadInput → ReadFile` call chain at every snapshot** — a stable,
+whole-window block, not a mid-transition artifact. The single-snapshot concern is
+closed: this is where it stays.
+
+The other concern — "the process exited ~1s after the non-invasive dump, did attaching
+cause that?" — led somewhere more important. The same multi-snapshot run's control pass
+(no debugger, `mini_exit` polled from a separate process) showed it disappearing
+undisturbed at ~12.3s, which **this section originally recorded as the child resolving
+naturally.** That was wrong, and the mistake is worth stating plainly rather than
+quietly fixing: `s5_minimal` (every prior test) gives up waiting after 8s, sleeps 4
+more seconds "in case EOF shows up late," and *then calls `std::process::exit(1)`* —
+8 + 4 = 12s, matching the observed disappearance almost exactly. **Process exit closes
+every handle the OS holds for that process, including the ConPTY master** — which tears
+down the whole console/child tree as a side effect. The ~12s "resolution" was never the
+child completing; it was the *test harness's own scripted exit* cleaning up after
+itself. Once you know to look for it, this is obvious — 8+4=12 is not a coincidence —
+but nothing before the multi-snapshot control run isolated the harness's own exit from
+the child's, because every prior test's observer process died at a fixed, predictable
+offset from its own timeout.
+
+**Built two more spikes to settle it properly.** `s7_long_wait.rs`: same as `s5_minimal`
+but an 30s timeout instead of 8s, no grace-sleep — still confounded (it calls
+`std::process::exit(1)` the instant its own timeout fires), and sure enough, polling a
+live run showed `mini_exit` vanishing at the same moment `s7`'s own last log line
+appeared, not before. `s8_never_timeout.rs` removes the confound entirely: `child.wait()`
+with **no timeout at all**, and after `wait()` (which the code never expects to return),
+the process parks in an infinite sleep loop rather than exiting — so nothing it does can
+ever tear the tree down as a side effect. Run for **265+ seconds (4.4+ minutes)**,
+polled independently the whole time: `mini_exit.exe` stayed alive and unreaped,
+`wait()` never returned, and `s8` itself never exited. Manually killed at that point,
+not because it resolved.
+
+**Corrected conclusion: the graceful-exit hang has no observed natural resolution.**
+It is not a slow reap that finishes around 12s if you wait long enough — every apparent
+resolution seen anywhere in this investigation was the *observing* process's own exit
+tearing the tree down, not the child completing on its own. Left genuinely alone, the
+child and the `conhost.exe` connection-handling thread blocking it both stay wedged for
+at least 4+ minutes, and there's no evidence either would ever resolve unassisted.
+
+**A loosely similar historical bug exists**: [microsoft/terminal#1810](https://github.com/microsoft/terminal/issues/1810),
+"ClosePseudoConsole API hanging," closed 2023/Terminal v1.17, whose report also mentions
+"many leftover conhosts in the task manager." Not confirmed as the same underlying bug —
+this build (26200) postdates its fix, and the issue's own thread doesn't document the
+mechanism — recorded as a loose lead, not a match.
+
+**Next step, not yet done:** the mechanism candidate (`conhost`'s `ConsoleIoThread`
+synchronously blocked in `ReadFile` inside `VtIo::StartIfNeeded`) is still a strong
+correlate, not a proven cause. Confirming it needs either ETW tracing of what that
+`ReadFile` is actually waiting on, or reading `VtIo::StartIfNeeded`'s source (not
+available locally — `conhost.exe`'s VT-I/O implementation isn't the open-source
+`OpenConsole.exe`/Windows Terminal codebase; the OS-shipped `conhost.exe` this spawns
+under is a separate, closed-source binary, so the wezterm/Windows-Terminal GitHub repo
+searched earlier for leads 1-2 doesn't contain the code actually running here).
 
 **Engineering implication if root cause is never found:** the existing termination
 policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a
@@ -313,7 +343,10 @@ finding above — there is no cheap heuristic (CPU, silence) to distinguish "fin
 but stuck exiting" from "legitimately idle and still running," and now Job Objects are
 also confirmed not to be that fallback signal. Closing this gap for real needs the
 actual root cause; there is no cheap heuristic-based or alternate-API shortcut left
-that hasn't already been ruled out.
+that hasn't already been ruled out. And per the follow-up above, a fixed-timeout
+heuristic ("declare it exited if `wait()` hasn't returned after N seconds") isn't a
+credible stopgap either — there's no natural resolution time to time it against; the
+hang is open-ended, confirmed to outlast 4+ minutes with nothing external to end it.
 
 **Why this blocks M1 harder than S1-S4 did on their own:** if this holds up, the
 *common* case — an agent process finishing normally — would never move a session to

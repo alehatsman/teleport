@@ -17,6 +17,8 @@ cargo build
 ./target/debug/s4_drop_master <plain|grandchild>
 ./target/debug/s5_minimal <exit0|exit7|sigkill>
 ./target/debug/s6_job_object <exit0|exit7|sigkill>   # Windows only, see below
+./target/debug/s7_long_wait <exit0|exit7>            # wait() with a 30s timeout, not 8s
+./target/debug/s8_never_timeout <exit0|exit7>        # wait() with NO timeout -- never self-exits, kill manually
 ```
 
 All output goes to stderr (unbuffered), not stdout.
@@ -48,8 +50,22 @@ either, so don't reach for this file as a fix starting point).
 Tools for Windows, not the Store WinDbg Preview — needs `choco install
 windows-sdk-10-version-2004-windbg` or equivalent) non-invasively to both the stuck
 child and its `conhost.exe`, dumping every thread's stack. Must run **elevated**
-(`SeDebugPrivilege`). See W1 for what the one trace so far found, and the note that
-it's a single snapshot, not yet confirmed stable across the whole hang window.
+(`SeDebugPrivilege`). `w1-windbg-trace-multi.ps1` is the follow-up: an undisturbed
+timing control plus repeated snapshots across one hang's full duration, also elevated.
+See [W1](../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+for what both found, including a correction: an earlier reading of the timing control as
+"the child resolves naturally around 12s" was wrong -- `s7_long_wait`/`s8_never_timeout`
+below pinned down why.
+
+`s7_long_wait` and `s8_never_timeout` exist because `s5_minimal`/`s1_reaper` cap their
+own `wait()` loop at 8s and then **exit the observing process itself** -- and process
+exit closes every handle it holds, including the ConPTY master, which tears the whole
+child tree down as a side effect. That makes "the child disappeared" ambiguous: did it
+exit on its own, or did the test harness's own teardown kill it? `s8_never_timeout` in
+particular never exits on its own no matter what `wait()` does, so anything it observes
+is unambiguously the child's own behavior, not the harness's. Confirmed run: 265+
+seconds, `wait()` never returned, `mini_exit.exe` never disappeared. Kill it manually
+(`taskkill /F` or `Stop-Process`) when done with it -- it will not stop on its own.
 
 Cross-compiled binaries are built from the Linux side
 (`cargo build --target x86_64-pc-windows-gnu`, needs `mingw-w64` +

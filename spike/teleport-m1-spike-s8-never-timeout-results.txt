@@ -1,0 +1,60 @@
+STILL ALIVE after full wait window -- s8 has genuinely not reaped it, and mini_exit is still resident
+[s8] scenario=exit0 exe="C:\\Users\\aleh\\projects\\teleport\\spike\\target\\debug\\mini_exit.exe" pid=Some(29952)
+[s8] this process will NOT self-exit -- kill it manually when done
+[s8] blocking on child.wait() now, no timeout, no self-exit
+[s8] reader got 4 bytes at 0ms: "\u{1b}[6n"
+[s8] heartbeat at 5000ms -- still running, still waiting
+[s8] heartbeat at 10004ms -- still running, still waiting
+[s8] heartbeat at 15007ms -- still running, still waiting
+[s8] heartbeat at 20010ms -- still running, still waiting
+[s8] heartbeat at 25014ms -- still running, still waiting
+[s8] heartbeat at 30021ms -- still running, still waiting
+[s8] heartbeat at 35024ms -- still running, still waiting
+[s8] heartbeat at 40025ms -- still running, still waiting
+[s8] heartbeat at 45026ms -- still running, still waiting
+[s8] heartbeat at 50027ms -- still running, still waiting
+[s8] heartbeat at 55028ms -- still running, still waiting
+[s8] heartbeat at 60029ms -- still running, still waiting
+[s8] heartbeat at 65030ms -- still running, still waiting
+[s8] heartbeat at 70031ms -- still running, still waiting
+[s8] heartbeat at 75032ms -- still running, still waiting
+[s8] heartbeat at 80033ms -- still running, still waiting
+[s8] heartbeat at 85034ms -- still running, still waiting
+[s8] heartbeat at 90035ms -- still running, still waiting
+[s8] heartbeat at 95036ms -- still running, still waiting
+[s8] heartbeat at 100037ms -- still running, still waiting
+[s8] heartbeat at 105038ms -- still running, still waiting
+[s8] heartbeat at 110039ms -- still running, still waiting
+[s8] heartbeat at 115040ms -- still running, still waiting
+[s8] heartbeat at 120041ms -- still running, still waiting
+[s8] heartbeat at 125042ms -- still running, still waiting
+[s8] heartbeat at 130043ms -- still running, still waiting
+[s8] heartbeat at 135044ms -- still running, still waiting
+[s8] heartbeat at 140045ms -- still running, still waiting
+[s8] heartbeat at 145046ms -- still running, still waiting
+[s8] heartbeat at 150047ms -- still running, still waiting
+[s8] heartbeat at 155048ms -- still running, still waiting
+[s8] heartbeat at 160049ms -- still running, still waiting
+[s8] heartbeat at 165050ms -- still running, still waiting
+[s8] heartbeat at 170051ms -- still running, still waiting
+[s8] heartbeat at 175052ms -- still running, still waiting
+[s8] heartbeat at 180053ms -- still running, still waiting
+[s8] heartbeat at 185054ms -- still running, still waiting
+[s8] heartbeat at 190055ms -- still running, still waiting
+[s8] heartbeat at 195055ms -- still running, still waiting
+[s8] heartbeat at 200056ms -- still running, still waiting
+[s8] heartbeat at 205057ms -- still running, still waiting
+[s8] heartbeat at 210058ms -- still running, still waiting
+[s8] heartbeat at 215059ms -- still running, still waiting
+[s8] heartbeat at 220061ms -- still running, still waiting
+[s8] heartbeat at 225061ms -- still running, still waiting
+[s8] heartbeat at 230062ms -- still running, still waiting
+[s8] heartbeat at 235063ms -- still running, still waiting
+[s8] heartbeat at 240064ms -- still running, still waiting
+[s8] heartbeat at 245064ms -- still running, still waiting
+[s8] heartbeat at 250065ms -- still running, still waiting
+[s8] heartbeat at 255066ms -- still running, still waiting
+[s8] heartbeat at 260067ms -- still running, still waiting
+[s8] heartbeat at 265068ms -- still running, still waiting
+
+[exited with code 0]
