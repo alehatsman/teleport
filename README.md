@@ -42,6 +42,24 @@ That's it — no separate build step, no config required to start. The web UI le
 open a shell or spawn an agent preset, and the session keeps running whether or not
 anything is attached to watch it.
 
+## Use over Tailscale (phone/remote)
+
+`teleportd` only binds `127.0.0.1`; Tailscale Serve proxies it to your tailnet over
+HTTPS — no public exposure, no extra auth to build.
+
+```bash
+teleportd --listen 127.0.0.1:7337
+# http://127.0.0.1:7337/?token=3f9a1c...          <- printed on start, note the token
+
+tailscale serve --bg http://127.0.0.1:7337
+# Serve config saved. Access via https://mainpc.tail1234.ts.net/
+```
+
+Add your tailnet hostname to `allowed_hosts`/`allowed_origins` in
+`<data_dir>/config.toml`, then open `https://mainpc.tail1234.ts.net/?token=...` from
+your phone. See [docs/07-remote-access.md](docs/07-remote-access.md) for details, ACLs,
+and the Cloudflare Tunnel alternative.
+
 ## Screenshots
 
 Launch a preset (or a plain shell command) from the session list:
