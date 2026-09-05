@@ -27,6 +27,7 @@ backlog pretending to be a spec.
 | [N3](#n3--xtermjs-write-pacing-on-reattach) | xterm.js write pacing on reattach | M5 | decision |
 | [N4](#n4--reconnect-storms-and-reader-thread-contention) | Many simultaneous catch-ups reacquiring the reader thread's mutex | M4 | measurement + decision |
 | [N5](#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner) | A maximally-fast producer can outrun catch-up's throughput on a slow/loaded runner | M4 | found in CI 2026-09-05, `target_os` off macOS, not designed |
+| [P1](#p1--the-native-bearer-ws-path-has-never-been-driven-by-a-real-native-client) | Has a real native (non-browser) client ever driven the bearer-on-WS auth path? | iOS Phase 1 spike (docs/13) | **open** — planned, needs a Mac |
 
 W1 and S1–S5 are **blocking**. The rest are decisions that must be *made* before
 their milestone, not necessarily *built*. (D1 — replay sharing the live subscriber
@@ -785,6 +786,33 @@ catch-up throughput. A `cargo test --no-fail-fast` diagnostic pass
 the entire suite once this and the two fixtures above were gated -- not an
 open-ended cascade, three fixtures sharing one root cause.
 `target_os = "linux"`-gated alongside them.
+
+---
+
+# Native client readiness
+
+## P1 — the native bearer-WS path has never been driven by a real native client
+
+**Not blocking any MVP milestone. Blocks the iOS Phase 1 spike ([13-native-clients.md](13-native-clients.md#phase-1-implementation-plan)).**
+
+[12-identity-and-connectivity.md](12-identity-and-connectivity.md#client-classes-and-why-origin-is-not-universal)
+specifies the native-client path precisely: no `Origin` header, `Authorization: Bearer`
+presented on the WS upgrade itself (not `?token=`), credential mandatory. Every test that
+exercises this today is either the Rust-side test suite calling the handler directly, or
+the browser client (which takes the *other* path — `Origin` present, no header on WS,
+since `WebSocket` in a browser cannot set one). Nobody has yet pointed a real
+`URLSessionWebSocketTask` (or any non-browser HTTP client) at a running daemon and
+confirmed the handshake, offset framing, and bounded `tail` behave as documented from
+that side.
+
+This is exactly the shape of gap this file exists to hold — a mechanism confidently
+specified and plausibly correct by code review, not yet proven by running the actual
+client class against it. Low risk (the server-side code path is generic, not
+browser/native-specific internally), but "low risk" was also W1's starting assumption.
+
+**Closed by:** step 1 of the iOS Phase 1 plan — a bare connectivity spike, no UI, before
+any Swift UI is built on top of the assumption. Needs a Mac; not runnable from this
+environment.
 
 ---
 

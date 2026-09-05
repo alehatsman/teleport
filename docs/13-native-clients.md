@@ -3,6 +3,32 @@
 Native iOS/Android apps are **out of MVP scope**. This doc exists so the MVP does not
 accidentally make them expensive.
 
+## Two phases, two different blockers
+
+"Native iOS app" reads like one project. It isn't — it splits into two pieces with
+different dependencies, and conflating them is what makes the whole thing look stuck
+behind the MVP when most of it is not.
+
+| | **Phase 1 — Tailscale-only shell** | **Phase 2 — account/push** |
+|---|---|---|
+| Needs | daemon + API (M0–M9, delivered) | [cloud backend](14-cloud-backend.md) — not started |
+| Auth | `Principal::DeviceToken`, existing bearer token ([12](12-identity-and-connectivity.md#the-principal)) | `Principal::Account`, pairing, device credential |
+| Reachability | Tailscale Serve, same as today's browser client | outbound relay |
+| Gives you | session list, attach, control, from your phone | push ("agent is waiting"), multi-device list, no manual URL/token entry |
+| Blocked on M10 (Tauri)? | **no** — M10 is desktop packaging, orthogonal | no |
+| Blocked on `cloud/`? | **no** | **yes** |
+
+**Phase 1 is buildable now, in parallel with M10.** Every server-side obligation it
+needs (bearer-on-WS, Origin-optional for credentialed clients, bounded `tail`, `/health`
+capabilities) is already built and listed in the obligations table below. Nothing in
+this doc's "post-MVP" framing is a technical blocker for Phase 1 — it's just the reason
+nobody built it yet. Phase 2 is genuinely gated: push and pairing cannot exist before
+`cloud/` does, per [14-cloud-backend.md](14-cloud-backend.md#sequencing).
+
+The rest of this doc was written before that split existed and describes the end
+state (both phases together). [Phase 1 implementation plan](#phase-1-implementation-plan)
+at the bottom scopes down to what's actually buildable first.
+
 ## The protocol is already native-ready
 
 This is not an accident and it should be preserved deliberately:
@@ -166,3 +192,59 @@ aggregation.
 - **Local network shortcut:** if the phone and daemon are on the same LAN, connecting
   directly beats relaying. Worth doing eventually; it is a latency and cost win, not a
   correctness one.
+
+## Phase 1 implementation plan
+
+Scoped to what needs no cloud backend: manual daemon URL + token entry (paste or QR,
+no pairing flow), Tailscale reachability, no push. Requires Xcode/macOS — work resumes
+on a Mac, this plan is the handoff.
+
+**Repo shape** (per [01-architecture.md](01-architecture.md#repository-layout)'s
+`mobile/` placeholder):
+
+```text
+mobile/
+└── ios/
+    └── Teleport/
+        ├── App.swift              — entry point, deep-link routing
+        ├── ConnectView.swift      — daemon URL + token entry, stored in Keychain
+        ├── SessionListView.swift  — GET /api/v1/sessions, 3s poll while visible (D2)
+        ├── TerminalView.swift     — WKWebView hosting web/'s existing Terminal.svelte
+        ├── KeyboardAccessory.swift — Esc Tab Ctrl ↑↓←→ Ctrl-C bar
+        ├── BiometricGate.swift    — Face ID gate before showing terminal content
+        └── Lifecycle.swift        — foreground reconnect (tail=), background close
+```
+
+**Step order (riskiest assumption first, same discipline as the M1 spike):**
+
+1. **Connectivity spike, no UI.** A bare `URLSessionWebSocketTask` from a throwaway
+   Swift command-line target, dialing a real daemon over Tailscale with
+   `Authorization: Bearer <token>` on the upgrade. This exact path
+   (native client, no `Origin`, credential on WS) is spec'd in
+   [12](12-identity-and-connectivity.md#client-classes-and-why-origin-is-not-universal)
+   and listed as an MVP obligation, but has never been driven by a real native
+   client — every test of it so far is the browser or Rust-side tests. Confirm the
+   attach handshake, offset framing, and bounded `tail` behave as documented before
+   writing any Swift UI on top of an assumption.
+2. **`TerminalView`**: WKWebView pointed at the daemon's own served SPA
+   (`http://<tailnet-host>:<port>/?token=…`) — reuse the whole web app inside the
+   WebView rather than reimplementing the terminal component natively. Confirms the
+   "native shell, WebView terminal" shape end to end before building navigation
+   around it.
+3. **`ConnectView` + Keychain** — manual URL/token entry, since pairing doesn't exist
+   yet. This is deliberately the crude Phase 1 UX; Phase 2 replaces it with QR pairing.
+4. **`SessionListView`** — session list + polling (D2), badge on `last_bell_ms`/
+   `idle_since_ms` (already on the M8 session payload) even with no push behind it yet.
+5. **`Lifecycle.swift`** — foreground/background per the [Lifecycle](#lifecycle)
+   section above; this is the part most likely to reveal iOS-specific surprises
+   (background execution time limits, WKWebView suspension behavior) and should be
+   tested against real backgrounding, not the simulator's lifecycle, before trusting it.
+6. **`KeyboardAccessory` + `BiometricGate`** — polish, lowest risk, do last.
+
+**Validation:** each step gets a real device + real Tailscale connection test before
+moving on, not a simulator-only pass — steps 1 and 5 in particular are exactly the kind
+of "looks right, isn't" gap this project's spike culture exists to catch
+([15-open-questions.md](15-open-questions.md)).
+
+**Explicitly deferred to Phase 2, do not build early:** push, pairing/QR enrollment,
+device list, local-network direct-connect shortcut.
