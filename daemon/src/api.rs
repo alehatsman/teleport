@@ -16,7 +16,7 @@ use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
@@ -53,6 +53,13 @@ pub struct AppState {
     /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
     /// run dev` workflow, which never touches this router at all.
     pub web_dist: Option<PathBuf>,
+    /// Wakes `main.rs`'s `shutdown_signal()` future
+    /// (docs/11-mvp-plan.md#m10) -- the one trigger `POST /api/v1/shutdown`
+    /// has. `notify_one()` is remembered even if no one is waiting yet
+    /// (Tokio's "permit" semantics), so a request that lands before
+    /// `shutdown_signal()`'s first `.await` still shuts the daemon down
+    /// rather than being silently lost.
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 /// `Principal` as an axum extractor: every handler that needs one declares
@@ -201,6 +208,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}/log", get(get_log))
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
+        .route("/api/v1/shutdown", post(shutdown))
         .fallback(spa_fallback)
         .with_state(state)
 }
@@ -260,7 +268,7 @@ fn route_not_found() -> Response {
 }
 
 const API_VERSIONS: &[&str] = &["v1"];
-const CAPABILITIES: &[&str] = &["sessions", "presets", "tail_attach"];
+const CAPABILITIES: &[&str] = &["sessions", "presets", "tail_attach", "remote_shutdown"];
 
 /// `GET /api/v1/health` -- the one route reachable without a credential
 /// (docs/04-api-protocol.md#get-apiv1health). Calls [`auth::resolve`]
@@ -741,6 +749,41 @@ async fn list_presets(
     _principal: Principal,
 ) -> impl IntoResponse {
     Json(serde_json::json!({ "presets": state.presets }))
+}
+
+/// `POST /api/v1/shutdown` (docs/04-api-protocol.md#post-apiv1shutdown) --
+/// the cross-platform trigger for `main.rs`'s existing graceful-shutdown
+/// path (docs/11-mvp-plan.md#m10). Added because Windows has no reachable
+/// SIGTERM equivalent for a console-less, Task-Scheduler/autostart-launched
+/// `teleportd`: `GenerateConsoleCtrlEvent` requires a console shared with the
+/// target process, which a detached daemon never has
+/// (`desktop/src-tauri/src/daemon.rs`'s `terminate_gracefully` doc comment).
+/// Unix keeps its existing `SIGTERM` path unchanged -- this route exists
+/// alongside it, not instead of it, so working code isn't disturbed to fix a
+/// Windows-only gap.
+///
+/// Requires the same credential and Origin check as any other mutating
+/// route ([`check_origin`]) -- there is nothing else standing between an
+/// unauthenticated request and ending every session on the machine.
+///
+/// Responds `202` the instant the signal is queued via
+/// [`tokio::sync::Notify::notify_one`], not once shutdown has actually
+/// finished -- `axum::serve`'s graceful-shutdown drain (and the PTY layer's
+/// own bounded termination policy, docs/03-pty-layer.md#concrete-policy) can
+/// still take a few seconds after this response is sent. A caller that needs
+/// to know shutdown is *done* should poll `/health` until the connection is
+/// refused, not block on this response.
+async fn shutdown(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    check_origin(&state, &headers)?;
+    state.shutdown.notify_one();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "shutting_down" })),
+    ))
 }
 
 fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {

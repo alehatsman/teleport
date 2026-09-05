@@ -282,13 +282,15 @@ async fn stop_daemon_flow(app: &AppHandle) {
     }
     #[cfg(windows)]
     {
-        // TODO(M10 follow-up, tracked in docs/11-mvp-plan.md#m10): no
-        // console-ctrl-event path exists yet for a console-less, autostart
-        // -launched teleportd on Windows. Needs either a small authenticated
-        // POST /api/v1/shutdown on the daemon or a console-ctrl-handler
-        // dance -- deliberately not papered over with an ungraceful
-        // taskkill here.
+        // Windows has no console-ctrl-event path to a console-less,
+        // autostart-launched teleportd, so this goes over HTTP instead of a
+        // signal -- see `daemon::shutdown_gracefully`'s doc comment (issue
+        // #12, docs/11-mvp-plan.md#m10). `pid` isn't needed here (the
+        // request is authenticated by token, not by process identity); it
+        // was only ever used to name the SIGTERM target on Unix.
         let _ = pid;
-        error!("stop-daemon is not yet implemented on Windows -- see docs/11-mvp-plan.md#m10");
+        if let Err(e) = daemon::shutdown_gracefully(&dir).await {
+            error!(error = %e, "failed to stop daemon");
+        }
     }
 }
