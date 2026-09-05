@@ -258,8 +258,30 @@ async fn repeated_attach_against_a_concurrent_writer_never_gaps() {
 /// where the daemon actually is (docs/04-api-protocol.md#attach-race).
 #[tokio::test]
 async fn attaching_past_next_offset_is_offset_ahead() {
+    const BURST: u64 = 1024;
+
     let manager = SessionManager::new(sessions_root("ahead"));
-    let session = spawn_emitting(&manager, 1024);
+    let session = spawn_emitting(&manager, BURST as usize);
+
+    // Let the whole burst land before attaching to anything. `spawn_emitting`
+    // writes exactly `BURST` bytes and then blocks in `cat` forever, so once
+    // the head reaches it the producer is done for good -- which is what the
+    // at-head attach below actually requires, and what this fixture was
+    // missing (#38). With the burst still in flight, bytes that land between
+    // `attach` and the subscriber's registration come back in
+    // `Attach::replay`, which `support::catch_up` folds into the same
+    // accumulator it returns; `replayed.is_empty()` then fails on timing
+    // alone, with nothing wrong in the product. Same precondition
+    // `session_catchup.rs`'s D1 gate and `reconnect_storm.rs` already wait
+    // on, for the same reason.
+    let deadline = std::time::Instant::now() + RECV_TIMEOUT;
+    while session.next_offset() < BURST {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child never produced its burst"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let next_offset = session.next_offset();
     match session.attach(next_offset + 4096) {
