@@ -910,6 +910,81 @@ reattaches. Browser-only mode remains fully functional.
 > LaunchAgent, and M9's `--bg` reboot persistence. macOS moves from "CI build only" to
 > gate-verified in the cross-OS ledger (#8).
 
+> **Validation item 1 (the gate itself) re-run on Windows, 2026-09-06 -- real hardware
+> (Windows 11 Pro, build 26200), not CI.** The same box W1-W3/N5/the job-breakaway item
+> above were verified on. Two passes.
+>
+> First pass used `cargo build --release`'s own `teleport-desktop.exe` + sidecar
+> directly (this machine had no node/npm yet, so neither `npx tauri build` nor the
+> daemon's `embedded-web` feature were available) against the real default data dir
+> (`%LOCALAPPDATA%\teleport`, already populated from earlier work on this machine --
+> no isolation override exists in `main.rs`'s launch path, so this ran against real
+> data; nothing destructive, one extra session row same as any normal run):
+>
+> | Step | Result |
+> |---|---|
+> | launch | `no daemon reachable; starting teleportd detached`; daemon fell back to `serving API only` (no `web/dist` yet) |
+> | detached spawn | `ParentProcessId` still points at the GUI (Windows never reparents on exit, unlike Unix's pid-1 reparenting) -- not itself proof; the quit step below is |
+> | create a session | `POST /api/v1/sessions` -> `running`, real `cmd.exe` child, `/health` `sessions_running: 1` |
+> | quit | GUI's single pid `taskkill /F`'d, not `/T` -- Windows has no whole-process-group-kill primitive to mirror the macOS run's group kill, and "one pid, no tree" is what a real user's Task Manager "End Task" actually does; the harder containing-*job* case is exactly what the job-breakaway item above already covers separately |
+> | survives | `teleportd.exe` and the session's `cmd.exe` both alive, same pids; `/health` unchanged |
+> | reopen | `attaching to our daemon ... sessions_running=1`; exactly one `teleportd.exe`, same pid as before |
+> | shutdown | `POST /api/v1/shutdown` -> `{"status":"shutting_down"}`; daemon logged `shutdown signal received`; both processes exited clean |
+>
+> Passed, no new bugs -- but not yet against a real installer, the one gap the macOS
+> run didn't have (macOS used a real `tauri build --bundles app`).
+>
+> So node/npm were installed (`winget install OpenJS.NodeJS.LTS`) to close that gap
+> for real rather than write it up as a permanent caveat. `npm run build` (web UI) and
+> `cargo build --release --features embedded-web` (daemon) both then worked, and
+> `npx tauri build --bundles nsis` produced a real, unsigned `Teleport_0.1.0_x64-setup.exe`
+> (installed silently with `/S`). One snag getting there, not Windows-gate-related but
+> worth recording: `npx tauri build` looked for the sidecar under a
+> `teleportd-x86_64-pc-windows-msvc.exe` name even though this machine's active rustup
+> toolchain is `stable-x86_64-pc-windows-gnu` (`rustup show`) -- tauri-cli's own
+> target-triple detection doesn't follow the project's toolchain override. Worked
+> around by also staging the sidecar under the msvc-suffixed name (same binary,
+> `CreateProcessW` doesn't care what a GNU-toolchain-compiled exe is named); the
+> underlying toolchain mismatch is a local-machine setup quirk, not a repo bug.
+>
+> The real installer immediately caught a real bug the raw-binary pass above could not
+> have: the installed app failed to launch at all
+> (exit `STATUS_DLL_NOT_FOUND` / `0xC0000135`). Root cause, confirmed by a controlled
+> A/B (copying the missing file in, relaunching, removing it again): `WebView2Loader.dll`
+> is a real runtime dependency of this project's GNU/MinGW-toolchain Windows build (it
+> sits right next to `cargo build`'s own output) but was never in the NSIS file list, so
+> a clean install had no copy of it anywhere. This is specific to the GNU toolchain
+> path -- the far more common MSVC-toolchain Tauri build statically resolves this
+> differently -- which is exactly why build-only CI (which never actually launches the
+> installed artifact) never caught it. Fixed with a new
+> `desktop/src-tauri/tauri.windows.conf.json` (Tauri auto-merges
+> `tauri.<platform>.conf.json` per platform, so this is additive and Windows-only, zero
+> risk to the Linux/macOS bundles) declaring `target/release/WebView2Loader.dll` as a
+> bundle resource. Rebuilt, reinstalled, full gate table above re-run end to end against
+> the fixed installer with no manual workaround: passed, and for the first time the
+> real embedded web UI actually rendered (`GET /` served the built SPA, not the
+> API-only 404 fallback) -- the first time this milestone's Windows testing has ever
+> seen the real window content rather than a proxy for it.
+>
+> One more thing caught while installed, tracked rather than blind-fixed: the NSIS
+> installer's default per-user install directory, `%LOCALAPPDATA%\Teleport`, and the
+> daemon's own data directory, `%LOCALAPPDATA%\teleport`, are the same physical folder
+> (NTFS is case-insensitive). Confirmed harmless today -- the generated uninstaller
+> only `Delete`s three named files then a non-recursive `RMDir` (so it no-ops rather
+> than touching `state.db`/`sessions/`/etc.), and its "delete app data" checkbox
+> targets a different, unused `%LOCALAPPDATA%\<reverse-dns-id>` path -- but an upgrade
+> install while a previous `teleportd.exe` is still running detached in that same
+> folder was not exercised, and Windows generally refuses to overwrite a running
+> executable. Left open in `desktop/README.md` rather than guessed at.
+>
+> Windows moves from "CI build only" to gate-verified against a real installer in the
+> cross-OS ledger (#8) -- the only one of the three platforms tested against an actual
+> installer artifact rather than a bundled `.app`/raw binary, since that's what
+> surfaced the `WebView2Loader.dll` gap. Still not done, unchanged from before this
+> run: validation item 2 (tray "Stop daemon" confirmation needs a human click),
+> `autostart/windows.rs`'s Task Scheduler/registry autostart, and M9's `--bg` reboot
+> persistence.
+
 ---
 
 ## M11 — CLI client
