@@ -177,6 +177,16 @@ pub fn spawn_detached(data_dir: &Path) -> Result<()> {
         .context("cloning daemon log file handle")?;
 
     let mut cmd = std::process::Command::new(&path);
+    // Explicit, not implicit: `data_dir` is already what daemon/src/main.rs's
+    // own default resolution independently computes (see this module's top
+    // doc comment), so this changes nothing about where the real app's data
+    // ends up -- but it stops this being "two independent guesses that must
+    // happen to agree" (exactly the class of bug data_dir()'s own doc
+    // comment warns about) and turned up while adding a real, isolated
+    // integration test for spawn_detached itself: without this, that test
+    // had no way to point the real child anywhere but the developer's actual
+    // production data directory.
+    cmd.arg("--data-dir").arg(data_dir);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file_stderr));
@@ -350,5 +360,269 @@ pub async fn shutdown_gracefully(data_dir: &Path) -> Result<()> {
             "POST /api/v1/shutdown returned {}",
             resp.status()
         ))
+    }
+}
+
+/// Real, non-simulated verification of [`spawn_detached`]'s Windows
+/// job-breakaway defense -- closing the gap `desktop/README.md` flagged
+/// after M10's spike: `spike/src/bin/s11_windows_job_breakaway.rs`
+/// reimplemented the exact same `CreateProcess` creation flags in a
+/// standalone binary to answer "does `CREATE_BREAKAWAY_FROM_JOB` work at
+/// all here" -- it never called *this crate's* [`spawn_detached`] /
+/// [`spawn_windows_with_breakaway_retry`] at all. These tests do, against
+/// the real, unmodified functions above, with a real `teleportd.exe` (built
+/// separately by `cargo build --release` in `../../daemon`, then staged
+/// next to this test binary's own `current_exe()` so [`sidecar_path`]
+/// resolves it exactly as it would in the shipped app), with the test
+/// process itself assigned to a real Job Object shaped like a restrictive
+/// IDE debugger's or CI runner's containing job
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, deliberately no `BREAKAWAY_OK`) --
+/// as real as this gets without literally being launched by one.
+///
+/// `#[ignore]`d: needs the daemon binary prebuilt first (see
+/// `real_teleportd_path`) and, because assigning *the whole test process* to
+/// a job object is process-wide state, must be run serially
+/// (`cargo test -- --ignored --test-threads=1`), not left for a default
+/// parallel `cargo test` to interleave with anything else in this binary.
+#[cfg(all(test, windows))]
+mod job_breakaway_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::ptr;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    /// Guards both tests below: each one reassigns *the entire current
+    /// process* to a Job Object, which is process-wide state, not something
+    /// two tests can safely do concurrently on separate threads of the same
+    /// binary. Same pattern as `pty_primitive_windows.rs`'s `SERIAL` mutex
+    /// (W3, docs/15-open-questions.md), same reason.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// `../../daemon/target/release/teleportd.exe`, relative to this
+    /// crate's manifest dir -- the exact binary `scripts/copy-sidecar.sh`
+    /// stages for a real bundle. Built by hand first, not by this test:
+    /// `cargo test` silently kicking off a second crate's release build
+    /// would make failures here hard to attribute.
+    fn real_teleportd_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daemon/target/release/teleportd.exe")
+    }
+
+    /// Stages the real daemon binary exactly where `sidecar_path()` looks
+    /// for it: next to *this test binary's own* `current_exe()`. From here
+    /// on, `spawn_detached` is spawning the genuine `teleportd`, not a stub.
+    fn stage_real_sidecar() {
+        // Clear out any process left over from a previous run's panic
+        // before it gets a chance to hold the destination file open (os
+        // error 32) and make *this* test fail for an unrelated reason.
+        kill_all_teleportd();
+        let real = real_teleportd_path();
+        assert!(
+            real.exists(),
+            "real teleportd.exe not found at {} -- build it first: \
+             (cd daemon && cargo build --release)",
+            real.display()
+        );
+        let dest = sidecar_path().expect("sidecar_path");
+        std::fs::copy(&real, &dest)
+            .unwrap_or_else(|e| panic!("staging real teleportd.exe at {}: {e}", dest.display()));
+    }
+
+    /// Creates a Job Object shaped like a restrictive IDE debugger's or CI
+    /// runner's containing job -- `KILL_ON_JOB_CLOSE`, deliberately *no*
+    /// `BREAKAWAY_OK` -- and assigns the current (test) process to it. The
+    /// caller controls when the returned handle is closed; that's the event
+    /// that fires kill-on-close.
+    fn assign_self_to_restrictive_job() -> HANDLE {
+        unsafe {
+            let job = CreateJobObjectW(ptr::null(), ptr::null());
+            assert!(!job.is_null(), "CreateJobObjectW failed");
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            assert!(
+                ok != 0,
+                "SetInformationJobObject failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+            let assigned = AssignProcessToJobObject(job, GetCurrentProcess());
+            assert!(
+                assigned != 0,
+                "AssignProcessToJobObject(self) failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+            job
+        }
+    }
+
+    fn wait_for_port_file(data_dir: &Path, timeout: Duration) -> u16 {
+        let start = Instant::now();
+        loop {
+            if let Some(port) = read_port(data_dir) {
+                return port;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "the real teleportd never wrote a port file within {timeout:?} -- \
+                 did it actually start under the restrictive job?"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// A minimal synchronous `GET /api/v1/health` -- deliberately not
+    /// `reqwest` (async-only in this crate); proving the port is live
+    /// doesn't need a tokio runtime. Returns the response body so callers
+    /// needing `pid` out of it (for cleanup) don't need a second round trip.
+    fn tcp_health(port: u16, token: &str) -> Option<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let req = format!(
+            "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).ok()?;
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        resp.starts_with("HTTP/1.1 200").then_some(resp)
+    }
+
+    /// Crude extraction of `"pid":<n>` from the `/health` JSON body -- no
+    /// need to pull in a JSON parser just for test cleanup.
+    fn pid_from_health_body(body: &str) -> Option<u32> {
+        let idx = body.find("\"pid\":")? + "\"pid\":".len();
+        let rest = &body[idx..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+
+    /// Ends a spawned `teleportd` directly by PID -- deliberately not the
+    /// Job Object's kill-on-close (that would mean closing a job handle this
+    /// *test* process is itself a member of, which would terminate the test
+    /// harness along with it, not just the daemon under test) and
+    /// deliberately not `/api/v1/shutdown` (async-only `reqwest` in this
+    /// crate, and graceful shutdown isn't what's under test here).
+    fn taskkill(pid: u32) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+
+    /// Best-effort `taskkill /IM teleportd.exe` -- by image name, not pid.
+    /// Run before staging (so a previous run's leftover process, e.g. one
+    /// orphaned by a panic before its own cleanup ran, doesn't hold the exe
+    /// open and turn `stage_real_sidecar`'s copy into a confusing
+    /// "being used by another process" failure in an unrelated test) and
+    /// unconditionally after each test via [`KillTeleportdOnDrop`], so a
+    /// panic mid-test still leaves the machine clean for the next run.
+    fn kill_all_teleportd() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "teleportd.exe"])
+            .output();
+    }
+
+    /// Runs [`kill_all_teleportd`] on drop, including on an unwinding panic
+    /// -- a plain end-of-test cleanup call would never fire if an earlier
+    /// `assert!`/`expect` in the same test panicked first.
+    struct KillTeleportdOnDrop;
+    impl Drop for KillTeleportdOnDrop {
+        fn drop(&mut self) {
+            kill_all_teleportd();
+        }
+    }
+
+    /// The actual gap this closes: `spawn_detached` (real function, real
+    /// `spawn_windows_with_breakaway_retry`, real `teleportd.exe`), run from
+    /// inside a real restrictive Job Object -- not spike s11's reimplemented
+    /// flags in a standalone binary.
+    #[test]
+    #[ignore = "needs a prebuilt daemon/target/release/teleportd.exe; run serially, see module docs"]
+    fn spawn_detached_survives_a_restrictive_job_via_the_real_retry_path() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        stage_real_sidecar();
+        let _cleanup = KillTeleportdOnDrop; // backstop if a later assert! panics
+                                            // A synthetic temp dir, not the real data_dir() -- now that
+                                            // spawn_detached forwards --data-dir to the child, this genuinely
+                                            // isolates the test from the developer's real teleport data
+                                            // (device.json, state.db, ...) instead of spawning a real daemon on
+                                            // top of it.
+        let data_dir = std::env::temp_dir().join(format!(
+            "teleport-job-breakaway-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        // Deliberately never closed: this test process is itself a member
+        // of `job` (see assign_self_to_restrictive_job's doc comment), and
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE fires for *every* member on the
+        // last handle close -- including us. Closing it mid-test would kill
+        // this very test harness process, not just the daemon under test.
+        // Left to the OS to reclaim when this process eventually exits,
+        // same as any other handle a short-lived process doesn't bother
+        // closing by hand.
+        let _job = assign_self_to_restrictive_job();
+
+        // The call under test. This job denies breakaway (no
+        // BREAKAWAY_OK), so spawn_detached's first attempt must hit
+        // ERROR_ACCESS_DENIED and retry without the flag -- if that retry
+        // logic ever regresses, this returns Err and the daemon simply
+        // never starts under an IDE/CI job, exactly the M10 bug.
+        spawn_detached(&data_dir)
+            .expect("spawn_detached must succeed under a restrictive job via its breakaway retry");
+
+        // Not just "some process launched": the real teleportd came up and
+        // is genuinely serving /health.
+        let port = wait_for_port_file(&data_dir, Duration::from_secs(20));
+        let token = read_token(&data_dir).expect("token file written by the real daemon");
+        let body = tcp_health(port, &token)
+            .expect("the real teleportd under the restrictive job never answered /health");
+
+        // Clean up directly by PID -- see taskkill's doc comment for why
+        // this deliberately doesn't rely on the job closing.
+        if let Some(pid) = pid_from_health_body(&body) {
+            taskkill(pid);
+        }
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Baseline regression, same real function: the common real-world case
+    /// (no containing job at all -- a plain double-clicked launch) must
+    /// keep working. Confirms the retry path added for the restrictive case
+    /// didn't disturb the ordinary one.
+    #[test]
+    #[ignore = "needs a prebuilt daemon/target/release/teleportd.exe; run serially, see module docs"]
+    fn spawn_detached_still_works_with_no_containing_job() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        stage_real_sidecar();
+        let _cleanup = KillTeleportdOnDrop; // backstop if a later assert! panics
+        let data_dir =
+            std::env::temp_dir().join(format!("teleport-no-job-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        spawn_detached(&data_dir).expect("spawn_detached must succeed with no containing job");
+
+        let port = wait_for_port_file(&data_dir, Duration::from_secs(20));
+        let token = read_token(&data_dir).expect("token file written by the real daemon");
+        let body = tcp_health(port, &token).expect("the real teleportd never answered /health");
+
+        if let Some(pid) = pid_from_health_body(&body) {
+            taskkill(pid); // best-effort cleanup, not under test
+        }
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
