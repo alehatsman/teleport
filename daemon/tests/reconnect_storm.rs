@@ -22,12 +22,27 @@
 //! ([N5](../../docs/15-open-questions.md#n5--a-fast-producer-can-outrun-catch-up-on-a-slow-runner)'s
 //! own lesson).
 //!
-//! `target_os = "linux"`-gated for the same reason `session_catchup.rs` and
-//! the N5 fixtures are: a `yes`-driven producer racing real disk reads under
-//! real concurrency is exactly the kind of timing this repo has already found
-//! does not port to `macos-latest`'s runner without separate tuning.
+//! `cfg(unix)`, not `target_os = "linux"`. It shipped Linux-only "for the same
+//! reason `session_catchup.rs` and the N5 fixtures are" -- but that reason had
+//! already been overturned four commits earlier: #29/#32 root-caused those
+//! gates to the queue bound's *count* half (wrong on Linux too, merely
+//! invisible there) and un-gated all three to `cfg(unix)`. Rather than
+//! re-guess, measured on real macOS hardware (Darwin 24.6.0, arm64): 20/20
+//! green, 6.77-6.84s wall clock, storm/baseline ratio 0.966-1.094 -- no
+//! measurable degradation, and nowhere near `STORM_CLIENT_TIMEOUT`.
+//!
+//! It ports because of how this fixture is built, which is worth stating so
+//! the gate is not reintroduced by reflex: the hard assertions are invariants
+//! (no disconnect, no gap, no unbounded stall), never a throughput threshold,
+//! so there is no tuned number to re-tune. And N5's tiny-read behaviour never
+//! reaches the measured window -- the trickle is one 1000-byte `printf` per
+//! 10ms, which arrives as one 1000-byte chunk on macOS too (106 chunks /
+//! 106,000 bytes, exactly 1000 B each). `yes`'s tiny lines only shape the
+//! backlog phase, which completes before anyone attaches and which
+//! `session_catchup.rs` already proves on macOS with this same 12 MiB
+//! constant.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod support;
 
