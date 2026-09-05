@@ -152,9 +152,10 @@ pub async fn probe(data_dir: &Path) -> Probe {
 /// `sidecar()` -- see this module's top comment for why (stdio piping +
 /// `CREATE_NO_WINDOW` from that helper are both wrong here; this needs full
 /// detachment instead). The Unix path (`process_group(0)`) is the
-/// well-trodden one; the Windows path needs the spike in
-/// docs/11-mvp-plan.md#m10 run against an actual packaged build before this
-/// is trusted.
+/// well-trodden one; the Windows path was spiked for real on real hardware
+/// 2026-09-05 (`spike/src/bin/s11_windows_job_breakaway.rs`,
+/// docs/11-mvp-plan.md#m10) -- see [`spawn_windows_with_breakaway_retry`]
+/// for what that found.
 pub fn spawn_detached(data_dir: &Path) -> Result<()> {
     let path = sidecar_path()?;
 
@@ -199,9 +200,65 @@ pub fn spawn_detached(data_dir: &Path) -> Result<()> {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
     }
 
-    cmd.spawn()
-        .with_context(|| format!("spawning detached daemon at {}", path.display()))?;
-    Ok(())
+    #[cfg(windows)]
+    return spawn_windows_with_breakaway_retry(&mut cmd, &path);
+
+    #[cfg(not(windows))]
+    {
+        cmd.spawn()
+            .with_context(|| format!("spawning detached daemon at {}", path.display()))?;
+        Ok(())
+    }
+}
+
+/// Spawns `cmd` (already configured with `CREATE_BREAKAWAY_FROM_JOB`),
+/// retrying without that flag if the OS refuses it.
+///
+/// **Found on real hardware, 2026-09-05**
+/// (`spike/src/bin/s11_windows_job_breakaway.rs`, docs/11-mvp-plan.md#m10):
+/// `CREATE_BREAKAWAY_FROM_JOB` does not silently no-op when the *containing*
+/// job doesn't allow it -- it fails the entire `CreateProcess` call with
+/// `ERROR_ACCESS_DENIED` (`io::ErrorKind::PermissionDenied`) unless that job
+/// itself was created with `JOB_OBJECT_LIMIT_BREAKAWAY_OK` (or
+/// `_SILENT_BREAKAWAY_OK`). Verified with four arms on this exact machine:
+/// a job without that flag makes the breakaway spawn fail outright
+/// (confirmed -- this is the case this function exists to survive); the
+/// same job *with* that flag lets it succeed and the child outlives the
+/// parent; and no containing job at all (the common case for a plain
+/// double-clicked desktop launch) also succeeds, since there is nothing to
+/// break away from. Many real restrictive jobs (some IDE debuggers, CI
+/// runners, some installer/sandboxing contexts) do not grant breakaway --
+/// exactly the launch contexts this flag was added to defend against in the
+/// first place -- so failing here outright would mean the daemon never
+/// starts under precisely those contexts, which is worse than the
+/// kill-with-the-job risk this flag exists to prevent. Retry without it:
+/// the daemon still starts, at the cost of reintroducing that risk only in
+/// the specific case where the OS has just told us breakaway isn't
+/// available anyway.
+#[cfg(windows)]
+fn spawn_windows_with_breakaway_retry(cmd: &mut std::process::Command, path: &Path) -> Result<()> {
+    match cmd.spawn() {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            tracing::warn!(
+                "spawning {} with CREATE_BREAKAWAY_FROM_JOB was denied -- this process's \
+                 containing job does not permit breakaway; retrying without it",
+                path.display()
+            );
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::{
+                CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+            };
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+            cmd.spawn().map(|_| ()).with_context(|| {
+                format!(
+                    "spawning detached daemon at {} (retry without CREATE_BREAKAWAY_FROM_JOB)",
+                    path.display()
+                )
+            })
+        }
+        Err(e) => Err(e).with_context(|| format!("spawning detached daemon at {}", path.display())),
+    }
 }
 
 /// Locates the `externalBin` sidecar Tauri placed next to this app's own
