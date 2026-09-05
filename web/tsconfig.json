@@ -1,5 +1,14 @@
 {
   "files": [],
+  "compilerOptions": {
+    // This stub project has no files of its own, but svelte-check still
+    // evaluates its compilerOptions -- without this, TS falls back to the
+    // deprecated `moduleResolution: "node10"` default and warns on every
+    // run. Matches the bundler-mode setting the two referenced projects
+    // already use (directly in tsconfig.node.json, via @tsconfig/svelte in
+    // tsconfig.app.json).
+    "moduleResolution": "bundler"
+  },
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }
