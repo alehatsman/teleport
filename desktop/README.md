@@ -49,9 +49,25 @@ rather than silently papered over:
   (`daemon.rs::spawn_windows_with_breakaway_retry`); the no-containing-job
   case (a plain double-clicked launch, the common one) and the
   containing-job-permits-it case both already worked and are unaffected.
-  Not yet run inside an actual packaged `.msi`/`.exe` installer or a real
-  IDE/CI job (the spike simulates one directly via the same Win32 APIs) --
-  that packaging-level pass is still open.
+  **Closed, 2026-09-06**: `daemon.rs`'s `job_breakaway_tests` module calls
+  the real, unmodified `spawn_detached`/`spawn_windows_with_breakaway_retry`
+  (not spike s11's reimplemented flags) against a real `teleportd.exe`, with
+  the test process itself assigned to a real restrictive Job Object
+  (`KILL_ON_JOB_CLOSE`, no `BREAKAWAY_OK`) -- the same shape a restrictive
+  IDE debugger's or CI runner's containing job has. Run for real on this
+  machine, twice (the restrictive-job case and the no-job baseline), both
+  green. Surfaced one real gap while wiring this up: `spawn_detached` took a
+  `data_dir` parameter but never forwarded it to the child as `--data-dir`,
+  silently relying on the daemon's own default resolution landing on the
+  identical path -- harmless in production (both sides compute the same
+  default) but made isolated testing impossible without spawning a real
+  daemon on top of the developer's actual data directory. Fixed by passing
+  `--data-dir` explicitly; production behavior is unchanged. Still open:
+  literally packaged inside a built `.msi`/`.exe` installer, or launched by
+  an actual IDE/CI job rather than a self-assigned equivalent -- lower
+  priority now that the real function itself is proven, since packaging
+  doesn't change what `CreateProcessW` does with these flags (see s11's own
+  doc comment).
 - **macOS/Windows autostart** (`src/autostart/{macos,windows}.rs`) are
   templated but unverified on real hardware.
 - **Updater** is wired in (`tauri-plugin-updater`) but inactive

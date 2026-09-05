@@ -47,3 +47,18 @@ libc = "0.2"
 # detached daemon spawn (docs/11-mvp-plan.md#m10 edge cases -- defends against
 # Windows Job Object nesting if this app's own process is inside one).
 windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Test-only: daemon.rs's job_breakaway_tests assigns *itself* to a real
+# restrictive Job Object (KILL_ON_JOB_CLOSE, no BREAKAWAY_OK) to exercise
+# spawn_detached/spawn_windows_with_breakaway_retry the same way an IDE
+# debugger or CI runner's containing job would -- closing the "not yet run
+# inside a real IDE/CI job" gap this crate's README flagged (spike s11 only
+# reimplemented the same creation flags standalone, it didn't call this
+# crate's actual functions). Separate from the [dependencies] block above so
+# JobObjects/Foundation never ship in the real binary, only the test harness.
+windows-sys = { version = "0.59", features = [
+    "Win32_System_JobObjects",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
