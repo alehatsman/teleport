@@ -42,6 +42,26 @@ That's it — no separate build step, no config required to start. The web UI le
 open a shell or spawn an agent preset, and the session keeps running whether or not
 anything is attached to watch it.
 
+## Screenshots
+
+Launch a preset (or a plain shell command) from the session list:
+
+<img src="docs/screenshots/new-session.png" alt="New session launcher, preset set to Claude Code" width="700">
+
+The session keeps running as its own PTY the moment it's launched — an agent
+mid-task, in this case:
+
+<img src="docs/screenshots/agent-session.png" alt="A Claude Code agent running inside a teleport session" width="700">
+
+Back on the list, every session shows its command, cwd, and live state:
+
+<img src="docs/screenshots/session-list.png" alt="Session list showing one running session" width="700">
+
+Click in and "Take control" to attach input — one writer per PTY, enforced by
+a control lease:
+
+<img src="docs/screenshots/shell-session.png" alt="A shell session with commands typed and their output" width="700">
+
 ## Develop
 
 ```bash
