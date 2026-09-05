@@ -15,6 +15,7 @@ relitigate these**. If you believe one is wrong, raise it before writing code.
 | Terminal history | **append-only raw VT/output files** |
 | Frontend | **Svelte + TypeScript + Vite** |
 | Terminal emulator | **xterm.js** |
+| CLI client | **Rust, own `cli/` crate** (own `Cargo.toml`, no shared workspace with `daemon/` — same shape as `desktop/src-tauri/`); raw terminal mode via `crossterm` |
 | Desktop wrapper | **Tauri 2**, thin and optional |
 | Phone | **responsive web app / PWA**, not native |
 | Private remote access | **Tailscale Serve** |
