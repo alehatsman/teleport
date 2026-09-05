@@ -22,6 +22,20 @@ cargo build
 ./target/debug/s9_dsr_reply <exit0|exit7>            # answers ConPTY's startup DSR query -- the W1 fix, confirmed
 ```
 
+`s12_read_coalescing` is a **performance** measurement, so build it
+`--release` -- a debug reader loop measures the debug reader loop:
+
+```sh
+cargo build --release --bin s12_read_coalescing
+./target/release/s12_read_coalescing [fd|throughput|echo|all]
+```
+
+It answers [#33](https://github.com/alehatsman/teleport/issues/33) /
+[N5](../docs/15-open-questions.md#n5--macos-pty-reads-average-14-bytes-starving-the-queue-bounds-count-half):
+whether coalescing macOS's tiny pty reads is worth it. Compare the two
+bracketing `baseline` rows with each other before trusting the rows between
+them; if they disagree, the machine moved.
+
 All output goes to stderr (unbuffered), not stdout.
 
 ## Run on Windows
