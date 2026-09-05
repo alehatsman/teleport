@@ -14,7 +14,7 @@ backlog pretending to be a spec.
 
 | # | Question | Blocks | Closed by |
 |---|---|---|---|
-| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed twice independently, root cause still open, both known workaround leads exhausted** — general to ConPTY (not `cmd.exe`-specific), reproduced on a second, fully-native (non-cross-compiled) build (2026-09-05); Job Objects/IOCP tried and ruled out, no upstream fix found; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
+| [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) | ConPTY children that exit gracefully are never reaped on Windows | **M1 — new, hard blocker** | **confirmed repeatedly, workaround leads exhausted, first real stack trace obtained** — reproduced on a fully-native build (2026-09-05); Job Objects/IOCP ruled out as a workaround, no upstream fix found; a WinDbg trace then overturned the working "stuck in `ExitProcess`" theory — the real stack points at `conhost`'s own connection-handling thread blocked in a synchronous `ReadFile` inside `VtIo::StartIfNeeded`, not yet confirmed as *the* cause; tracked in [#9](https://github.com/alehatsman/teleport/issues/9) |
 | [W2](#w2--windows-fixture-parity-not-yet-attempted) | `daemon/tests/pty_primitive.rs` is Unix-shell-only; no Windows fixture suite exists yet | M1 | **open** — write a `cmd.exe`-based equivalent suite; tracked in [#10](https://github.com/alehatsman/teleport/issues/10) |
 | [S1](#s1--who-reaps-the-child) | Who reaps the child, and what proves it exited? | M1 | **partial** — Linux closed; Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
 | [S2](#s2--eof-is-not-exit) | Does EOF on the master mean the child exited? | M1 | **closed** — spike, Linux (2026-09-04); Windows blocked by [W1](#w1--conpty-children-are-never-observed-as-exited-on-windows) |
@@ -207,8 +207,100 @@ to.
 
 **Where this leaves root-cause digging, updated:** both cheap leads are exhausted.
 What's left is genuinely WinDbg/ETW-level tracing of `mini_exit.exe`'s own thread state
-during the hang — no shortcut avoids it now. Not attempted yet; needs that tooling
-installed and time budgeted as its own piece of work, not folded into a spike.
+during the hang — no shortcut avoids it now.
+
+**WinDbg trace, 2026-09-05 — a real stack, and it overturns the working hypothesis.**
+Installed the classic Debugging Tools for Windows (`cdb.exe`, not the Store WinDbg
+Preview — needed console scriptability). Reproduced the `s5_minimal exit0` hang,
+located the stuck `mini_exit.exe` and the `conhost.exe` spawned for its ConPTY, and
+attached to both **non-invasively** (`cdb -pv`, which examines without taking over as
+debugger — the target keeps running once detached) roughly 2s into the hang, dumping
+every thread's stack (`~*kP`).
+
+Every prior note in this section reasoned about the hang from the *outside* — timing,
+CPU, EOF, exit codes — and landed on "stuck somewhere in `ExitProcess`" as the working
+assumption, because a graceful exit was the thing under test and nothing else fit.
+**That assumption is wrong, or at least incomplete.** `mini_exit.exe`'s one thread was
+not anywhere near `ExitProcess`. Its entire stack was still in process *startup*:
+
+```
+ntdll!NtCreateFile
+KERNELBASE!ConsoleCreateConnectionObject+0x1c8
+KERNELBASE!ConsoleInitialize+0x19f
+KERNELBASE!_KernelBaseBaseDllInitialize+0x526
+KERNELBASE!KernelBaseDllInitialize+0xd
+ntdll!LdrpCallInitRoutineInternal ... ntdll!LdrInitializeThunk
+```
+
+This is the CRT/loader's own DLL-init path, opening the process's initial connection
+to the console subsystem — code that runs before `main()`, not after `std::process::exit()`.
+`mini_exit.exe` prints its line and calls `exit()` from `main()`; if its only thread is
+still inside `KernelBaseDllInitialize`, either it never reached `main()` at all on this
+run, or (more likely, given every prior finding that output *does* eventually appear on
+the pty) this specific stack was caught during a **second**, later console-connection
+attempt this binary's runtime doesn't obviously make — genuinely unclear which, and worth
+resolving before trusting this as the *complete* picture. What is clear: `ExitProcess`
+was not where the previous ten spike runs' worth of indirect evidence pointed people to
+guess, and it should stop being described as the leading theory.
+
+**The more useful half of this trace is `conhost.exe`'s side.** Of its six threads,
+five are unremarkably idle (threadpool workers parked in `NtWaitForWorkViaWorkerFactory`,
+a render thread in `WaitForSingleObjectEx`, a Win32 message pump in `GetMessageW` — all
+textbook idle-and-waiting, nothing to see). The sixth — `conhost`'s `ConsoleIoThread`,
+the thread that services new connection requests — was caught **mid-request**, inside a
+call chain that should not block indefinitely:
+
+```
+conhost!ConsoleIoThread
+ → conhost!IoDispatchers::ConsoleHandleConnectionRequest
+  → conhost!ConsoleAllocateConsole
+   → conhost!Microsoft::Console::VirtualTerminal::VtIo::StartIfNeeded
+    → conhost!Microsoft::Console::VtInputThread::DoReadInput
+     → KERNELBASE!ReadFile → ntdll!NtReadFile   (blocked)
+```
+
+Read plainly: while handling `mini_exit.exe`'s own connection request, `conhost` calls
+into `VtIo::StartIfNeeded`, which — synchronously, on the connection-handling thread
+itself, not a background reader — issues a blocking `ReadFile` for VT input and never
+gets it back. If `ConsoleIoThread` is the only thread that services connection requests
+(consistent with everything else in this trace), then **while it is parked here, no new
+console connection on this conhost can complete** — which lines up exactly with
+`mini_exit.exe`'s own thread stuck at `NtCreateFile` in `ConsoleCreateConnectionObject`,
+waiting for a response that the one thread able to send it will never get around to.
+This is a specific, named, searchable candidate for the actual mechanism — a strong
+step up from "some ConPTY-side handshake," though not yet confirmed as *the* cause
+rather than *a* symptom caught at the same moment.
+
+**Not yet confirmed, flagged rather than overstated:**
+- **Single snapshot.** This is one stack, ~2s into one hang. Whether `ConsoleIoThread`
+  sits at exactly this line for the whole hang duration, or passes through it and gets
+  stuck somewhere else later, needs multiple snapshots across the window, not one.
+- **The process actually exited within ~1s of the non-invasive dump.** Unclear whether
+  that's coincidence (it was about to resolve anyway) or the act of attaching — even
+  non-invasively — nudged something loose (e.g. `NtReadFile` returning on a signal
+  delivered as a side effect of the attach). Worth a trial with no debugger at all,
+  timed the same way, to see whether ~2-5s is actually typical here or whether prior
+  8-12s-timeout runs are the norm and this run was already about to resolve on its own.
+- **A loosely similar historical bug exists**: [microsoft/terminal#1810](https://github.com/microsoft/terminal/issues/1810),
+  "ClosePseudoConsole API hanging," closed 2023/Terminal v1.17, whose report also
+  mentions "many leftover conhosts in the task manager" — the same visible symptom this
+  machine has accumulated over a day of spike runs (a dozen-plus orphaned `conhost.exe`/
+  `mini_exit.exe`/`OpenConsole.exe` processes at the time of this trace, none from this
+  run). Not confirmed as the same underlying bug — the issue's own thread isn't
+  documented beyond the report — and this build (26200) postdates its fix. Recorded as a
+  loose lead, not a match: the *symptom name* overlaps, the *mechanism* is unconfirmed.
+- **This machine's accumulated zombie processes are an uncontrolled variable.** Every
+  run this session has left its stuck `conhost.exe`/`mini_exit.exe` behind (nothing
+  reaps them — that's the whole bug). A clean reboot before the next trace would rule
+  out resource contention among a growing pile of already-wedged sessions as a
+  confound, even though a blocking `ReadFile` with no writer doesn't look like a
+  contention symptom on its face.
+
+**Next step, not yet done:** repeat this trace 3-5 times across a single hang's full
+duration (not just once at +2s) to confirm `ConsoleIoThread` is parked at this exact
+call chain for the whole window rather than caught mid-transition, ideally after a
+clean reboot to remove the zombie-process variable, and once with no debugger attached
+at all timed identically to check whether attaching changes the outcome.
 
 **Engineering implication if root cause is never found:** the existing termination
 policy ([03-pty-layer.md](03-pty-layer.md#termination)) already hard-kills after a

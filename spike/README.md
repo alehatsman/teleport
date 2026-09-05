@@ -44,6 +44,13 @@ binaries directly.
 for what it found (a negative result: Job Objects don't see the graceful-exit case
 either, so don't reach for this file as a fix starting point).
 
+`w1-windbg-trace.ps1` reproduces the hang and attaches `cdb.exe` (classic Debugging
+Tools for Windows, not the Store WinDbg Preview — needs `choco install
+windows-sdk-10-version-2004-windbg` or equivalent) non-invasively to both the stuck
+child and its `conhost.exe`, dumping every thread's stack. Must run **elevated**
+(`SeDebugPrivilege`). See W1 for what the one trace so far found, and the note that
+it's a single snapshot, not yet confirmed stable across the whole hang window.
+
 Cross-compiled binaries are built from the Linux side
 (`cargo build --target x86_64-pc-windows-gnu`, needs `mingw-w64` +
 `rustup target add x86_64-pc-windows-gnu`; see `.cargo/config.toml` in this
