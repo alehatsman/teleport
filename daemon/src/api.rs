@@ -5,7 +5,11 @@
 //! Every handler takes [`Principal`] as an argument (an extractor, not a
 //! header read) except `/health`, which is reachable unauthenticated by
 //! design so the desktop shell can probe before it holds a credential
-//! (docs/04-api-protocol.md#get-apiv1health).
+//! (docs/04-api-protocol.md#get-apiv1health), and the WS upgrade in `ws.rs`,
+//! which resolves its credential explicitly via
+//! [`auth::resolve_ws`](crate::auth::resolve_ws) instead -- a ticket is
+//! scoped to the session id in the path, which the generic extractor never
+//! sees.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,13 +18,14 @@ use std::time::Instant;
 
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
@@ -60,6 +65,9 @@ pub struct AppState {
     /// `shutdown_signal()`'s first `.await` still shuts the daemon down
     /// rather than being silently lost.
     pub shutdown: Arc<tokio::sync::Notify>,
+    /// Backs `POST /api/v1/ws-ticket` and `ws.rs`'s upgrade check
+    /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
+    pub ws_tickets: auth::TicketStore,
 }
 
 /// `Principal` as an axum extractor: every handler that needs one declares
@@ -197,6 +205,36 @@ fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     state.origin_policy.check(headers).map_err(ApiError::from)
 }
 
+/// docs/06-security.md's model UI CSP (item 10 of the review this shipped
+/// from). Applied to every response, API included -- an extra header on a
+/// JSON reply is harmless, and a blanket layer is simpler than threading it
+/// through only the static-file path. `frame-ancestors 'none'` blocks this
+/// origin from being framed by anyone; the rest constrains what the page
+/// itself may load or run. No third-party script/style host is ever in this
+/// list -- that is the whole point.
+///
+/// `connect-src 'self'` alone -- no bare `ws:`/`wss:` -- covers the app's own
+/// WebSocket: a browser resolves `'self'` for a `ws(s)://` target against the
+/// scheme-mapped origin (ws->http, wss->https), so `stream.ts`'s same-origin
+/// socket already matches it. A bare `ws:`/`wss:` token carries no host
+/// restriction at all -- it would let an XSS payload open a socket to *any*
+/// host, exactly the exfiltration channel this policy exists to close
+/// (caught in code review on the PR this shipped in, before merge).
+///
+/// A plain array, joined once at router-build time, not a hand-punctuated
+/// `concat!` string -- a directive added or reordered here can't silently
+/// merge into its neighbor for want of a trailing `"; "`.
+const CSP_DIRECTIVES: &[&str] = &[
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+];
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
@@ -209,7 +247,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
         .route("/api/v1/shutdown", post(shutdown))
+        .route("/api/v1/ws-ticket", post(create_ws_ticket))
         .fallback(spa_fallback)
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_str(&CSP_DIRECTIVES.join("; "))
+                .expect("CSP directives are all valid header-value bytes"),
+        ))
         .with_state(state)
 }
 
@@ -268,7 +312,13 @@ fn route_not_found() -> Response {
 }
 
 const API_VERSIONS: &[&str] = &["v1"];
-const CAPABILITIES: &[&str] = &["sessions", "presets", "tail_attach", "remote_shutdown"];
+const CAPABILITIES: &[&str] = &[
+    "sessions",
+    "presets",
+    "tail_attach",
+    "remote_shutdown",
+    "ws_ticket",
+];
 
 /// `GET /api/v1/health` -- the one route reachable without a credential
 /// (docs/04-api-protocol.md#get-apiv1health). Calls [`auth::resolve`]
@@ -784,6 +834,42 @@ async fn shutdown(
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "shutting_down" })),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct WsTicketRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WsTicketResponse {
+    ticket: String,
+    expires_in: u64,
+}
+
+/// `POST /api/v1/ws-ticket` (docs/06-security.md#token-on-the-websocket-upgrade,
+/// mitigation 2): trades the master bearer token -- presented here the normal
+/// way, `Authorization` header or plain `?token=` -- for a short-lived,
+/// single-use ticket scoped to one session, so the long-lived credential
+/// never has to ride in a `stream.ts` reconnect URL. Requires the session to
+/// exist for the same reason `find_session` is used everywhere else: no
+/// point handing out a ticket for a session id nobody could ever attach to.
+async fn create_ws_ticket(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Json(req): Json<WsTicketRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_origin(&state, &headers)?;
+    let session = find_session(&state, &req.session_id)?;
+    let ticket = state
+        .ws_tickets
+        .issue(session.id)
+        .map_err(|e| ApiError::Internal(format!("reading OS CSPRNG for ticket: {e}")))?;
+    Ok(Json(WsTicketResponse {
+        ticket,
+        expires_in: auth::TICKET_TTL.as_secs(),
+    }))
 }
 
 fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {
