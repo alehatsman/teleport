@@ -84,30 +84,82 @@ async fn startup(app: &AppHandle) -> anyhow::Result<()> {
         daemon::Probe::NotOurs => {
             // Per docs/08-packaging.md: something is listening but didn't
             // accept our token. Do not attach to a stranger's daemon.
-            // TODO(M10 follow-up): surface this in-app (dialog plugin is
-            // already wired) instead of only logging it.
             warn!(
                 "a daemon is listening on our port but did not accept our token \
                  -- not attaching (docs/08-packaging.md#daemon-lifecycle----the-important-part)"
             );
+            show_not_ours_dialog(app);
         }
         daemon::Probe::NoDaemon => {
             info!("no daemon reachable; starting teleportd detached");
-            daemon::spawn_detached()?;
+            daemon::spawn_detached(&dir)?;
             if poll_until_up(&dir).await {
                 open_main_window(app, &dir)?;
             } else {
-                // TODO(M10 follow-up): "show the daemon log, offer a retry"
-                // per docs/08-packaging.md's flow diagram, instead of only
-                // logging it.
                 error!(
                     timeout_ms = STARTUP_POLL_TIMEOUT.as_millis() as u64,
                     "teleportd did not come up in time after spawning"
                 );
+                show_startup_timeout_dialog(app, &dir);
             }
         }
     }
     Ok(())
+}
+
+/// Issue #15's first case: a daemon answered `/health` but not with our
+/// token's shape (docs/08-packaging.md#daemon-lifecycle----the-important-part).
+/// `blocking_show` mirrors [`stop_daemon_flow`]'s existing use of the same
+/// dialog plugin -- both only ever run inside a task spawned via
+/// `tauri::async_runtime::spawn`, never on tauri's own event-loop thread, so
+/// blocking that task is fine.
+fn show_not_ours_dialog(app: &AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    app.dialog()
+        .message(
+            "A daemon is already running on Teleport's expected port, but it \
+             didn't accept our token, so this isn't the daemon this app \
+             manages. Not attaching, rather than risk taking over someone \
+             else's process.\n\n\
+             This usually means another OS user has a Teleport daemon \
+             running, or this app's saved token is stale. Stop that other \
+             daemon (or clear the stale token) and reopen Teleport.",
+        )
+        .title("Can't attach to daemon")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+}
+
+/// Issue #15's second case: `teleportd` didn't come up within
+/// [`STARTUP_POLL_TIMEOUT`] of being spawned. Shows the tail of its log
+/// (`daemon::log_path`/`read_log_tail` -- the only persisted copy of its
+/// stdout/stderr, since `spawn_detached` redirects there instead of to
+/// `/dev/null`) and offers a retry, per docs/08-packaging.md's flow diagram.
+fn show_startup_timeout_dialog(app: &AppHandle, dir: &Path) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let log_path = daemon::log_path(dir);
+    let tail = daemon::read_log_tail(dir, 4000);
+    let message = format!(
+        "teleportd didn't start within {}s.\n\nLog ({}):\n\n{tail}",
+        STARTUP_POLL_TIMEOUT.as_secs(),
+        log_path.display(),
+    );
+
+    let retry = app
+        .dialog()
+        .message(message)
+        .title("Teleport daemon didn't start")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Retry".into(),
+            "Close".into(),
+        ))
+        .blocking_show();
+    if retry {
+        show_or_recheck(app.clone());
+    }
 }
 
 async fn poll_until_up(dir: &Path) -> bool {
