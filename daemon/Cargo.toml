@@ -20,6 +20,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid               = "1"
 clap               = { version = "4", features = ["derive"] }
 directories        = "5"
+# `session.rs`'s locks never poison on panic-while-held -- a std::sync::Mutex
+# would take down every future call for that session (only that session, but
+# still) if anything ever panicked under one. Small, boring, no unsafe of its
+# own; MVP-wide review pass, 2026-09-05.
+parking_lot        = "0.12"
 # Not in docs/02-stack-decisions.md's pinned list; added to satisfy the "256 bits
 # from the OS CSPRNG" requirement in docs/06-security.md#the-credential — see
 # the M0 commit message. Tiny, dependency-free wrapper over
