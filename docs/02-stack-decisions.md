@@ -81,7 +81,15 @@ layer regardless. **Do not write a terminal renderer.**
 
 ## Direct dependencies
 
-Keep this list short. Adding a crate is a decision, not a reflex.
+Keep this list short. Adding a crate is a decision, not a reflex. This table is
+`daemon/`'s own `Cargo.toml`, copied here so a diff against it is visible in review.
+`desktop/src-tauri/` and `cli/` each have their own dependency lists in their own
+`Cargo.toml` -- not mirrored into this table (neither was `desktop/src-tauri/`'s at
+M10) -- but the same rule still applies to them: every crate they add is a documented
+decision, not a reflex. `cli/`'s reqwest choice (over a hand-rolled client on
+`tokio-tungstenite`'s own `http`/`hyper` transitive deps, the open question
+[11-mvp-plan.md#m11](11-mvp-plan.md#m11--cli-client) left) is recorded at its own call
+site, `cli/Cargo.toml`, and in that milestone's delivered note.
 
 ```toml
 [dependencies]

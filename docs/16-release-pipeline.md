@@ -105,7 +105,8 @@ job build (matrix: the four targets above, needs: check-version):
     setup rust (stable + target)
     setup node 22, npm ci, npm run build   (in web/)
     cargo build --release --features embedded-web --target <triple>  (in daemon/)
-    package: teleport-<target>/teleportd[.exe] → .tar.gz / .zip
+    cargo build --release --target <triple>                          (in cli/)
+    package: teleport-<target>/{teleportd,teleport}[.exe] → .tar.gz / .zip
         (no LICENSE/README bundled -- neither exists at repo root today)
     upload-artifact (per target)
 
@@ -135,8 +136,9 @@ POSIX `sh`, no bashisms (`curl | sh` must work under whatever `/bin/sh` is). Beh
    `releases/latest`.
 3. Download `teleport-<os>-<arch>.tar.gz` and `checksums.txt` for that release tag,
    verify the archive's checksum, abort on mismatch.
-4. Extract `teleportd` to `${TELEPORT_INSTALL_DIR:-$HOME/.local/bin}` (created if
-   missing), `chmod +x`.
+4. Extract `teleportd` (and `teleport`, the CLI client, when the archive has one --
+   docs/11-mvp-plan.md#m11--cli-client) to `${TELEPORT_INSTALL_DIR:-$HOME/.local/bin}`
+   (created if missing), `chmod +x`.
 5. Print the install path and, if that directory isn't on `$PATH`, say so explicitly
    rather than leaving the user to discover `command not found`.
 6. Exit non-zero on any failed step — a partially-extracted binary must never look like
