@@ -1069,6 +1069,23 @@ reattaches. Browser-only mode remains fully functional.
 > folder was not exercised, and Windows generally refuses to overwrite a running
 > executable. Left open in `desktop/README.md` rather than guessed at.
 >
+> **Repro'd, 2026-09-06, same machine, same installer artifact.** Started the
+> installed `teleportd.exe` detached (real daemon, `/api/v1/health` answering),
+> then re-ran `Teleport_0.1.0_x64-setup.exe` silently (`/S`) over it. The
+> installer exits 0 and regenerates `uninstall.exe` + the
+> `HKCU\...\Uninstall\Teleport` registry entry, but silently skips the locked
+> `teleportd.exe`/`teleport-desktop.exe` -- both files' timestamps proved
+> unchanged, and `/api/v1/health` kept reporting the old `version` throughout,
+> never interrupted. No error, no non-zero exit, no log -- NSIS's default `File`
+> overwrite just skips a locked file rather than failing the install. So a user
+> who upgrades with the daemon running gets new install metadata but silently
+> keeps running the old binaries until they separately quit and relaunch.
+> Data untouched (harmless in that respect, same as before). Not fixed --
+> candidate fixes (`bundle.windows.nsis.installMode`, a distinct install dir, or
+> a stop-daemon-before-upgrade hook) are unchanged from before, but now backed
+> by a real repro instead of a guess; details in `desktop/README.md`. Test
+> daemon stopped afterward, machine left in its original idle state.
+>
 > Windows moves from "CI build only" to gate-verified against a real installer in the
 > cross-OS ledger (#8) -- the only one of the three platforms tested against an actual
 > installer artifact rather than a bundled `.app`/raw binary, since that's what
