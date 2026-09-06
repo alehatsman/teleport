@@ -24,7 +24,8 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use anyhow::{Context, Result};
 
@@ -37,8 +38,68 @@ mod linux {
         Ok(unit_dir()?.join("teleportd.service"))
     }
 
+    // Dotfile: systemd's unit loader ignores hidden files in this directory,
+    // so it can live next to teleportd.service without being mistaken for
+    // one. Its presence/absence is the only record of whether *this*
+    // install() call was the one that flipped lingering on -- see the
+    // linger comments in install()/uninstall() below.
+    fn linger_marker_path() -> Result<PathBuf> {
+        Ok(unit_dir()?.join(".teleportd-linger-owner"))
+    }
+
+    /// Quotes a value for a systemd unit `Key=value` line (`systemd.service(5)`
+    /// documents shell-style quoting support for this). Without it, a path
+    /// containing a space splits `ExecStart` into multiple words and the
+    /// unit fails to start `install()` reported as successful.
+    fn quote_unit_value(value: &str) -> String {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// `current_exe()` is whatever binary is running *right now* -- for a
+    /// `cargo build` output that's `target/debug|release/teleportd`, which
+    /// `cargo clean` or the next build can remove out from under an
+    /// installed unit with no error until the next boot. There's no single
+    /// "real" install location to fall back to (daemon/ ships no installer,
+    /// docs/08-packaging.md), so warn rather than silently trust it.
+    fn warn_if_build_output(exe: &Path) {
+        let comps: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
+        let is_build_output = comps
+            .windows(2)
+            .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"));
+        if is_build_output {
+            eprintln!(
+                "warning: {} looks like a `cargo build` output path, not a stable install \
+                 location -- a later build or `cargo clean` can remove it, silently breaking \
+                 this autostart unit. Install teleportd somewhere stable first if this is meant \
+                 to persist.",
+                exe.display()
+            );
+        }
+    }
+
+    /// Current lingering state for this user, queried rather than assumed --
+    /// see install()/uninstall() for why. `None` means the query itself
+    /// failed (older systemd without `--value`, no `id` binary, etc.); the
+    /// caller treats that the same as "not currently lingering".
+    fn linger_enabled() -> Option<bool> {
+        let uid = Command::new("id").arg("-u").output().ok()?;
+        if !uid.status.success() {
+            return None;
+        }
+        let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
+        let out = Command::new("loginctl")
+            .args(["show-user", &uid, "--value", "-p", "Linger"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim() == "yes")
+    }
+
     pub fn install() -> Result<()> {
         let exe = std::env::current_exe().context("resolving this binary's own path")?;
+        warn_if_build_output(&exe);
         let dir = unit_dir()?;
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -52,7 +113,7 @@ mod linux {
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            exe.display()
+            quote_unit_value(&exe.display().to_string())
         );
         let path = unit_path()?;
         fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
@@ -60,10 +121,10 @@ mod linux {
         // Best-effort, like desktop's copy of this: don't fail install() if
         // there's no active systemd --user session (docs/11-mvp-plan.md#m10
         // edge cases) -- autostart is a convenience, not a launch dependency.
-        let _ = std::process::Command::new("systemctl")
+        let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
-        let _ = std::process::Command::new("systemctl")
+        let _ = Command::new("systemctl")
             .args(["--user", "enable", "teleportd.service"])
             .status();
         // The headless-reboot half of #40: `WantedBy=default.target` only
@@ -75,40 +136,57 @@ mod linux {
         // allow_any=yes for a user enabling their *own* lingering,
         // confirmed on this repo's dev box (systemd 255); it never touches
         // 06-security.md's privilege boundary.
-        let _ = std::process::Command::new("loginctl")
-            .arg("enable-linger")
-            .status();
+        //
+        // Only flip it -- and only claim ownership via the marker file --
+        // if it wasn't already on. Otherwise uninstall() would turn off
+        // lingering this user enabled for an unrelated reason.
+        let already_lingering = linger_enabled().unwrap_or(false);
+        if !already_lingering {
+            let _ = Command::new("loginctl").arg("enable-linger").status();
+            let _ = fs::write(linger_marker_path()?, "");
+        }
 
         println!(
-            "installed {} and enabled lingering for this user",
-            path.display()
+            "installed {} and {} lingering for this user",
+            path.display(),
+            if already_lingering {
+                "left already-enabled"
+            } else {
+                "enabled"
+            }
         );
         Ok(())
     }
 
     pub fn uninstall() -> Result<()> {
-        let _ = std::process::Command::new("systemctl")
+        let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", "teleportd.service"])
             .status();
         let path = unit_path()?;
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
-        let _ = std::process::Command::new("systemctl")
+        let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
-        // Symmetric with install(). Known limitation, not silently assumed
-        // fine: if this user separately wanted lingering for an unrelated
-        // reason, uninstalling teleport's autostart also turns it off --
-        // there is no per-unit lingering flag to scope this to, only a
-        // per-user one.
-        let _ = std::process::Command::new("loginctl")
-            .arg("disable-linger")
-            .status();
+        // Symmetric with install(): only disable lingering if the marker
+        // says *this* install() was the one that turned it on. If the user
+        // separately wanted lingering for an unrelated reason, it's untouched.
+        let marker = linger_marker_path()?;
+        let we_enabled_linger = marker.exists();
+        if we_enabled_linger {
+            let _ = Command::new("loginctl").arg("disable-linger").status();
+            let _ = fs::remove_file(&marker);
+        }
 
         println!(
-            "removed {} and disabled lingering for this user",
-            path.display()
+            "removed {} and {} lingering for this user",
+            path.display(),
+            if we_enabled_linger {
+                "disabled"
+            } else {
+                "left untouched (not enabled by this install)"
+            }
         );
         Ok(())
     }

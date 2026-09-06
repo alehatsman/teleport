@@ -219,15 +219,29 @@ fn open_main_window(app: &AppHandle, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+// On Linux, install()/uninstall() also toggle `loginctl` lingering
+// (autostart/linux.rs), so the daemon keeps running with nobody logged in
+// at all -- not just "at login" like macOS/Windows. Label it accurately
+// there instead of letting the tray understate what the toggle now does.
+#[cfg(target_os = "linux")]
+const AUTOSTART_ON_LABEL: &str = "Start automatically (even after reboot)";
+#[cfg(target_os = "linux")]
+const AUTOSTART_OFF_LABEL: &str = "Don't start automatically";
+
+#[cfg(not(target_os = "linux"))]
+const AUTOSTART_ON_LABEL: &str = "Start at login";
+#[cfg(not(target_os = "linux"))]
+const AUTOSTART_OFF_LABEL: &str = "Don't start at login";
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Teleport", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "Show data folder", true, None::<&str>)?;
     let autostart_on =
-        MenuItem::with_id(app, "autostart_on", "Start at login", true, None::<&str>)?;
+        MenuItem::with_id(app, "autostart_on", AUTOSTART_ON_LABEL, true, None::<&str>)?;
     let autostart_off = MenuItem::with_id(
         app,
         "autostart_off",
-        "Don't start at login",
+        AUTOSTART_OFF_LABEL,
         true,
         None::<&str>,
     )?;
