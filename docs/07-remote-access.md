@@ -60,6 +60,17 @@ Notes:
 **Verify before shipping:** `tailscale serve status` after a full host reboot, to
 confirm `--bg` persistence actually holds on each target OS.
 
+**`serve status` passing is only half of it.** Serve will happily come back proxying a
+backend that isn't there — confirming the config persisted says nothing about whether
+`teleportd` is actually listening behind it. That needs the daemon to survive the
+reboot too, and every autostart mechanism is login-scoped by design
+([08-packaging.md#autostart-at-login](08-packaging.md#autostart-at-login)). On Linux,
+`teleportd service install` (or the desktop app's "Start at login") covers this —
+lingering keeps the daemon running with no login at all. macOS and Windows have no
+headless equivalent yet: reachable from a phone there currently means "the host is
+logged in," not "the host is powered on"
+([#40](https://github.com/alehatsman/teleport/issues/40)).
+
 ## Why not Funnel
 
 Funnel exposes a local service to the **public internet**. Its relay hides the host's

@@ -1,8 +1,14 @@
 //! systemd **user** unit (docs/08-packaging.md#autostart-at-login).
-//! `~/.config/systemd/user/teleportd.service`, `WantedBy=default.target`.
-//! Lingering (`loginctl enable-linger`) is a separate, explicit opt-in for
-//! surviving logout -- not enabled here; that's a bigger promise (the unit
-//! keeps running with no user session at all) than "start at login".
+//! `~/.config/systemd/user/teleportd.service`, `WantedBy=default.target`,
+//! plus `loginctl enable-linger` so the daemon survives logout and a full
+//! reboot, not just re-login -- the promise Tailscale Serve's `--bg`
+//! persistence implies (issue #40; the daemon side of it was the missing
+//! half). No privilege change: linger is a per-user systemd-logind flag,
+//! and enabling *your own* is unprivileged by default
+//! (`org.freedesktop.login1.set-self-linger`'s polkit rule ships
+//! `allow_any=yes`) -- confirmed on this repo's dev box (systemd 255).
+//! `daemon/src/service.rs` has the same install/uninstall for a box that
+//! has never run this desktop app at all.
 
 use std::fs;
 
@@ -47,6 +53,11 @@ pub fn install() -> Result<()> {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "enable", "teleportd.service"])
         .status();
+    // See the module doc comment: no USER argument targets the caller, and
+    // needs no privilege beyond enabling one's own lingering.
+    let _ = std::process::Command::new("loginctl")
+        .arg("enable-linger")
+        .status();
     Ok(())
 }
 
@@ -60,6 +71,12 @@ pub fn uninstall() -> Result<()> {
     }
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
+        .status();
+    // Symmetric with install(). Known limitation: if this user separately
+    // wanted lingering for an unrelated reason, this turns it off too --
+    // there's no per-unit lingering flag to scope it to, only a per-user one.
+    let _ = std::process::Command::new("loginctl")
+        .arg("disable-linger")
         .status();
     Ok(())
 }
