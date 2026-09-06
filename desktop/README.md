@@ -141,13 +141,34 @@ rather than silently papered over:
 - **Windows install-dir/data-dir collision**: the NSIS installer's default
   per-user install path and the daemon's own data directory are the same
   folder on disk (`%LOCALAPPDATA%\Teleport` vs `%LOCALAPPDATA%\teleport` --
-  NTFS is case-insensitive). Confirmed harmless today (see the gate re-run
-  above), but untested: installing an update while a previous `teleportd.exe`
-  is still running detached from that same folder, since Windows generally
-  won't let an installer overwrite a running executable. Not fixed --
-  `bundle.windows.nsis.installMode`/a distinct install dir, or a
-  stop-daemon-before-upgrade hook, are the candidate fixes, but this needs a
-  real upgrade-over-a-running-daemon repro first, not a guessed fix.
+  NTFS is case-insensitive).
+  **Repro'd for real, 2026-09-06, same Windows 11 machine as the gate above.**
+  Started the installed `teleportd.exe` detached from
+  `%LOCALAPPDATA%\Teleport` (real daemon, real port file, `/api/v1/health`
+  answering), then re-ran the real NSIS installer (`Teleport_0.1.0_x64-setup.exe`,
+  the same artifact the M10 gate installed) silently (`/S`) over it, exactly
+  the "update while a previous `teleportd.exe` is still running detached"
+  scenario this bullet used to only guess at. **Result: the installer reports
+  success (exit code 0) and regenerates `uninstall.exe` plus the
+  `HKCU\...\Uninstall\Teleport` registry entry, but silently leaves the
+  locked `teleportd.exe` and `teleport-desktop.exe` on disk untouched** --
+  file timestamps confirmed both binaries were byte-identical to before the
+  "upgrade" (`teleportd.exe` unchanged at its original build time,
+  `teleport-desktop.exe` likewise; only `uninstall.exe`'s timestamp moved).
+  The daemon itself was never interrupted -- `/api/v1/health` kept answering
+  with the *old* `version` throughout and after. No error dialog, no
+  non-zero exit code, no log: NSIS's default `File` overwrite behavior skips
+  a locked file rather than failing the install, so **a user who "upgrades"
+  while the daemon is running ends up with new install metadata (registry
+  version, uninstaller) but is still silently running the old binaries**
+  until they separately quit and relaunch. Confirmed harmless to on-disk data
+  (`state.db`/`sessions/`/etc. untouched, as before) -- this is a stale-binary
+  gap, not a data-loss one. Not fixed here (cleaned the test daemon back down
+  to the machine's original idle state after the repro) -- candidate fixes
+  are still `bundle.windows.nsis.installMode`, a distinct install dir, or a
+  stop-daemon-before-upgrade hook in the installer script; the repro above is
+  what should drive picking one, tracked in
+  [11-mvp-plan.md#m10](../docs/11-mvp-plan.md#m10--tauri-shell).
 - **Windows autostart** (`src/autostart/windows.rs`) is templated but
   unverified on real hardware.
   **Attempted, 2026-09-06, blocked by the environment, not by this code**:
