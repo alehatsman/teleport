@@ -1331,6 +1331,27 @@ other client already has to honor.
 > interactive use (CI covers compile + unit tests there, not hands-on), a real
 > Tailscale `--url` connection from a second machine, and cross-client parity
 > against the web UI.
+>
+> **A third real bug, found by continuing this same coverage pass:** any fatal
+> `attach` error (401/403/404, or genuinely any error out of the reconnect loop)
+> reported *after* the terminal had already gone into raw mode -- once a
+> reconnect finally reaches a daemon that no longer knows the session (killed and
+> restarted, e.g.) -- hung the CLI process forever instead of printing the error
+> and exiting. Root cause: `main`'s `Attach` arm used `attach::run(...).await?` for
+> the error path but `std::process::exit(code)` for success. `tokio::io::stdin()`
+> keeps one shared background thread blocked in a real `read(2)` on the terminal
+> fd between keystrokes; `?` returns the error out of `async fn main`, and
+> `#[tokio::main]`'s ordinary teardown drops the `Runtime` before printing it --
+> which blocks until every blocking-pool task finishes, and that read never will
+> without another keystroke. Detach (`~.`) and Ctrl-D both mask this in practice
+> (the last keystroke before exit happens to unblock the same read), which is why
+> it survived every prior manual test in this pass. Reattached with the daemon
+> killed and restarted mid-session and watched a stale reconnect fail its 404
+> silently for over a minute with zero further connection attempts (no hang-safe
+> timeout of any kind); fixed by hard-exiting on the error arm too, matching
+> success; reverified against the identical reproduction -- reports `Error: attach
+> failed: 404 -- session not found` and exits in the same poll cycle it used to
+> hang in.
 
 ---
 
