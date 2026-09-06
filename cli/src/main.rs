@@ -155,7 +155,7 @@ async fn new_session(
     preset: Option<String>,
     cmd: Option<String>,
     cwd: Option<PathBuf>,
-    args: Vec<String>,
+    mut args: Vec<String>,
 ) -> Result<()> {
     let cwd = match cwd {
         Some(c) => c,
@@ -165,23 +165,24 @@ async fn new_session(
 
     // kind mirrors the shape presets.toml examples use
     // (docs/04-api-protocol.md#post-apiv1sessions): a preset implies
-    // "agent", an explicit command with no preset is "command", and
-    // neither means "shell" -- the same three-way split the reference UI
-    // makes when a user picks nothing.
-    let kind = if preset.is_some() {
-        "agent"
-    } else if cmd.is_some() {
-        "command"
+    // "agent", an explicit command is "command", and neither means "shell"
+    // -- the same three-way split the reference UI makes when a user picks
+    // nothing. Trailing args with no --cmd/--preset have no command to
+    // attach to -- sending them as argv to the default shell binary would
+    // make `teleport new -- ls -la` spawn `$SHELL ls -la`, which most
+    // shells read as "run the script file named `ls`", not "run `ls -la`".
+    // The first one becomes the implicit command instead, ssh-style
+    // (`ssh host ls -la` runs `ls -la`).
+    let (kind, command, args): (&'static str, Option<String>, Vec<String>) = if preset.is_some() {
+        ("agent", cmd, args)
+    } else if let Some(cmd) = cmd {
+        ("command", Some(cmd), args)
+    } else if !args.is_empty() {
+        let command = args.remove(0);
+        ("command", Some(command), args)
     } else {
-        "shell"
+        ("shell", Some(default_shell()), args)
     };
-    let command = cmd.or_else(|| {
-        if preset.is_none() {
-            Some(default_shell())
-        } else {
-            None
-        }
-    });
     let req = http::CreateSessionRequest {
         kind,
         preset,
@@ -202,8 +203,16 @@ async fn new_session(
     Ok(())
 }
 
+/// Mirrors `daemon/src/presets.rs`'s own `$SHELL` placeholder expansion
+/// exactly (down to the same env vars and fallbacks), since this CLI ships
+/// on the same three OSes that logic already handles: `SHELL`/`/bin/sh` on
+/// Unix, `COMSPEC`/`cmd.exe` on Windows.
 fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    if cfg!(windows) {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
 }
 
 async fn kill(conn: &connect::Connection, id: &str, purge: bool) -> Result<()> {

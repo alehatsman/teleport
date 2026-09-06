@@ -24,7 +24,16 @@ pub struct Connection {
 /// the platform's local (not roaming) data dir. Three independent copies of
 /// this logic, deliberately -- `cli/`, `daemon/` and `desktop/src-tauri/`
 /// are three crates with no shared workspace
-/// (docs/11-mvp-plan.md#m11's interfaces note).
+/// (docs/11-mvp-plan.md#m11's interfaces note) -- but a weaker duplication
+/// than that tradeoff usually implies: all three delegate the actual
+/// per-OS logic to the same `directories` crate call
+/// (`BaseDirs::data_local_dir()`), so the only thing repeated here is the
+/// ~3-line wrapper (override, then `.join("teleport")`), not a
+/// reimplementation of platform path resolution. The test below pins that
+/// wrapper's exact behavior so a drift in the join segment specifically
+/// (the one part a shared call can't catch) fails loudly here rather than
+/// showing up as "no local teleportd found" against a directory the daemon
+/// never wrote to.
 pub fn data_dir(override_dir: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(dir) = override_dir {
         return Ok(dir);
@@ -106,6 +115,21 @@ fn resolve_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_dir_override_wins_outright() {
+        let dir = data_dir(Some(PathBuf::from("/tmp/explicit"))).unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/explicit"));
+    }
+
+    /// Pins the one part of `data_dir` that's actually duplicated across
+    /// `cli/`, `daemon/` and `desktop/src-tauri/` -- the `directories` crate
+    /// call itself is shared, upstream logic, not reimplemented here.
+    #[test]
+    fn data_dir_joins_the_teleport_segment() {
+        let dir = data_dir(None).unwrap();
+        assert_eq!(dir.file_name().unwrap(), "teleport");
+    }
 
     fn scratch_dir(name: &str) -> PathBuf {
         let dir =

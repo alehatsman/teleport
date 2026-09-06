@@ -33,8 +33,63 @@ pub fn client_id(data_dir: &Path) -> String {
 /// this". No new dependency for hostname lookup; the username env var is
 /// enough to be recognizable in the controller label.
 pub fn default_client_name() -> String {
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    default_client_name_from(std::env::var("USER").ok(), std::env::var("USERNAME").ok())
+}
+
+/// Env values passed in rather than read here, so tests don't mutate
+/// process-global env state (`cargo test` runs unit tests in one process,
+/// multi-threaded -- same reasoning as `connect.rs`'s `resolve_inner`).
+fn default_client_name_from(user: Option<String>, username: Option<String>) -> String {
+    // `.filter(|s| !s.is_empty())`, not just presence: some container/sudo
+    // setups export `USER=""` rather than leaving it unset, which is
+    // `Some(String::new())`, not `None` -- without the filter this would
+    // never fall through to `USERNAME`/the default, and the controller
+    // label would end up as `" (cli)"`, a blank name with a leading space.
+    let user = user
+        .filter(|s| !s.is_empty())
+        .or_else(|| username.filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "unknown".to_string());
     format!("{user} (cli)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_user_when_present() {
+        assert_eq!(
+            default_client_name_from(Some("aleh".to_string()), Some("someone".to_string())),
+            "aleh (cli)"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_username_when_user_unset() {
+        assert_eq!(
+            default_client_name_from(None, Some("aleh".to_string())),
+            "aleh (cli)"
+        );
+    }
+
+    #[test]
+    fn empty_user_falls_through_to_username() {
+        assert_eq!(
+            default_client_name_from(Some(String::new()), Some("aleh".to_string())),
+            "aleh (cli)"
+        );
+    }
+
+    #[test]
+    fn empty_user_and_username_falls_through_to_unknown() {
+        assert_eq!(
+            default_client_name_from(Some(String::new()), Some(String::new())),
+            "unknown (cli)"
+        );
+    }
+
+    #[test]
+    fn neither_set_falls_through_to_unknown() {
+        assert_eq!(default_client_name_from(None, None), "unknown (cli)");
+    }
 }

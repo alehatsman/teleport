@@ -1253,6 +1253,35 @@ other client already has to honor.
 > (bearer header on the WS upgrade, no `Origin`, same `/api/v1` surface every other
 > client uses) needs no new code to exercise once available; nothing here is
 > loopback-specific.
+>
+> **Code review round, same day, before merge.** A full review pass found a real
+> hang bug the validation above never exercised: `daemon/src/ws.rs`'s `run()` sends
+> one or more binary `History` frames *before* `ready` whenever a replay gap exceeds
+> one bounded catch-up round (docs/04-api-protocol.md#catch-up--register-late-not-early)
+> -- confirmed directly by connecting to a real 4.5 MB-backlog session with `after=0`
+> (4 pre-`ready` binary frames, 1 MiB each, then `ready`, then one more). The client's
+> first version treated any non-text first frame as a protocol error and reconnected
+> with the same unchanged offset, so a session with more than ~2 MiB of gap could
+> never actually be attached to -- an infinite retry loop, not a crash, so nothing in
+> the earlier (small-session) validation would have caught it. Fixed by reading and
+> displaying binary frames in a loop until `ready` arrives, the same way the main
+> loop already treats a post-`ready` one; re-verified against the same 4.5 MB session
+> with the fix in place -- 0 hang, 0 bytes lost, exit code correct, output byte count
+> matching `next_offset` exactly.
+>
+> Nine smaller findings fixed in the same pass: trailing `new` args with no
+> `--cmd`/`--preset` no longer get sent as argv to the default shell (the first one
+> becomes the implicit command instead, ssh-style); `default_shell()` gained the
+> Windows `COMSPEC`/`cmd.exe` branch `daemon/src/presets.rs`'s own copy already has;
+> the resize watcher falls back to polling instead of hanging forever if `SIGWINCH`
+> registration itself fails; an empty-but-set `USER` env var no longer defeats the
+> `USERNAME` fallback; reconnect jitter now mixes in the process id so several
+> `teleport attach`s disconnected by the same event don't reconnect in a correlated
+> burst; the ws(s) URL is built via `Url::set_scheme` instead of string
+> prefix-matching; `connect_and_run` dropped from 8 positional args to 4 (identity
+> and loop state each bundled into their own struct); and `02-stack-decisions.md`
+> now cross-references `cli/`'s dependency choices instead of staying silent on them.
+> 10 new unit tests added alongside the fixes (27 total).
 
 ---
 
