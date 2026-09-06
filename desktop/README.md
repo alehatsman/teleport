@@ -53,12 +53,36 @@ failed to launch at all (`STATUS_DLL_NOT_FOUND`) because `WebView2Loader.dll`
 GNU/MinGW Windows toolchain (`rustup show`: `stable-x86_64-pc-windows-gnu`
 is the active default here, not MSVC) -- was never in the installer's file
 list, so the exe couldn't load, install and CI build-checks notwithstanding.
-Fixed with `tauri.windows.conf.json` (Tauri merges `tauri.<platform>.conf.json`
-automatically, so this is a Windows-only addition, zero risk to the Linux/macOS
-bundles), declaring that dll as a bundle resource. Rebuilt, reinstalled, full
-gate re-run end to end against the fixed installer with no manual workaround:
-passed, including the real web UI actually rendering for the first time
+Fixed at the time with a new `tauri.windows.conf.json` declaring that dll as a
+bundle resource (Tauri merges `tauri.<platform>.conf.json` automatically, so
+this looked Windows-only and safe). Rebuilt, reinstalled, full gate re-run
+end to end against the fixed installer with no manual workaround: passed,
+including the real web UI actually rendering for the first time
 (`embedded-web` couldn't be built at all before npm existed on this machine).
+
+**Correction, 2026-09-06 (caught by another session's CI, not by this one):**
+that fix broke CI. `tauri.windows.conf.json`'s resource path was right for
+*this* machine's setup (GNU/MinGW toolchain, no `--target` flag, so
+`WebView2Loader.dll` lands in plain `target/release/`) but CI builds
+`x86_64-pc-windows-msvc` with an explicit `--target`
+(`.github/workflows/desktop.yml`), which puts artifacts under
+`target/x86_64-pc-windows-msvc/release/` instead -- and MSVC statically
+links `WebView2Loader.dll` in the first place, so it never emits a loose
+copy there at all. `tauri-build`'s own build script validates every
+declared resource exists at *compile* time, so CI failed before bundling
+even started, on every PR, Windows-unrelated or not. Removed
+`tauri.windows.conf.json` entirely rather than trying to make one static
+path satisfy two toolchains: MSVC (what CI and any real signed release
+uses) needs nothing here since the loader is statically linked; a real
+NSIS/MSI installer built locally with this repo's GNU/MinGW toolchain
+still needs the manual copy this section already gives above --
+`WebView2Loader.dll` next to `teleport-desktop.exe` in `target/release/`
+-- before running `npx tauri build`, same as `copy-sidecar.sh` already does
+for the daemon sidecar. The M10 gate pass recorded above genuinely happened
+with that config in place and a real installed app; removing the config
+now means reproducing that exact run again would need the manual copy step
+back first -- not re-verified after this revert, since the point here was
+restoring CI, not re-running the gate a third time.
 Also caught in passing: the installer's default per-user install directory,
 `%LOCALAPPDATA%\Teleport`, is the same physical folder as the daemon's own
 data directory, `%LOCALAPPDATA%\teleport` -- NTFS is case-insensitive.
@@ -107,8 +131,9 @@ rather than silently papered over:
   daemon on top of the developer's actual data directory. Fixed by passing
   `--data-dir` explicitly; production behavior is unchanged. **Also closed,
   2026-09-06**: run again packaged inside a real NSIS installer (see the M10
-  gate re-run above), not just a self-assigned job equivalent -- found and
-  fixed a real missing-`WebView2Loader.dll` bundling bug in the process.
+  gate re-run above), not just a self-assigned job equivalent -- found a
+  real missing-`WebView2Loader.dll` bundling bug in the process (see that
+  section for the fix and the CI-breaking correction that followed it).
   Still open: launched by an actual IDE/CI job rather than a self-assigned
   equivalent -- lower priority now that both the function and the real
   installer are proven, since packaging doesn't change what `CreateProcessW`
