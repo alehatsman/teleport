@@ -1,0 +1,48 @@
+[package]
+name = "teleport-cli"
+version = "0.1.0"
+edition = "2021"
+# Not published; a build target only, same shape as desktop/src-tauri
+# (docs/02-stack-decisions.md, docs/11-mvp-plan.md#m11--cli-client).
+publish = false
+
+[[bin]]
+name = "teleport"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util"] }
+# Client side of the same WS protocol daemon/src/ws.rs serves; version
+# matches the daemon's own dev-dependency (daemon/Cargo.toml) so both sides
+# of the protocol are exercised against the same tungstenite release.
+# rustls, not native-tls, for the same reason desktop/src-tauri's reqwest
+# picks it (one TLS stack in the tree, not two).
+tokio-tungstenite  = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# StreamExt/SinkExt on WebSocketStream -- already a transitive dependency of
+# tokio-tungstenite; named directly for the same reason
+# daemon/tests/ws_protocol.rs does (daemon/Cargo.toml's dev-dependencies).
+futures-util       = "0.3"
+clap               = { version = "4", features = ["derive"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+# Raw mode + terminal size + is_tty only -- no event-stream feature. Key
+# bytes are forwarded to the remote PTY completely unparsed (the design
+# point of this client: "the user's own terminal is the VT emulator",
+# docs/13-native-clients.md), so nothing here decodes keys into crossterm's
+# own KeyEvent type; that would be lossy and is exactly what raw-mode
+# passthrough avoids.
+crossterm          = "0.28"
+anyhow             = "1"
+thiserror          = "2"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Same crate + resolution the daemon and desktop shell use for <data_dir>
+# (daemon/src/main.rs::resolve_data_dir, desktop/src-tauri's own copy) --
+# three independent guesses at the platform data dir, deliberately, per
+# docs/11-mvp-plan.md#m11's interfaces note (own Cargo.toml, no shared
+# workspace with daemon/ or desktop/src-tauri/).
+directories        = "5"
+ulid               = "1"
+# HTTP client for the sessions/presets/kill surface (04) -- same crate,
+# version and TLS feature choice as desktop/src-tauri's copy.
+reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }

@@ -87,8 +87,16 @@ tar -xzf "$work_dir/$archive" -C "$work_dir"
 mkdir -p "$install_dir"
 cp "$work_dir/teleport-$target/teleportd" "$install_dir/teleportd"
 chmod +x "$install_dir/teleportd"
-
 log "installed teleportd $version to $install_dir/teleportd"
+
+# `teleport` (the CLI client, docs/11-mvp-plan.md#m11--cli-client) rides in
+# the same archive as of that milestone -- older releases don't have it, so
+# its absence here is not an error.
+if [ -f "$work_dir/teleport-$target/teleport" ]; then
+    cp "$work_dir/teleport-$target/teleport" "$install_dir/teleport"
+    chmod +x "$install_dir/teleport"
+    log "installed teleport $version to $install_dir/teleport"
+fi
 
 case ":$PATH:" in
     *":$install_dir:"*) ;;
