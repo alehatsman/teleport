@@ -352,6 +352,23 @@ async fn connect_and_run(
     let mut resize = ResizeWatcher::new();
     let mut buf = [0u8; 8192];
 
+    // `ResizeWatcher` only reports *changes* from here on -- it seeds `last`
+    // to the local terminal's current size and waits for the next SIGWINCH.
+    // Without this, a session created (or last resized) at a different size
+    // than this terminal stays at that stale size for the rest of the
+    // attach: nothing ever tells the daemon what the terminal actually is
+    // *right now*, only what it becomes next. Confirmed live: attaching a
+    // 150x45 terminal to an 80x24 session left `stty size` reporting `24
+    // 80` until the next real resize event.
+    if interactive && is_controller {
+        let (cols, rows) = resize.resync();
+        ws.send(Message::text(
+            json!({"type":"resize","cols":cols,"rows":rows}).to_string(),
+        ))
+        .await
+        .context("sending initial resize")?;
+    }
+
     loop {
         tokio::select! {
             n = stdin.read(&mut buf), if !stdin_eof => {
@@ -428,6 +445,21 @@ async fn connect_and_run(
                             Ok(ServerMessage::ControlGranted) => {
                                 is_controller = true;
                                 eprintln!("\r\n[teleport: control granted]\r");
+                                // Same staleness as the initial attach
+                                // (above): resize was withheld the whole
+                                // time this client was only observing, so
+                                // the daemon's idea of our terminal's size
+                                // may be outdated the moment we start
+                                // driving it.
+                                if interactive {
+                                    let (cols, rows) = resize.resync();
+                                    ws.send(Message::text(
+                                        json!({"type":"resize","cols":cols,"rows":rows})
+                                            .to_string(),
+                                    ))
+                                    .await
+                                    .context("sending resize after claiming control")?;
+                                }
                             }
                             Ok(ServerMessage::ControlRevoked { to, .. }) => {
                                 is_controller = false;
@@ -533,6 +565,21 @@ struct ResizeWatcher {
 }
 
 impl ResizeWatcher {
+    /// The real current size, bypassing `changed()`'s wait-for-an-event
+    /// logic entirely. `last` isn't kept current while this client is only
+    /// observing -- `changed()`'s branch in the select loop is disabled for
+    /// the whole time (`if interactive && is_controller`), so a genuine
+    /// resize during that window updates neither `last` nor the daemon.
+    /// Anywhere that needs "the terminal's size right now" (attaching, or
+    /// just being handed control) must re-query it directly rather than
+    /// trust `last` -- this both answers that and re-arms `last` so the
+    /// next real `changed()` compares against the truth instead of
+    /// whatever it was frozen at.
+    fn resync(&mut self) -> (u16, u16) {
+        self.last = crossterm::terminal::size().unwrap_or(self.last);
+        self.last
+    }
+
     fn new() -> Self {
         let last = crossterm::terminal::size().unwrap_or((80, 24));
         #[cfg(unix)]
