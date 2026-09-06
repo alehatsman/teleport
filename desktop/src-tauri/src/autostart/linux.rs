@@ -11,6 +11,7 @@
 //! has never run this desktop app at all.
 
 use std::fs;
+use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -21,6 +22,43 @@ fn unit_dir() -> Result<std::path::PathBuf> {
 
 fn unit_path() -> Result<std::path::PathBuf> {
     Ok(unit_dir()?.join("teleportd.service"))
+}
+
+// Dotfile: systemd's unit loader ignores hidden files in this directory, so
+// it can live next to teleportd.service without being mistaken for one.
+// Its presence/absence is the only record of whether *this* install() call
+// was the one that flipped lingering on -- see the linger comments in
+// install()/uninstall() below.
+fn linger_marker_path() -> Result<std::path::PathBuf> {
+    Ok(unit_dir()?.join(".teleportd-linger-owner"))
+}
+
+/// Quotes a value for a systemd unit `Key=value` line (`systemd.service(5)`
+/// documents shell-style quoting support for this). Without it, a sidecar
+/// path containing a space splits `ExecStart` into multiple words and the
+/// unit fails to start with `install()` reported as successful.
+fn quote_unit_value(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Current lingering state for this user, queried rather than assumed --
+/// see install()/uninstall() for why. `None` means the query itself failed
+/// (older systemd without `--value`, no `id` binary, etc.); the caller
+/// treats that the same as "not currently lingering".
+fn linger_enabled() -> Option<bool> {
+    let uid = Command::new("id").arg("-u").output().ok()?;
+    if !uid.status.success() {
+        return None;
+    }
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
+    let out = Command::new("loginctl")
+        .args(["show-user", &uid, "--value", "-p", "Linger"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "yes")
 }
 
 pub fn install() -> Result<()> {
@@ -38,7 +76,7 @@ pub fn install() -> Result<()> {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe.display()
+        quote_unit_value(&exe.display().to_string())
     );
     let path = unit_path()?;
     fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
@@ -47,36 +85,43 @@ pub fn install() -> Result<()> {
     // caller has no active systemd --user session (e.g. a minimal
     // container) -- autostart is a convenience, not a launch dependency
     // (docs/11-mvp-plan.md#m10 edge cases).
-    let _ = std::process::Command::new("systemctl")
+    let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
-    let _ = std::process::Command::new("systemctl")
+    let _ = Command::new("systemctl")
         .args(["--user", "enable", "teleportd.service"])
         .status();
     // See the module doc comment: no USER argument targets the caller, and
     // needs no privilege beyond enabling one's own lingering.
-    let _ = std::process::Command::new("loginctl")
-        .arg("enable-linger")
-        .status();
+    //
+    // Only flip it -- and only claim ownership via the marker file -- if it
+    // wasn't already on. Otherwise uninstall() would turn off lingering
+    // this user enabled for an unrelated reason.
+    if !linger_enabled().unwrap_or(false) {
+        let _ = Command::new("loginctl").arg("enable-linger").status();
+        let _ = fs::write(linger_marker_path()?, "");
+    }
     Ok(())
 }
 
 pub fn uninstall() -> Result<()> {
-    let _ = std::process::Command::new("systemctl")
+    let _ = Command::new("systemctl")
         .args(["--user", "disable", "--now", "teleportd.service"])
         .status();
     let path = unit_path()?;
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
-    let _ = std::process::Command::new("systemctl")
+    let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
-    // Symmetric with install(). Known limitation: if this user separately
-    // wanted lingering for an unrelated reason, this turns it off too --
-    // there's no per-unit lingering flag to scope it to, only a per-user one.
-    let _ = std::process::Command::new("loginctl")
-        .arg("disable-linger")
-        .status();
+    // Symmetric with install(): only disable lingering if the marker says
+    // *this* install() was the one that turned it on. If the user
+    // separately wanted lingering for an unrelated reason, it's untouched.
+    let marker = linger_marker_path()?;
+    if marker.exists() {
+        let _ = Command::new("loginctl").arg("disable-linger").status();
+        let _ = fs::remove_file(&marker);
+    }
     Ok(())
 }
