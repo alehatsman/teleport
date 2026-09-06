@@ -73,7 +73,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: daemon -> target
+          workspaces: |
+            daemon -> target
+            cli -> target
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
@@ -82,6 +84,10 @@ jobs:
         working-directory: daemon
         run: cargo build --release --features embedded-web --target ${{ matrix.target }}
 
+      - name: build teleport
+        working-directory: cli
+        run: cargo build --release --target ${{ matrix.target }}
+
       - name: package (unix)
         if: matrix.archive_ext == 'tar.gz'
         shell: bash
@@ -89,6 +95,7 @@ jobs:
           name="teleport-${{ matrix.target }}"
           mkdir "$name"
           cp "daemon/target/${{ matrix.target }}/release/teleportd" "$name/"
+          cp "cli/target/${{ matrix.target }}/release/teleport" "$name/"
           tar czf "$name.tar.gz" "$name"
       - name: package (windows)
         if: matrix.archive_ext == 'zip'
@@ -97,6 +104,7 @@ jobs:
           name="teleport-${{ matrix.target }}"
           mkdir "$name"
           cp "daemon/target/${{ matrix.target }}/release/teleportd.exe" "$name/"
+          cp "cli/target/${{ matrix.target }}/release/teleport.exe" "$name/"
           7z a "$name.zip" "$name"
 
       - uses: actions/upload-artifact@v4

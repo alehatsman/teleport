@@ -1210,6 +1210,50 @@ other client already has to honor.
 >    `teleportd`; `scripts/install.sh` still installs correctly with two binaries in
 >    the archive instead of one.
 
+> **Delivered 2026-09-06.** `cli/` built exactly to the interfaces above (`main.rs`,
+> `connect.rs`, `http.rs`, `attach.rs`, `identity.rs`), `reqwest` chosen for the HTTP
+> surface (already proven in `desktop/src-tauri`, same version/TLS feature). No
+> server-side change, no protocol version bump, confirming the spec's own claim.
+>
+> **Real end-to-end validation, not just compiled** (a real `teleportd` on this
+> machine, a real pty via `tmux` for the raw-mode leg — no mocks):
+> - `sessions`/`presets`/`new`/`kill` against a real daemon: auto-discovery via
+>   `<data_dir>/port`+`token`, session creation, listing.
+> - `attach` in a real raw-mode terminal (tmux pane, not piped): byte-exact PTY
+>   passthrough (`echo hi-interactive` round-tripped correctly), local `SIGWINCH` →
+>   remote resize (`stty size` read `24 80` before, `39 120` after resizing the
+>   terminal), `~.` detach (clean exit code 0, remote session left `running`), `~!`/`~?`
+>   implemented and unit-tested.
+> - Offset-tracked reconnect confirmed **twice**: after a clean `~.` detach and after a
+>   real `kill -9` on the CLI process mid-session -- both times the remote session
+>   stayed `running`, and a fresh `attach` replayed history with **no gap warning** and
+>   no duplicated bytes. (A gap-detection bug was caught and fixed by this testing:
+>   the client was seeding its offset cursor from `ready.next_offset` instead of
+>   `ready.replay_from`, which flagged every attach with any replay at all as a
+>   discontinuity. `replay_from` is where the first frame after `ready` actually
+>   starts; `next_offset` is where the live stream begins after replay finishes.)
+> - Piped mode (`echo ... | teleport attach`, both stdin and stdout not a tty):
+>   confirmed no raw-mode call, no escape-sequence interpretation, exit code forwarded
+>   from the remote process (`exit 7` → CLI exit `7`).
+> - Same persisted `client_id` (`<data_dir>/cli-identity`) resumed its own control
+>   lease on reattach with no `~!` needed, inside the daemon's disconnect-grace window
+>   -- confirmed against the real 15s `control_grace_ms` default.
+> - `cli/`: `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` clean;
+>   17 unit tests (the `~`-escape state machine and connection-resolution precedence,
+>   both pure logic extracted so tests don't need to mutate process-global env vars).
+> - `ci.yml`: `cli-fmt` / `cli` (3-OS matrix) / `cli-audit` added, mirroring
+>   `daemon-fmt` / `daemon` / `daemon-audit`. `release.yml`: `teleport` built per
+>   target and copied into the same archive as `teleportd`; `scripts/install.sh`
+>   installs it too when present (older archives without it still work).
+>
+> **Not done in this pass, deferred:** validation items 2 and 3 (a real Tailscale
+> `--url` connection from a second machine, and cross-client parity against the web
+> UI) need a second machine and/or the web UI actually running -- same shape as M9's
+> reboot check, real hardware the dev environment doesn't have. The mechanism itself
+> (bearer header on the WS upgrade, no `Origin`, same `/api/v1` surface every other
+> client uses) needs no new code to exercise once available; nothing here is
+> loopback-specific.
+
 ---
 
 ## Small additions this plan makes beyond the original research
