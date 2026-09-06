@@ -948,6 +948,30 @@ reattaches. Browser-only mode remains fully functional.
 > starts at login, not at boot. That half is
 > [#40](https://github.com/alehatsman/teleport/issues/40), not an M10 gap.
 
+> **`autostart/windows.rs`'s Task Scheduler entry: attempted, 2026-09-06, blocked by
+> the environment, not by this code.** Same goal as the macOS run above -- drive the
+> real `install()`/`uninstall()` against a real `schtasks`, not a hand-rolled task --
+> on the same real Windows 11 (build 26200) machine the gate below was re-run on.
+> Every task-creation attempt returned `Access is denied`, and this was checked from
+> four independent angles before concluding it wasn't a fixable quirk:
+> `schtasks /create ... /sc onlogon /rl limited` (`install()`'s exact invocation, minus
+> the real exe path) denied; the same command with no `/rl` flag at all, still denied;
+> the native PowerShell `Register-ScheduledTask` cmdlet instead of `schtasks.exe`,
+> still denied (rules out an `schtasks.exe`-specific bug); the same call again with
+> this agent's own tool sandbox fully disabled, still denied (rules out this session's
+> sandbox rather than Windows itself). The account is nominally in
+> `BUILTIN\Administrators`, but that membership is listed "for deny only" (UAC-filtered,
+> Medium integrity, not elevated) -- ordinarily still enough for a standard user to
+> schedule a task for their own login, and not enough here. `gpresult` showed no
+> applied GPOs; confirming further (`secedit`) itself needs admin, which this session
+> neither has nor attempted to acquire. Reads as a security-hardening baseline on this
+> specific machine blocking Task Scheduler task creation outright (a known
+> anti-persistence control), not a bug in `autostart/windows.rs`. Deliberately not
+> routed around: bypassing a host security control to force a green verification would
+> defeat the point of verifying. Still open -- needs either an elevated session on this
+> same machine or a different Windows machine without this restriction to actually
+> exercise `install()`/`uninstall()` for real, the way `launchagent_tests` did on macOS.
+
 > **Validation item 1 (the gate itself) re-run on Windows, 2026-09-06 -- real hardware
 > (Windows 11 Pro, build 26200), not CI.** The same box W1-W3/N5/the job-breakaway item
 > above were verified on. Two passes.
