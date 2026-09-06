@@ -268,6 +268,28 @@ async fn connect_and_run(
         match ws.next().await {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                 Ok(ServerMessage::Ready(ready)) => break ready,
+                // `offset_ahead` can arrive as the *first* frame, before any
+                // `ready` ever exists for this connection at all --
+                // `session.attach(from)` fails outright when the requested
+                // offset is stale (a purged log, or a session lost and
+                // recreated), and the daemon sends this error and closes
+                // before building `ready`. An earlier version of this
+                // function treated any non-`ready` text frame here as fatal,
+                // which made this specific case retry with the same
+                // unchanged (stale) offset forever -- the same shape of bug
+                // the multi-round-replay fix above addressed, different
+                // trigger. Per docs/04-api-protocol.md#offsets-are-the-
+                // replay-index: "let the client restart from 0".
+                Ok(ServerMessage::Error { code, .. }) if code == "offset_ahead" => {
+                    return Ok(Outcome::Reconnect { after: 0 });
+                }
+                Ok(ServerMessage::Error { code, message }) => {
+                    return Err(anyhow::anyhow!(
+                        "{code}{}",
+                        message.map(|m| format!(": {m}")).unwrap_or_default()
+                    )
+                    .into())
+                }
                 Ok(_) => {
                     return Err(anyhow::anyhow!(
                         "expected `ready` before any other control message"

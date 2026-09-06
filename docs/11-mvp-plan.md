@@ -1299,6 +1299,38 @@ other client already has to honor.
 > and loop state each bundled into their own struct); and `02-stack-decisions.md`
 > now cross-references `cli/`'s dependency choices instead of staying silent on them.
 > 10 new unit tests added alongside the fixes (27 total).
+>
+> **Post-merge coverage pass.** Everything the review round couldn't reach without a
+> second client or more setup, real on this machine: `~!` claim-control between two
+> distinct clients (`--data-dir`-separated identities, same daemon) -- preemption
+> confirmed both directions (`control_granted` on the claimer, `control_revoked` on
+> the one it took from), and the newly-demoted client's input and resize both
+> correctly withheld afterward. A full-screen program (`vim`, not just `/bin/sh`):
+> splash screen, insert-mode text entry, live `SIGWINCH`-driven reflow at a new size,
+> and real ANSI color/SGR codes from `:syntax on`/`:set number` all round-tripped
+> byte-exact (`tmux capture-pane -e` showing the literal escape sequences). Ctrl-C
+> interrupting the remote process without touching the local CLI; Ctrl-D ending the
+> remote shell with its actual exit code (130, signal-terminated) reaching the CLI's
+> own exit code. `--preset` and `kill --purge`, previously only code-read, both run
+> for real.
+>
+> **A second real bug found and fixed by this pass:** `offset_ahead` arriving as the
+> *first* frame of a connection (before any `ready` exists yet -- happens when
+> `session.attach(from)` itself fails, e.g. a stale offset against a purged log or a
+> recreated session) hit the same generic "non-`ready` text frame" handler the
+> multi-round-replay bug used to, and retried with the same stale offset forever.
+> Same failure shape, different trigger, caught by deliberately forcing the
+> condition (a temporary hardcoded `after` value, removed before committing) rather
+> than waiting to hit it by chance. Fixed by recognizing `offset_ahead`
+> specifically in that same pre-`ready` loop and resetting to `after=0`, exactly as
+> the main loop already did for the same error arriving later. Reverified: forced
+> `offset_ahead` on first connect now attaches cleanly instead of looping; normal
+> (non-forced) attach, detach and reattach all still work.
+>
+> Not reachable from this dev environment, same as before: real Windows/macOS
+> interactive use (CI covers compile + unit tests there, not hands-on), a real
+> Tailscale `--url` connection from a second machine, and cross-client parity
+> against the web UI.
 
 ---
 
