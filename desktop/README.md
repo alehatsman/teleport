@@ -150,6 +150,30 @@ rather than silently papered over:
   real upgrade-over-a-running-daemon repro first, not a guessed fix.
 - **Windows autostart** (`src/autostart/windows.rs`) is templated but
   unverified on real hardware.
+  **Attempted, 2026-09-06, blocked by the environment, not by this code**:
+  tried to mirror the macOS `launchagent_tests` approach -- drive the real
+  `install()`/`uninstall()` against a real `schtasks` -- on this real Windows
+  11 machine, and every task-creation attempt returned `Access is denied`.
+  Confirmed this isn't an `schtasks.exe` quirk or this session's own tool
+  sandbox: the identical `Access is denied` came back from
+  `schtasks /create ... /sc onlogon /rl limited` (`install()`'s exact
+  invocation, minus the real exe path), from the same command with no `/rl`
+  flag at all, from the native PowerShell `Register-ScheduledTask` cmdlet
+  (rules out `schtasks.exe` specifically), and from the harness's own sandbox
+  fully disabled (rules out this agent's tool sandbox rather than Windows
+  itself). The account is nominally in `BUILTIN\Administrators`, but that
+  membership shows "for deny only" (UAC-filtered, Medium integrity, not
+  elevated) -- ordinarily still enough for a standard user to schedule a task
+  for themselves, and not enough here. `gpresult` showed no applied GPOs;
+  deeper policy inspection (`secedit`) itself needs admin, which this session
+  does not have and did not try to acquire. Reads as a security-hardening
+  baseline on this machine specifically blocking Task Scheduler task creation
+  (a known anti-persistence control) rather than a bug in
+  `autostart/windows.rs`. Deliberately not worked around -- routing around a
+  host security control to force a green test is the wrong move even when
+  the goal is legitimate verification. Still open: needs either an elevated
+  session on this same machine or a different Windows machine without this
+  restriction to actually exercise `install()`/`uninstall()` for real.
   **macOS autostart closed, 2026-09-06**: `autostart/macos.rs`'s
   `launchagent_tests` drives the real `install()`/`uninstall()` against a real
   `~/Library/LaunchAgents`, `launchctl` and `teleportd`. `RunAtLoad` brings a
