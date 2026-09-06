@@ -1352,6 +1352,30 @@ other client already has to honor.
 > success; reverified against the identical reproduction -- reports `Error: attach
 > failed: 404 -- session not found` and exits in the same poll cycle it used to
 > hang in.
+>
+> **A fourth real bug, adversarial-QA pass:** the local terminal's size is never
+> synced to the daemon at attach time, only on the next *change*. `ResizeWatcher`
+> seeds `last` to the terminal's current size and waits for the next `SIGWINCH`;
+> a session created (or last resized) at a different size than the terminal
+> attaching to it now stays at that stale size for the whole session unless the
+> user happens to resize their window. Confirmed live: attaching a real ~124x62
+> terminal to an 80x24 session left `stty size` reporting `24 80` inside the
+> session until a manual resize forced a `SIGWINCH`. The same staleness applies
+> a second way: `changed()`'s branch in the select loop is gated `if interactive
+> && is_controller`, so a client that's only observing never even polls for
+> resizes -- a real resize while observing updates neither `last` nor the
+> daemon, and claiming control afterward would hand over a stale size alongside
+> the fresh one.
+>
+> Fixed with a `ResizeWatcher::resync()` that re-queries the terminal directly
+> (bypassing `changed()`'s wait-for-an-event logic) and re-arms `last` against
+> the truth, called at both of the two points that need "the terminal's size
+> right now" rather than "its next change": immediately after attaching, and
+> right after a `ControlGranted`. Reverified both paths for real: a fresh attach
+> now reports the terminal's actual current size from the very first `stty size`,
+> with zero manual resize needed; and a client resized *while observing* (so its
+> own resize was correctly withheld) reports its current, post-resize size the
+> moment it claims control via `~!`, not whatever it was when it first attached.
 
 ---
 
