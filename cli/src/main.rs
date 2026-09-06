@@ -95,8 +95,25 @@ async fn main() -> Result<()> {
             let data_dir = connect::data_dir(cli.data_dir)?;
             let client_id = identity::client_id(&data_dir);
             let client_name = identity::default_client_name();
-            let code = attach::run(&conn, &id, &client_id, &client_name).await?;
-            std::process::exit(code);
+            // `std::process::exit` on *both* arms, not just success -- once
+            // `attach::run` has read even one byte of interactive stdin,
+            // tokio's shared stdin reader has a blocking-pool task parked in
+            // a real `read(2)` on the terminal fd that will not return until
+            // the next keystroke. Propagating an error with `?` here would
+            // return it out of `async fn main`, and `#[tokio::main]`'s
+            // ordinary teardown drops the `Runtime` before printing it --
+            // which blocks until every blocking-pool task finishes. That
+            // keystroke never comes on an error exit (a stale/killed session,
+            // a fatal reconnect failure), so the process hangs forever,
+            // silently, instead of reporting the error. Matching the success
+            // arm's hard exit sidesteps the runtime teardown entirely.
+            match attach::run(&conn, &id, &client_id, &client_name).await {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("Error: {e:?}");
+                    std::process::exit(1);
+                }
+            }
         }
         Command::Kill { id, purge } => kill(&conn, &id, purge).await,
     }
