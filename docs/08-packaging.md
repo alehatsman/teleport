@@ -113,13 +113,24 @@ The daemon should already be running before the GUI opens.
 
 | OS | Mechanism |
 |---|---|
-| Linux | systemd **user** unit (`~/.config/systemd/user/teleportd.service`), `WantedBy=default.target`; enable lingering if it should survive logout |
+| Linux | systemd **user** unit (`~/.config/systemd/user/teleportd.service`), `WantedBy=default.target`, **plus `loginctl enable-linger`** so it survives logout and a full reboot, not just re-login |
 | macOS | `launchd` LaunchAgent in `~/Library/LaunchAgents/`, `RunAtLoad=true`, `KeepAlive` on crash |
 | Windows | Task Scheduler task with a **logon trigger**, which exists specifically for starting an executable when a user logs in |
 
 Autostart is user-scoped in every case. Never install a system-level service — that
 would mean running as a different, more privileged user
-([06-security.md](06-security.md#privilege)).
+([06-security.md](06-security.md#privilege)). Lingering does not cross that line: it is
+a per-user systemd-logind flag, and enabling *your own* is unprivileged by default
+(`org.freedesktop.login1.set-self-linger`'s polkit rule ships `allow_any=yes`).
+
+**Headless install.** `autostart::install()` above is reachable only from the desktop
+app's tray menu — no help on a box that has never run the GUI, exactly the machine
+you'd reach from a phone over Tailscale. `teleportd service install` /
+`teleportd service uninstall` does the same Linux install directly, no desktop app
+needed (issue [#40](https://github.com/alehatsman/teleport/issues/40)). macOS and
+Windows have no headless equivalent: a boot-time launch there needs a LaunchDaemon or
+an elevated/unattended Task Scheduler trigger, both of which cross the privilege line
+above, so those two stay login-scoped and reachable only from the tray.
 
 ## Build pipeline
 
