@@ -689,6 +689,21 @@ tailnet, takes control, and types into it.
 > run in this session (rebooting the live dev machine mid-session is disruptive and
 > wasn't asked for) — do this whenever convenient and report back; nothing else is
 > outstanding for M9.
+>
+> **Linux headless-daemon gap closed 2026-09-06** ([#40](https://github.com/alehatsman/teleport/issues/40)).
+> `serve status` surviving a reboot was never the whole story — the daemon behind it
+> also has to come back, and every autostart mechanism was login-scoped, with
+> `autostart::install()` reachable only from the desktop tray. Both halves fixed on
+> Linux: `loginctl enable-linger` added to the tray's install path and to a new
+> `teleportd service install`/`uninstall` that needs no desktop app at all — real
+> hardware check on this repo's dev box (systemd 255), full round trip: unit written +
+> enabled, `Linger` flips `no → yes` on install and back on uninstall, no privilege
+> prompt (`org.freedesktop.login1.set-self-linger` is unprivileged by default for a
+> user enabling their own lingering). `cargo test`/`fmt --check`/`clippy -D warnings`
+> clean on both `daemon/` and `desktop/src-tauri/`. macOS/Windows deliberately
+> unchanged — a boot-time launch on either needs root/elevation, which
+> [06-security.md#privilege](06-security.md#privilege) rejects — so the reboot check
+> above still only closes the Linux leg once run.
 
 **Also record** ([N1](15-open-questions.md#n1--keystroke-latency)): the RTT on that link,
 and whether `tailscale status` reports a direct connection or a DERP relay for the phone.

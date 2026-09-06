@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -23,6 +23,8 @@ use teleportd::log::LogLimits;
 use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
 use teleportd::{config, now_ms, presets};
 
+mod service;
+
 const DEFAULT_PORT: u16 = 7337;
 /// 256 bits, per docs/06-security.md#the-credential.
 const TOKEN_BYTES: usize = 32;
@@ -31,6 +33,12 @@ const TOKEN_BYTES: usize = 32;
 #[derive(Parser, Debug)]
 #[command(name = "teleportd", version)]
 struct Cli {
+    /// Install/remove autostart-at-login for this daemon directly, with no
+    /// desktop app needed (docs/08-packaging.md#autostart-at-login, issue
+    /// #40). Runs once and exits -- every other flag below is ignored.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Address to bind. Must be loopback unless --i-know-what-im-doing is set
     /// (docs/06-security.md#listener).
     #[arg(long, default_value_t = SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)))]
@@ -57,9 +65,34 @@ struct Cli {
     web_dist: PathBuf,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Manage this daemon's own autostart-at-login registration.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    /// Install autostart (systemd user unit; enables lingering on Linux so
+    /// it survives logout, not just re-login).
+    Install,
+    /// Remove autostart.
+    Uninstall,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Command::Service { action }) = cli.command {
+        return match action {
+            ServiceAction::Install => service::install(),
+            ServiceAction::Uninstall => service::uninstall(),
+        };
+    }
 
     // Logs go to stderr; stdout carries only the startup URL below, so a
     // script can capture it cleanly.
