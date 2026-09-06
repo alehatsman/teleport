@@ -1004,6 +1004,21 @@ reattaches. Browser-only mode remains fully functional.
 > API-only 404 fallback) -- the first time this milestone's Windows testing has ever
 > seen the real window content rather than a proxy for it.
 >
+> **Correction, 2026-09-06, caught by another session's CI run, not this one's:**
+> that fix broke CI. The declared resource path was right for this machine (GNU
+> toolchain, no `--target`, so the dll lands in plain `target/release/`) but CI builds
+> `x86_64-pc-windows-msvc` with an explicit `--target` (`target/x86_64-pc-windows-msvc/release/`
+> instead) -- and MSVC statically links `WebView2Loader.dll` in the first place, so it
+> never produces a loose copy there to find. `tauri-build`'s build script validates
+> every declared resource at *compile* time, so this failed CI before bundling even
+> started, on every PR regardless of whether it touched Windows. Removed
+> `tauri.windows.conf.json` entirely: MSVC (what CI and any real signed release
+> actually uses) needs nothing here, and a real installer built locally on this
+> machine's GNU toolchain still can, via the manual copy step `desktop/README.md`
+> documents -- just no longer automatic. Not re-verified against a real GNU-toolchain
+> install after reverting it; restoring CI was the point, not repeating the gate a
+> third time.
+>
 > One more thing caught while installed, tracked rather than blind-fixed: the NSIS
 > installer's default per-user install directory, `%LOCALAPPDATA%\Teleport`, and the
 > daemon's own data directory, `%LOCALAPPDATA%\teleport`, are the same physical folder
