@@ -32,7 +32,7 @@ fn shutdown_request(
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    builder.body(Body::empty()).unwrap()
+    builder.body(Body::empty()).expect("valid request")
 }
 
 #[tokio::test]

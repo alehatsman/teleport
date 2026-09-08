@@ -32,14 +32,17 @@ async fn connect(
 ) -> Result<WsStream, tokio_tungstenite::tungstenite::Error> {
     let mut request = url.into_client_request().expect("valid ws url");
     if let Some(token) = token {
-        request
-            .headers_mut()
-            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}")
+                .parse()
+                .expect("valid header value"),
+        );
     }
     if let Some(origin) = origin {
         request
             .headers_mut()
-            .insert("Origin", origin.parse().unwrap());
+            .insert("Origin", origin.parse().expect("valid header value"));
     }
     let (stream, _response) = tokio_tungstenite::connect_async(request).await?;
     Ok(stream)

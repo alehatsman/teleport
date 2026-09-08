@@ -13,7 +13,7 @@ fn get(uri: &str) -> Request<Body> {
         .method("GET")
         .uri(uri)
         .body(Body::empty())
-        .unwrap()
+        .expect("valid request")
 }
 
 async fn body_string(response: axum::response::Response) -> String {
@@ -24,9 +24,10 @@ async fn body_string(response: axum::response::Response) -> String {
 }
 
 fn write_dist(dir: &std::path::Path) {
-    std::fs::create_dir_all(dir.join("assets")).unwrap();
-    std::fs::write(dir.join("index.html"), "<html>spa shell</html>").unwrap();
-    std::fs::write(dir.join("assets/app.js"), "console.log('app')").unwrap();
+    std::fs::create_dir_all(dir.join("assets")).expect("create test dist dir");
+    std::fs::write(dir.join("index.html"), "<html>spa shell</html>")
+        .expect("write test index.html");
+    std::fs::write(dir.join("assets/app.js"), "console.log('app')").expect("write test app.js");
 }
 
 #[tokio::test]

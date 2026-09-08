@@ -31,7 +31,7 @@ fn temp_dir(name: &str) -> PathBuf {
 fn ulid_like() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before 1970")
         .as_nanos()
 }
 
