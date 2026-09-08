@@ -11,7 +11,7 @@ steps:
   # branch is what a change to rust-quality looks like while it is in flight;
   # bumping back to a tag is this one line and nothing else.
   - vars:
-      rq_version: feat/provision-only
+      rq_version: v0.3.0
       rq_dir: "{{ home }}/.cache/provision/tools/rust-quality"
 
   - name: Check out rust-quality
