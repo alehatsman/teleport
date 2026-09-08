@@ -194,6 +194,10 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
         "the session must have actually produced output before the kill"
     );
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for signaling an arbitrary pid"
+    )]
     // SAFETY: sending SIGKILL to a child process this test just spawned and owns.
     unsafe {
         libc::kill(

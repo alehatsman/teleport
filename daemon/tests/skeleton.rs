@@ -275,6 +275,10 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
     let port_file = data_dir.join("port");
     assert!(wait_for_file(&port_file, Duration::from_secs(5)));
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for signaling an arbitrary pid"
+    )]
     // SAFETY: sending SIGTERM to a child process we just spawned and own.
     unsafe {
         libc::kill(
