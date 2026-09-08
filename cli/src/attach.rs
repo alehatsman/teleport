@@ -42,7 +42,7 @@ struct LoopState {
     backoff_ms: u64,
 }
 
-pub async fn run(
+pub(crate) async fn run(
     conn: &Connection,
     session_id: &str,
     client_id: &str,
@@ -110,11 +110,12 @@ pub async fn run(
 /// this exists to decorrelate concurrent processes, not to be
 /// unpredictable.
 fn jitter_ms(backoff_ms: u64) -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0) as u64;
-    let mixed = nanos.wrapping_add(std::process::id() as u64 * 0x9E3779B1);
+    let nanos = u64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos()),
+    );
+    let mixed = nanos.wrapping_add(u64::from(std::process::id()) * 0x9E3779B1);
     mixed % (backoff_ms / 4 + 1)
 }
 
@@ -153,18 +154,18 @@ enum ServerMessage {
     ControlGranted,
     ControlRevoked {
         to: String,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         client_id: String,
     },
     Resized {
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         cols: u16,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         rows: u16,
     },
     Exit {
         code: Option<i32>,
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         final_offset: u64,
     },
     Error {
