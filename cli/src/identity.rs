@@ -22,7 +22,15 @@ pub(crate) fn client_id(data_dir: &Path) -> String {
     // Best-effort: a write failure (read-only data dir, race with another
     // `teleport` invocation) just means this run gets an id nobody
     // persisted -- the next run tries again. Not fatal to attaching now.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort persist; the next run just tries again"
+    )]
     let _ = std::fs::create_dir_all(data_dir);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort persist; the next run just tries again"
+    )]
     let _ = std::fs::write(&path, &id);
     id
 }

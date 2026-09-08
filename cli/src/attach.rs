@@ -62,12 +62,11 @@ pub(crate) async fn run(
     let mut after: Option<u64> = None;
 
     let result = loop {
-        match connect_and_run(&params, after, interactive, &mut state).await {
+        match Box::pin(connect_and_run(&params, after, interactive, &mut state)).await {
             Ok(Outcome::Detach) => break Ok(0),
             Ok(Outcome::Exit(code)) => break Ok(code),
             Ok(Outcome::Reconnect { after: next_after }) => {
                 after = Some(next_after);
-                continue;
             }
             Err(ConnectError::Fatal { status, body }) => {
                 let hint = if status == 401 || status == 403 {
@@ -91,12 +90,17 @@ pub(crate) async fn run(
                 ))
                 .await;
                 state.backoff_ms = (state.backoff_ms * 2).min(BACKOFF_MAX_MS);
-                continue;
             }
         }
     };
 
     if state.raw_mode_entered {
+        // Best-effort: the process is exiting either way, and there is
+        // nowhere left to report a failure to restore the terminal.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort terminal restore on exit; nothing left to do if it fails"
+        )]
         let _ = crossterm::terminal::disable_raw_mode();
     }
     result
@@ -115,7 +119,7 @@ fn jitter_ms(backoff_ms: u64) -> u64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos()),
     );
-    let mixed = nanos.wrapping_add(u64::from(std::process::id()) * 0x9E3779B1);
+    let mixed = nanos.wrapping_add(u64::from(std::process::id()) * 0x9E37_79B1);
     mixed % (backoff_ms / 4 + 1)
 }
 
@@ -312,10 +316,9 @@ async fn connect_and_run(
                 Err(e) => return Err(anyhow::anyhow!("parsing `ready` frame: {e}").into()),
             },
             Some(Ok(Message::Binary(data))) => {
-                if data.len() < 8 {
+                let Some(payload) = data.get(8..) else {
                     continue;
-                }
-                let payload = &data[8..];
+                };
                 stdout
                     .write_all(payload)
                     .await
@@ -323,6 +326,13 @@ async fn connect_and_run(
                 stdout.flush().await.context("flushing stdout")?;
             }
             Some(Ok(Message::Ping(payload))) => {
+                // A failed pong means the connection is already dead; the
+                // next read on this same stream reports that, so nothing
+                // extra to do here.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "send failure surfaces on the next read of this stream instead"
+                )]
                 let _ = ws.send(Message::Pong(payload)).await;
             }
             Some(Ok(_)) => {}
@@ -390,16 +400,17 @@ async fn connect_and_run(
                     stdin_eof = true;
                     continue;
                 }
+                let (chunk, _) = buf.split_at(n);
                 if !interactive {
                     // Piped stdin: no escape sequences, no tty to restore
                     // (docs/11-mvp-plan.md#m11's edge cases) -- forward
                     // verbatim, same shape as `ssh host cmd | grep foo`.
                     if is_controller {
-                        ws.send(Message::binary(buf[..n].to_vec())).await.context("sending input")?;
+                        ws.send(Message::binary(chunk.to_vec())).await.context("sending input")?;
                     }
                     continue;
                 }
-                let (bytes, actions) = escape.process(&buf[..n]);
+                let (bytes, actions) = escape.process(chunk);
                 let mut detach = false;
                 for action in actions {
                     match action {
@@ -436,8 +447,12 @@ async fn connect_and_run(
                         if data.len() < 8 {
                             continue;
                         }
-                        let offset = u64::from_be_bytes(data[0..8].try_into().unwrap());
-                        let payload = &data[8..];
+                        let (offset_bytes, payload) = data.split_at(8);
+                        let offset = u64::from_be_bytes(
+                            offset_bytes
+                                .try_into()
+                                .expect("split_at(8) always returns an 8-byte head"),
+                        );
                         if let Some(expected) = next_offset {
                             if offset != expected {
                                 eprintln!(
@@ -478,8 +493,7 @@ async fn connect_and_run(
                                 is_controller = false;
                                 eprintln!("\r\n[teleport: control taken by {to}]\r");
                             }
-                            Ok(ServerMessage::Resized { .. }) => {}
-                            Ok(ServerMessage::Ready(_)) => {}
+                            Ok(ServerMessage::Resized { .. } | ServerMessage::Ready(_)) => {}
                             Ok(ServerMessage::Error { code, message }) => {
                                 if code == "offset_ahead" {
                                     return Ok(Outcome::Reconnect { after: 0 });
@@ -495,6 +509,13 @@ async fn connect_and_run(
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
+                        // Same as the handshake loop above: a failed pong
+                        // means the connection is already dead, and the next
+                        // read on this stream reports that.
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "send failure surfaces on the next read of this stream instead"
+                        )]
                         let _ = ws.send(Message::Pong(payload)).await;
                     }
                     Some(Ok(_)) => {}
@@ -665,7 +686,7 @@ mod url_tests {
         let url = build_stream_url(
             "https://mainpc.tail1234.ts.net",
             "abc123",
-            Some(184221),
+            Some(184_221),
             "cid",
             "cname",
         )

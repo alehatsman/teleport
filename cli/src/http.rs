@@ -28,7 +28,7 @@ struct ErrorBody {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ApiError {
-    #[error("{status}: {}", format_body(error, message))]
+    #[error("{status}: {}", format_body(error.as_ref(), message.as_ref()))]
     Status {
         status: reqwest::StatusCode,
         error: Option<String>,
@@ -38,7 +38,7 @@ pub(crate) enum ApiError {
     Transport(#[from] reqwest::Error),
 }
 
-fn format_body(error: &Option<String>, message: &Option<String>) -> String {
+fn format_body(error: Option<&String>, message: Option<&String>) -> String {
     match (error, message) {
         (Some(e), Some(m)) => format!("{e}: {m}"),
         (Some(e), None) => e.clone(),
