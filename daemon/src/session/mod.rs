@@ -309,6 +309,10 @@ impl Session {
         if let Some(db) = &self.db {
             db.note_size(&self.id.to_string(), cols, rows);
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "broadcast send; a failure here just means no one is currently subscribed to resize notifications"
+        )]
         let _ = self.events.send(SessionEvent::Resized { cols, rows });
         Ok(())
     }
@@ -413,6 +417,10 @@ impl Session {
         if *rx.borrow() {
             return;
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "changed() only errs if exited_tx is dropped, which doesn't happen while this Session is alive (same guarantee as spawn_exit_listener's send)"
+        )]
         let _ = rx.changed().await;
     }
 

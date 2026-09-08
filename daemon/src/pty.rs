@@ -308,6 +308,10 @@ impl TerminalSession for PtySession {
         // A broken reply channel means the control thread finished via a
         // race with a spontaneous ChildExited it processed first -- the
         // session is exited either way, so treat that as success too.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a broken reply channel means the control thread finished via a race with a spontaneous ChildExited it processed first -- the session is exited either way, so treat that as success too"
+        )]
         let _ = reply_rx.recv();
         Ok(())
     }
@@ -432,6 +436,10 @@ fn reader_thread_main(
             Ok(n) => on_output(&buf[..n]),
         }
     }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort EOF signal; if nothing is waiting on it anymore there's nothing to do"
+    )]
     let _ = eof_tx.try_send(());
 }
 
@@ -456,6 +464,10 @@ fn reaper_thread_main(
     let result = child.wait();
     // Ignored if the control thread already finished (e.g. gave up on a
     // hard-kill timeout) and dropped its receiver -- its result stands.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "ignored if the control thread already finished (e.g. gave up on a hard-kill timeout) and dropped its receiver -- its result stands"
+    )]
     let _ = control_tx.send(ControlEvent::ChildExited(result));
 }
 
@@ -484,6 +496,10 @@ fn control_thread_main(
             ControlEvent::Resize { cols, rows } => {
                 if state.load(Ordering::SeqCst) == STATE_RUNNING {
                     if let Some(master) = &master {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "best-effort resize; if the pty is already gone there's nothing to resize"
+                        )]
                         let _ = master.resize(PtySize {
                             rows,
                             cols,
@@ -496,6 +512,10 @@ fn control_thread_main(
 
             ControlEvent::ChildExited(result) => {
                 state.store(STATE_EXITED, Ordering::SeqCst);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "try_send is a best-effort exit notification; a full or already-gone receiver doesn't need it"
+                )]
                 let _ = exit_tx.try_send(pty_exit_from_wait(result));
                 return; // post-reap cleanup: `master` drops with this frame
             }
@@ -526,6 +546,10 @@ fn control_thread_main(
                 } else {
                     // Step 4: hard kill. portable-pty's kill() is a hard
                     // kill on both platforms (SIGKILL / TerminateProcess).
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "best-effort hard kill; if it fails, the wait below still resolves via KillTimeout"
+                    )]
                     let _ = killer.kill();
                     match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
                         Some(result) => pty_exit_from_wait(result),
@@ -537,7 +561,15 @@ fn control_thread_main(
                 };
 
                 state.store(STATE_EXITED, Ordering::SeqCst);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "try_send is a best-effort exit notification, same as the ChildExited arm above"
+                )]
                 let _ = exit_tx.try_send(exit.clone());
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply_tx's receiver may already be gone (e.g. terminate() itself timed out and returned); exit_tx above is the notification of record"
+                )]
                 let _ = reply_tx.send(exit);
                 return; // post-reap cleanup: `master` drops with this frame
             }

@@ -340,6 +340,10 @@ impl LogSyncer {
     /// `SyncHandle` and `OutputLog` for that file unregisters it.
     pub fn register(&self, handle: &SyncHandle) {
         if let Some(tx) = &self.tx {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the syncer thread is gone (daemon shutting down) if this fails; there's nothing left to register the file with"
+            )]
             let _ = tx.send((Arc::downgrade(&handle.file), handle.path.clone()));
         }
     }
@@ -351,6 +355,10 @@ impl Drop for LogSyncer {
     fn drop(&mut self) {
         self.tx = None;
         if let Some(thread) = self.thread.take() {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "joining our own sync thread in Drop; a panicked thread's result can't be propagated from here anyway"
+            )]
             let _ = thread.join();
         }
     }

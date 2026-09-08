@@ -205,11 +205,19 @@ async fn run(
                 &json!({ "type": "error", "code": "offset_ahead", "next_offset": next_offset }),
             )
             .await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1008, "offset_ahead")).await;
             return;
         }
         Err(e) => {
             tracing::warn!(session_id = %session.id, error = %e, "opening replay");
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1011, "internal error")).await;
             return;
         }
@@ -312,6 +320,7 @@ async fn run(
                     // fan-out alive) is `Fanout::publish`'s backpressure
                     // eviction -- this is the slow-consumer signal
                     // (docs/04-api-protocol.md#error-codes).
+                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
                     let _ = socket.send(close(1013, "slow_consumer")).await;
                     break;
                 }
@@ -374,6 +383,7 @@ async fn run(
 
             _ = ping_interval.tick() => {
                 if last_pong.elapsed() > PONG_TIMEOUT {
+                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
                     let _ = socket.send(close(1001, "ping timeout")).await;
                     break;
                 }
@@ -525,6 +535,10 @@ async fn finalize_exit(session: &Session, subscription: &mut Subscription, socke
         "final_offset": session.next_offset(),
     });
     send_json(socket, &exit).await;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+    )]
     let _ = socket.send(close(1000, "session exited")).await;
 }
 
@@ -544,6 +558,10 @@ async fn replay_round_or_close(
         Ok(step) => Some(step),
         Err(e) => {
             tracing::warn!(session_id = %session_id, error = %e, "replay round failed");
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1011, "internal error")).await;
             None
         }

@@ -211,6 +211,10 @@ pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf
 
     let app = teleportd::api::build_router(Arc::clone(&state));
     let server = tokio::spawn(async move {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "background server task; an error here (or the task being aborted when the test's Daemon handle drops) isn't something the test needs to observe"
+        )]
         let _ = axum::serve(listener, app).await;
     });
 

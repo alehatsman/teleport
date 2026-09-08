@@ -517,6 +517,10 @@ mod tests {
             panic!("3 MiB backlog must not go live on the first round");
         };
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "this call exists to trigger written()'s own panic (see #[should_panic] above); its Ok/Err value is irrelevant either way"
+        )]
         let _ = replay.written(vec![0u8; 1]); // not this round's REPLAY_ROUND_BYTES-sized stretch
         #[expect(
             clippy::let_underscore_must_use,
