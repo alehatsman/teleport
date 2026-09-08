@@ -17,13 +17,13 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "teleport", version)]
 struct Cli {
-    /// Daemon base URL, e.g. https://mainpc.tail1234.ts.net. Defaults to
+    /// Daemon base URL, e.g. <https://mainpc.tail1234.ts.net>. Defaults to
     /// local-daemon auto-discovery (docs/11-mvp-plan.md#m11's connection
     /// resolution).
     #[arg(long, global = true)]
     url: Option<String>,
 
-    /// Bearer token. Falls back to TELEPORT_TOKEN, then
+    /// Bearer token. Falls back to `TELEPORT_TOKEN`, then
     /// `<data_dir>/token` when neither `--url` nor `--token` is given.
     #[arg(long, global = true)]
     token: Option<String>,
@@ -147,8 +147,7 @@ async fn sessions(conn: &connect::Connection) -> Result<()> {
         let controller = s.controller.unwrap_or_else(|| "-".to_string());
         let exit = s
             .exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "-".to_string());
+            .map_or_else(|| "-".to_string(), |c| c.to_string());
         let command = s.preset.unwrap_or(s.command);
         println!(
             "{:<28} {:<10} {:<8} {:<20} {:<16} {}",

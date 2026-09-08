@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::connect::Connection;
 
-pub struct Client {
+pub(crate) struct Client {
     http: reqwest::Client,
     base_url: String,
     token: String,
@@ -27,7 +27,7 @@ struct ErrorBody {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiError {
+pub(crate) enum ApiError {
     #[error("{status}: {}", format_body(error, message))]
     Status {
         status: reqwest::StatusCode,
@@ -52,7 +52,7 @@ impl ApiError {
     /// a native client's whole auth story is the bearer credential, so a
     /// rejection almost always means it's missing or wrong, not an Origin
     /// problem (`teleport` never sends `Origin` at all).
-    pub fn hint(&self) -> Option<&'static str> {
+    pub(crate) fn hint(&self) -> Option<&'static str> {
         match self {
             ApiError::Status { status, .. }
                 if *status == reqwest::StatusCode::UNAUTHORIZED
@@ -64,8 +64,8 @@ impl ApiError {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn status(&self) -> Option<reqwest::StatusCode> {
+    #[expect(dead_code)]
+    pub(crate) fn status(&self) -> Option<reqwest::StatusCode> {
         match self {
             ApiError::Status { status, .. } => Some(*status),
             ApiError::Transport(_) => None,
@@ -74,7 +74,7 @@ impl ApiError {
 }
 
 #[derive(Debug, Serialize)]
-pub struct CreateSessionRequest {
+pub(crate) struct CreateSessionRequest {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
@@ -90,50 +90,50 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateSessionResponse {
+pub(crate) struct CreateSessionResponse {
     pub id: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub state: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub pid: Option<u32>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub output_offset: u64,
 }
 
 /// Mirrors `daemon/src/api.rs`'s `SessionView` field for field.
 #[derive(Debug, Deserialize)]
-pub struct SessionSummary {
+pub(crate) struct SessionSummary {
     pub id: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub kind: String,
     pub preset: Option<String>,
     pub command: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub args: Vec<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub cwd: String,
     pub state: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub output_bytes: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub created_at_ms: i64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub started_at_ms: Option<i64>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub exited_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub lost_reason: Option<String>,
     pub controller: Option<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub subscribers: usize,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub last_bell_ms: Option<i64>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub idle_since_ms: Option<i64>,
 }
 
@@ -143,14 +143,14 @@ struct ListSessionsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Preset {
+pub(crate) struct Preset {
     pub id: String,
     pub label: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub command: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub args: Vec<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub icon: String,
 }
 
@@ -160,7 +160,7 @@ struct PresetsResponse {
 }
 
 impl Client {
-    pub fn new(conn: &Connection) -> Result<Self> {
+    pub(crate) fn new(conn: &Connection) -> Result<Self> {
         Ok(Client {
             http: reqwest::Client::builder()
                 .build()
@@ -189,7 +189,7 @@ impl Client {
         })
     }
 
-    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ApiError> {
+    pub(crate) async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ApiError> {
         let resp = self
             .http
             .get(self.url("/api/v1/sessions"))
@@ -200,7 +200,7 @@ impl Client {
         Ok(resp.json::<ListSessionsResponse>().await?.sessions)
     }
 
-    pub async fn create_session(
+    pub(crate) async fn create_session(
         &self,
         req: &CreateSessionRequest,
     ) -> Result<CreateSessionResponse, ApiError> {
@@ -215,7 +215,7 @@ impl Client {
         Ok(resp.json().await?)
     }
 
-    pub async fn delete_session(&self, id: &str, purge: bool) -> Result<(), ApiError> {
+    pub(crate) async fn delete_session(&self, id: &str, purge: bool) -> Result<(), ApiError> {
         let mut url = self.url(&format!("/api/v1/sessions/{id}"));
         if purge {
             url.push_str("?purge=true");
@@ -230,7 +230,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn presets(&self) -> Result<Vec<Preset>, ApiError> {
+    pub(crate) async fn presets(&self) -> Result<Vec<Preset>, ApiError> {
         let resp = self
             .http
             .get(self.url("/api/v1/presets"))
