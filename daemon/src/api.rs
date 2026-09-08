@@ -359,6 +359,14 @@ async fn health(
         "api_versions": API_VERSIONS,
         "capabilities": CAPABILITIES,
     });
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "serde_json::Value's Index/IndexMut on a &str key only panics on a non-object; `body` was just built as one"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "u64::MAX ms is ~584 million years of uptime"
+    )]
     if authenticated {
         // The hostname-derived device name is mildly identifying, so it sits
         // behind the principal -- nothing in the unauthenticated shape above

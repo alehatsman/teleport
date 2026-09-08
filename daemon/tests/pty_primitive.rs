@@ -133,7 +133,9 @@ fn large_write_arrives_intact_and_in_order() {
     // 0x04, ...) instead of passing it through untouched.
     recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "READY"));
 
-    let payload: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+    let payload: Vec<u8> = (0..1024 * 1024)
+        .map(|i| u8::try_from(i % 256).expect("i % 256 is always in 0..256"))
+        .collect();
     spawned.session.write(&payload).unwrap();
 
     let got = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| acc.len() >= payload.len());

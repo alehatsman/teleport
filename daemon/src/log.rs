@@ -206,10 +206,15 @@ impl OutputLog {
             // Fill the budget exactly, then stop: `log_capped_at` is always
             // `max_bytes` for a log that got there by growing.
             let room = self.limits.max_bytes.saturating_sub(self.file_len);
-            let fits = room.min(bytes.len() as u64) as usize;
+            // `usize::MAX` as the fallback, not 0: room clamped that high
+            // means "no meaningful cap on a machine with a smaller usize",
+            // so the `.min(bytes.len())` right after is the only bound that
+            // actually applies.
+            let room = usize::try_from(room).unwrap_or(usize::MAX);
+            let fits = room.min(bytes.len());
 
             if fits > 0 {
-                match (&*self.file).write_all(&bytes[..fits]) {
+                match (&*self.file).write_all(bytes.get(..fits).unwrap_or(&[])) {
                     Ok(()) => self.file_len += fits as u64,
                     Err(e) => self.fail(&mut events, &e),
                 }
@@ -435,7 +440,12 @@ impl LogReader {
         self.file.seek(SeekFrom::Start(from))?;
         // `len` is now bounded by the file size, so this cannot truncate on a
         // 32-bit target the way the requested range could.
-        let mut buf = Vec::with_capacity(len as usize);
+        // `with_capacity` allocates eagerly, so the fallback on truncation
+        // is 0, not `usize::MAX` -- an under-sized capacity just costs a
+        // reallocation later; an oversized one is an instant abort. `len` is
+        // bounded by the file size in practice (see above), so this never
+        // actually fires.
+        let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
         Read::by_ref(&mut self.file)
             .take(len)
             .read_to_end(&mut buf)?;

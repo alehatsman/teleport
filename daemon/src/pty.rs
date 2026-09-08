@@ -446,7 +446,7 @@ fn reader_thread_main(
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => on_output(&buf[..n]),
+            Ok(n) => on_output(buf.split_at(n).0),
         }
     }
     #[expect(

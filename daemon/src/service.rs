@@ -68,7 +68,7 @@ mod linux {
             .collect();
         let is_build_output = comps
             .windows(2)
-            .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"));
+            .any(|w| matches!(w, [a, b] if *a == "target" && (*b == "debug" || *b == "release")));
         if is_build_output {
             eprintln!(
                 "warning: {} looks like a `cargo build` output path, not a stable install \

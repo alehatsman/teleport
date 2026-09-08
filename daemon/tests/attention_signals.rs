@@ -44,6 +44,10 @@ fn spec<'a>(args: &'a [String], cwd: &'a PathBuf) -> SpawnSpec<'a> {
 /// The daemon's own `now_ms()` is private to `main.rs`; tests use
 /// `SystemTime` directly, the same way `support/mod.rs`'s directory-naming
 /// helpers already do.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "i64::MAX ms since 1970 is year ~292,471,208 -- this test will not still be running"
+)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
