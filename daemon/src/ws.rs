@@ -168,7 +168,10 @@ fn bound_attach(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one per attach-query param plus server-side replay/grace config; a params struct would just move the list, not shrink it"
+)]
 async fn run(
     mut socket: WebSocket,
     session: Arc<Session>,
