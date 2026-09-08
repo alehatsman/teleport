@@ -603,6 +603,10 @@ async fn get_session(
 /// db-writer thread is gone, or a genuine SQLite I/O error) -- that case
 /// must not read as an ordinary unknown id on monitoring built on this
 /// route's 404 rate.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a malformed id and an unknown id share the same 404 by design (docs/04-api-protocol.md#error-codes); the parse error has nothing more specific to add"
+)]
 async fn historical_row(state: &AppState, id: &str) -> Result<persistence::SessionRow, ApiError> {
     let _: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     let db = state.db.as_ref().ok_or(ApiError::NotFound)?;
@@ -874,6 +878,10 @@ async fn create_ws_ticket(
     }))
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
+)]
 fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {
     let id: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     state.sessions.get(id).ok_or(ApiError::NotFound)

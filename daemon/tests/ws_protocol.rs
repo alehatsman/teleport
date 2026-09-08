@@ -59,6 +59,10 @@ async fn next_json(ws: &mut WsStream) -> Value {
                 return serde_json::from_str(&text).expect("valid JSON control frame")
             }
             Some(Ok(Message::Binary(_))) => {}
+            #[expect(
+                clippy::panic,
+                reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+            )]
             other => panic!("expected a text control frame, got {other:?}"),
         }
     }
@@ -80,6 +84,10 @@ async fn next_binary(ws: &mut WsStream) -> (u64, Vec<u8>) {
             let offset = u64::from_be_bytes(bytes[..8].try_into().unwrap());
             (offset, bytes[8..].to_vec())
         }
+        #[expect(
+            clippy::panic,
+            reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+        )]
         other => panic!("expected a binary frame, got {other:?}"),
     }
 }
@@ -641,6 +649,10 @@ fn assert_handshake_rejected(err: tokio_tungstenite::tungstenite::Error) {
                 response.status()
             );
         }
+        #[expect(
+            clippy::panic,
+            reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+        )]
         other => panic!("expected an HTTP handshake rejection, got {other:?}"),
     }
 }

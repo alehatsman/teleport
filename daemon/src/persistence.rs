@@ -236,6 +236,10 @@ impl Db {
         Ok((Db { tx }, summary))
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "SendError/RecvError carry no diagnostic beyond \"the other end is gone\", which the replacement message already says"
+    )]
     fn call_blocking<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
@@ -249,6 +253,10 @@ impl Db {
             .map_err(|_| anyhow!("db-writer thread dropped the reply"))?
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "same as call_blocking: SendError/RecvError add nothing beyond \"the other end is gone\""
+    )]
     async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command) -> Result<T>
     where
         T: Send,
