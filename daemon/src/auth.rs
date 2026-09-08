@@ -37,10 +37,8 @@ pub enum Principal {
     /// Presented a valid bearer token issued to a specific device. Not
     /// distinguished from `LocalUser` yet -- stage 1 has one token, not one
     /// per device -- but the variant exists so the shape is already right.
-    #[expect(dead_code)]
     DeviceToken { token_id: String },
     /// Stage 3, established by the cloud backend. Unreachable in the MVP.
-    #[expect(dead_code)]
     Account { user_id: String, device_id: String },
 }
 
@@ -92,7 +90,6 @@ pub fn resolve(
 /// recent, separately-authenticated `POST /api/v1/ws-ticket` call, so there
 /// is nothing left for the disabled-auth escape hatch to add
 /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
-#[expect(clippy::too_many_arguments)]
 pub fn resolve_ws(
     store: &TicketStore,
     session_id: SessionId,

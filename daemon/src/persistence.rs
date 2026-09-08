@@ -286,7 +286,6 @@ impl Db {
     /// here too, for `spawn_failed`/`kill_timeout`/`wait_error`, but `state`
     /// only becomes `'lost'` via restart recovery, never from a live
     /// process -- see [`recover`]).
-    #[expect(clippy::too_many_arguments)]
     pub fn mark_exited_blocking(
         &self,
         id: &str,
