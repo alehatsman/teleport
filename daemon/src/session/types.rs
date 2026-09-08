@@ -124,6 +124,7 @@ pub struct SessionMeta {
 /// `manager.rs`'s exit listener -- every one of those is a sibling module
 /// under `session`, so `pub(super)` (visible to the whole `session` subtree)
 /// is exactly the reach this needs, no wider.
+#[derive(Debug)]
 pub(super) struct Runtime {
     pub(super) state: SessionState,
     pub(super) pid: Option<u32>,

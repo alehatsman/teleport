@@ -123,6 +123,7 @@ pub const IDLE_SWEEP_INTERVAL_MS: u64 = 5_000;
 /// them in a shared `Mutex` here would serialize them again and reintroduce
 /// S3 one layer up: a write stuck behind a full channel would hold the lock
 /// and wedge `terminate` behind it.
+#[derive(Debug)]
 pub struct Session {
     pub id: SessionId,
     pub meta: SessionMeta,

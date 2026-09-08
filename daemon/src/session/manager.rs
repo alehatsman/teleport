@@ -80,7 +80,7 @@ type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
 /// pulling in the rest of `SessionManager` (the `LogSyncer` thread, cap
 /// state). Shares the same underlying map, so it always reflects current
 /// membership; see [`SessionManager::live_handle`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LiveSessions(Arc<SessionDirectory>);
 
 impl LiveSessions {
@@ -106,6 +106,7 @@ impl LiveSessions {
 /// `Session` keeps no back-link to it: [`SessionManager::purge`] removes by
 /// id through this map directly, and `terminate()` no longer self-removes
 /// (see the M4 module doc on `session/mod.rs`).
+#[derive(Debug)]
 pub struct SessionManager {
     /// `<data_dir>/sessions`. Each session's log is `<root>/<id>/output.vt`
     /// (docs/05-persistence.md#layout).

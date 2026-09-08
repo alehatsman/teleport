@@ -202,7 +202,7 @@ enum Command {
 }
 
 /// A cheap, `Clone`-able handle to the writer actor's command channel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Db {
     tx: mpsc::Sender<Command>,
 }

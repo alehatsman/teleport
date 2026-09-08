@@ -119,6 +119,7 @@ pub const TICKET_TTL: Duration = Duration::from_secs(30);
 /// stands in for).
 const TICKET_BYTES: usize = 16;
 
+#[derive(Debug)]
 struct Ticket {
     session_id: SessionId,
     expires_at: Instant,
@@ -127,6 +128,7 @@ struct Ticket {
 /// In-memory, single-use tickets for the WS upgrade. Never persisted --
 /// restarting the daemon invalidates every outstanding ticket, which is
 /// correct: nothing durable should ever depend on a 30-second credential.
+#[derive(Debug)]
 pub struct TicketStore {
     tickets: parking_lot::Mutex<HashMap<String, Ticket>>,
 }

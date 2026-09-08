@@ -40,6 +40,7 @@ use crate::session::{CreateError, SessionId, SessionManager, SessionState};
 /// once in `main.rs` after the listener is bound (the origin policy needs
 /// the actual port -- docs/06-security.md#browser-origin-defense) and held
 /// behind an `Arc` for the life of the process.
+#[derive(Debug)]
 pub struct AppState {
     pub sessions: SessionManager,
     /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
@@ -108,6 +109,7 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 /// Uniform HTTP error shape and status mapping for everything this module
 /// returns. Wire shape is deliberately minimal -- `{"error": "<code>",
 /// "message": "<detail>"}` -- there is no cross-team consumer requiring more.
+#[derive(Debug)]
 pub enum ApiError {
     Auth(AuthError),
     NotFound,

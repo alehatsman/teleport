@@ -53,6 +53,7 @@ fn queue_cost(len: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SubscriberId(u64);
 
+#[derive(Debug)]
 pub(super) struct SubscriberSlot {
     id: SubscriberId,
     tx: mpsc::Sender<Chunk>,
@@ -77,6 +78,7 @@ pub(super) struct SubscriberSlot {
 /// `pub(super)`: constructed in `manager.rs`'s `create()`, held by
 /// `mod.rs`'s `Session` and by `replay.rs`'s `Replay`, so the whole
 /// `session` subtree needs to see it -- no wider.
+#[derive(Debug)]
 pub(super) struct Fanout {
     pub(super) log: OutputLog,
     pub(super) subscribers: Vec<SubscriberSlot>,
@@ -165,6 +167,7 @@ impl Fanout {
 /// A live subscription to a session's output. Dropping it unregisters from
 /// the session's `Fanout` -- an idle session does not accumulate dead slots
 /// waiting for the next chunk to notice them.
+#[derive(Debug)]
 pub struct Subscription {
     id: SubscriberId,
     rx: mpsc::Receiver<Chunk>,

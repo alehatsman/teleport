@@ -104,6 +104,7 @@ pub struct Appended {
 
 /// The append side of one session's log. Single-writer by construction:
 /// `session.rs` keeps it inside the mutex the reader loop takes.
+#[derive(Debug)]
 pub struct OutputLog {
     path: PathBuf,
     /// Shared with every [`SyncHandle`] handed out for this log, so the
@@ -274,7 +275,7 @@ impl OutputLog {
 /// A second reference to a log's open file, used only to `fsync` it. Exists
 /// so the flush never happens on the PTY reader thread or under the fan-out
 /// mutex (docs/05-persistence.md#output-log).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SyncHandle {
     file: Arc<File>,
     path: PathBuf,
@@ -298,6 +299,7 @@ impl SyncHandle {
 /// per-session thread budget is already spent on the four `pty.rs` needs.
 /// Registrations are `Weak`, so a log whose session is gone is pruned on the
 /// next tick rather than kept alive by the syncer.
+#[derive(Debug)]
 pub struct LogSyncer {
     tx: Option<Sender<(Weak<File>, PathBuf)>>,
     thread: Option<JoinHandle<()>>,
@@ -377,6 +379,7 @@ fn sync_all(registered: &mut Vec<(Weak<File>, PathBuf)>) {
 }
 
 /// The read side. Cheap to create, one per replay.
+#[derive(Debug)]
 pub struct LogReader {
     file: File,
 }
