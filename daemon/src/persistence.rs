@@ -623,12 +623,15 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Command>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Insert(row, reply) => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(insert_session(&conn, &row));
             }
             Command::MarkClosing { id, reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(mark_closing(&conn, &id));
             }
             Command::MarkExited { id, exited_at_ms, exit_code, lost_reason, output_bytes, reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(mark_exited(&conn, &id, exited_at_ms, exit_code, lost_reason, output_bytes));
             }
             Command::NoteOutputBytes { id, output_bytes } => {
@@ -655,15 +658,19 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Command>) {
                 }
             }
             Command::Delete { id, reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(delete_session(&conn, &id));
             }
             Command::Get { id, reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(get_session(&conn, &id));
             }
             Command::List { reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(list_sessions(&conn));
             }
             Command::GcCandidates { older_than_ms, reply } => {
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
                 let _ = reply.send(gc_candidates(&conn, older_than_ms));
             }
         }

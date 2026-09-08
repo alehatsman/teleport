@@ -433,6 +433,10 @@ async fn run_gc_pass(
 /// case (`api.rs`'s `shutdown` handler doc comment has the full reasoning).
 async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     let ctrl_c = async {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "either outcome means give up waiting on ctrl_c; treating an install error as \"fired\" is the safe default for a shutdown trigger"
+        )]
         let _ = tokio::signal::ctrl_c().await;
     };
 

@@ -531,6 +531,7 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
             // `send` on a `watch` never fails as long as this `Sender` (owned
             // by `session`, which this thread also holds a strong ref to) is
             // alive -- it always is here.
+            #[expect(clippy::let_underscore_must_use, reason = "send on a watch never fails as long as this Sender (owned by session, held here too) is alive -- it always is here")]
             let _ = session.exited_tx.send(true);
         })
         .expect("spawning session-exit thread");
@@ -549,6 +550,7 @@ fn spawn_eof_listener(session: Arc<Session>, eof_rx: std::sync::mpsc::Receiver<(
         .name("session-eof".into())
         .spawn(move || {
             if eof_rx.recv().is_ok() {
+                #[expect(clippy::let_underscore_must_use, reason = "same guarantee as spawn_exit_listener's send above -- this watch's Sender outlives this thread")]
                 let _ = session.eof_tx.send(true);
             }
         })

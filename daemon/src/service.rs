@@ -124,9 +124,17 @@ mod linux {
         // Best-effort, like desktop's copy of this: don't fail install() if
         // there's no active systemd --user session (docs/11-mvp-plan.md#m10
         // edge cases) -- autostart is a convenience, not a launch dependency.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort, like desktop's copy of this: don't fail install() if there's no active systemd --user session -- autostart is a convenience, not a launch dependency"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort, like desktop's copy of this: don't fail install() if there's no active systemd --user session -- autostart is a convenience, not a launch dependency"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "enable", "teleportd.service"])
             .status();
@@ -145,7 +153,15 @@ mod linux {
         // lingering this user enabled for an unrelated reason.
         let already_lingering = linger_enabled().unwrap_or(false);
         if !already_lingering {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "same best-effort convenience as the systemctl calls above"
+            )]
             let _ = Command::new("loginctl").arg("enable-linger").status();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "same best-effort convenience as the systemctl calls above; a failed marker write just means uninstall() won't know to turn lingering back off, no worse than not having enabled it"
+            )]
             let _ = fs::write(linger_marker_path()?, "");
         }
 
@@ -162,6 +178,10 @@ mod linux {
     }
 
     pub(crate) fn uninstall() -> Result<()> {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "symmetric with install()'s best-effort systemctl calls"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", "teleportd.service"])
             .status();
@@ -169,6 +189,10 @@ mod linux {
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "symmetric with install()'s best-effort systemctl calls"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
@@ -178,7 +202,15 @@ mod linux {
         let marker = linger_marker_path()?;
         let we_enabled_linger = marker.exists();
         if we_enabled_linger {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "symmetric with install()'s best-effort convenience"
+            )]
             let _ = Command::new("loginctl").arg("disable-linger").status();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "symmetric with install()'s best-effort marker write"
+            )]
             let _ = fs::remove_file(&marker);
         }
 
