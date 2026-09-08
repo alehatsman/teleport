@@ -89,18 +89,20 @@ pub struct AppState {
 impl FromRequestParts<Arc<AppState>> for Principal {
     type Rejection = ApiError;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> {
         let query_token = query_param(parts.uri.query().unwrap_or(""), "token");
-        auth::resolve(
-            &parts.headers,
-            query_token,
-            &state.token,
-            state.config.auth_token,
+        std::future::ready(
+            auth::resolve(
+                &parts.headers,
+                query_token,
+                &state.token,
+                state.config.auth_token,
+            )
+            .map_err(ApiError::from),
         )
-        .map_err(ApiError::from)
     }
 }
 
