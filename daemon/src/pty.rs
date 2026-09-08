@@ -173,7 +173,7 @@ pub struct SpawnedSession {
 /// -- see the module-level "M1 scope boundary" note on why, and its
 /// must-never-block requirement.
 pub fn spawn(
-    spec: SpawnSpec<'_>,
+    spec: &SpawnSpec<'_>,
     on_output: impl FnMut(&[u8]) + Send + 'static,
 ) -> Result<SpawnedSession> {
     let system = native_pty_system();
@@ -220,7 +220,7 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("pty-reader".into())
-        .spawn(move || reader_thread_main(reader, on_output, eof_tx))
+        .spawn(move || reader_thread_main(reader, on_output, &eof_tx))
         .context("spawning reader thread")?;
 
     std::thread::Builder::new()
@@ -232,7 +232,7 @@ pub fn spawn(
         .name("pty-reaper".into())
         .spawn({
             let control_tx = control_tx.clone();
-            move || reaper_thread_main(child, control_tx)
+            move || reaper_thread_main(child, &control_tx)
         })
         .context("spawning reaper thread")?;
 
@@ -240,7 +240,7 @@ pub fn spawn(
         .name("pty-control".into())
         .spawn({
             let state = Arc::clone(&state);
-            move || control_thread_main(pair.master, pid, killer, control_rx, exit_tx, state)
+            move || control_thread_main(pair.master, pid, killer, &control_rx, &exit_tx, &state)
         })
         .context("spawning control thread")?;
 
@@ -437,7 +437,7 @@ impl Read for ConptyDsrProbe {
 fn reader_thread_main(
     mut reader: Box<dyn Read + Send>,
     mut on_output: impl FnMut(&[u8]) + Send,
-    eof_tx: SyncSender<()>,
+    eof_tx: &SyncSender<()>,
 ) {
     // Heap, not `[0u8; READ_BUFFER_SIZE]` on this thread's stack -- 64KiB is
     // over clippy's large_stack_arrays threshold, and there is nothing to
@@ -472,7 +472,7 @@ fn writer_thread_main(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<
 
 fn reaper_thread_main(
     mut child: Box<dyn Child + Send + Sync>,
-    control_tx: SyncSender<ControlEvent>,
+    control_tx: &SyncSender<ControlEvent>,
 ) {
     let result = child.wait();
     // Ignored if the control thread already finished (e.g. gave up on a
@@ -488,9 +488,9 @@ fn control_thread_main(
     master: Box<dyn MasterPty + Send>,
     pid: Option<u32>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
-    control_rx: Receiver<ControlEvent>,
-    exit_tx: SyncSender<PtyExit>,
-    state: Arc<AtomicU8>,
+    control_rx: &Receiver<ControlEvent>,
+    exit_tx: &SyncSender<PtyExit>,
+    state: &Arc<AtomicU8>,
 ) {
     // `mut`: only `#[cfg(windows)]`'s `master.take()` below needs it --
     // unused on the platform this gate runs on, load-bearing on the other.
@@ -573,7 +573,7 @@ fn control_thread_main(
                 }
 
                 let exit = if let Some(result) =
-                    wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT)
+                    wait_for_child_exited(control_rx, Instant::now() + GRACEFUL_WAIT)
                 {
                     pty_exit_from_wait(result)
                 } else {
@@ -584,7 +584,7 @@ fn control_thread_main(
                         reason = "best-effort hard kill; if it fails, the wait below still resolves via KillTimeout"
                     )]
                     let _ = killer.kill();
-                    match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
+                    match wait_for_child_exited(control_rx, Instant::now() + KILL_WAIT) {
                         Some(result) => pty_exit_from_wait(result),
                         None => PtyExit {
                             status: None,

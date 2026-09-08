@@ -106,7 +106,7 @@ async fn send_text(ws: &mut WsStream, value: Value) {
 #[tokio::test]
 async fn ready_is_always_the_first_frame() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let url = daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c1"));
     let mut ws = connect(&url, Some(support::TOKEN), None)
@@ -122,7 +122,7 @@ async fn ready_is_always_the_first_frame() {
 #[tokio::test]
 async fn mode_control_grants_the_lease_when_free() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let url = daemon.ws_url(&format!(
         "/api/v1/sessions/{id}/stream?client_id=c1&mode=control"
@@ -141,7 +141,7 @@ async fn mode_control_grants_the_lease_when_free() {
 #[tokio::test]
 async fn mode_control_on_attach_does_not_preempt() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut first = connect(
         &daemon.ws_url(&format!(
@@ -177,7 +177,7 @@ async fn mode_control_on_attach_does_not_preempt() {
 #[tokio::test]
 async fn claim_control_preempts_and_notifies_the_loser() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut a = connect(
         &daemon.ws_url(&format!(
@@ -218,7 +218,7 @@ async fn claim_control_preempts_and_notifies_the_loser() {
 #[tokio::test]
 async fn a_second_connection_sharing_a_client_id_supersedes_the_first() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut first = connect(
         &daemon.ws_url(&format!(
@@ -265,7 +265,7 @@ async fn a_second_connection_sharing_a_client_id_supersedes_the_first() {
 #[tokio::test]
 async fn input_from_an_observer_is_rejected() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut ws = connect(
         &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=observer")),
@@ -291,7 +291,7 @@ async fn input_from_an_observer_is_rejected() {
 #[tokio::test]
 async fn resize_from_the_controller_reaches_observers_as_resized() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut controller = connect(
         &daemon.ws_url(&format!(
@@ -344,7 +344,7 @@ async fn disconnect_grace_resumes_for_the_same_client_but_never_wins_a_race() {
     let mut config = support::default_config();
     config.control_grace_ms = 2_000;
     let daemon = support::spawn(config).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut a = connect(
         &daemon.ws_url(&format!(
@@ -418,7 +418,7 @@ async fn grace_expiry_frees_the_lease_with_no_auto_grant() {
     let mut config = support::default_config();
     config.control_grace_ms = 300;
     let daemon = support::spawn(config).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
 
     let mut a = connect(
         &daemon.ws_url(&format!(
@@ -457,10 +457,8 @@ async fn grace_expiry_frees_the_lease_with_no_auto_grant() {
 #[tokio::test]
 async fn binary_frames_carry_correct_contiguous_offsets() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(
-        &daemon,
-        vec!["-c".to_string(), "printf 'hello'".to_string()],
-    );
+    let id =
+        support::create_shell_session(&daemon, &["-c".to_string(), "printf 'hello'".to_string()]);
 
     let mut ws = connect(
         &daemon.ws_url(&format!(
@@ -513,7 +511,7 @@ async fn concurrent_fast_exits_never_lose_output_before_the_exit_frame() {
             let payload = format!("hello-{i}");
             let id = support::create_shell_session(
                 &daemon,
-                vec!["-c".to_string(), format!("printf '{payload}'")],
+                &["-c".to_string(), format!("printf '{payload}'")],
             );
             let mut ws = connect(
                 &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c{i}")),
@@ -573,7 +571,7 @@ async fn concurrent_fast_exits_never_lose_output_before_the_exit_frame() {
 #[tokio::test]
 async fn exit_frame_carries_the_final_offset() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec!["-c".to_string(), "exit 7".to_string()]);
+    let id = support::create_shell_session(&daemon, &["-c".to_string(), "exit 7".to_string()]);
 
     let mut ws = connect(
         &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c1")),
@@ -613,7 +611,7 @@ async fn exit_frame_carries_the_final_offset() {
 #[tokio::test]
 async fn bad_origin_is_rejected() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
     let url = daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c1"));
     let err = connect(&url, Some(support::TOKEN), Some("https://evil.example"))
         .await
@@ -627,7 +625,7 @@ async fn missing_origin_with_a_valid_credential_is_accepted() {
     // Must be accepted -- asserting the opposite would block every future
     // mobile app (docs/10-testing.md#3-protocol-tests).
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
     let url = daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c1"));
     let mut ws = connect(&url, Some(support::TOKEN), None)
         .await
@@ -639,7 +637,7 @@ async fn missing_origin_with_a_valid_credential_is_accepted() {
 #[tokio::test]
 async fn missing_origin_and_no_credential_is_rejected() {
     let daemon = support::spawn(support::default_config()).await;
-    let id = support::create_shell_session(&daemon, vec![]);
+    let id = support::create_shell_session(&daemon, &[]);
     let url = daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c1"));
     let err = connect(&url, None, None).await.unwrap_err();
     assert_handshake_rejected(err);

@@ -463,7 +463,7 @@ async fn create_session(
             cols,
             rows,
         };
-        state.sessions.create(spec, kind, preset_id)
+        state.sessions.create(&spec, kind, preset_id)
     })
     .await
     .map_err(|e| ApiError::Create(CreateError::Spawn(e.into())))??;

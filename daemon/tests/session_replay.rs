@@ -53,7 +53,7 @@ fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Sess
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,
@@ -79,7 +79,7 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,

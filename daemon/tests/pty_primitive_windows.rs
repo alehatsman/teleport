@@ -101,7 +101,7 @@ fn spawn_cmd_script(
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn cmd.exe /c");
@@ -121,7 +121,7 @@ fn spawn_interactive_cmd(cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn interactive cmd.exe");

@@ -36,7 +36,7 @@ fn spawn_sh(script: &str, cols: u16, rows: u16) -> (pty::SpawnedSession, Receive
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
         #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
@@ -57,7 +57,7 @@ fn spawn_interactive_sh(cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver<
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
         #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
