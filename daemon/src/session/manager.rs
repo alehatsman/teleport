@@ -48,12 +48,16 @@ const DEFAULT_MAX_SESSIONS: usize = 50;
 /// `MaxSessions`, `500` for `Spawn`.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
+    /// `422` -- the requested `command` isn't resolvable on `PATH`.
     #[error("executable not found on PATH: {0}")]
     ExecutableNotFound(String),
+    /// `422` -- the requested `cwd` doesn't exist or isn't a directory.
     #[error("cwd does not exist or is not a directory: {}", .0.display())]
     InvalidCwd(PathBuf),
+    /// `429` -- `max_sessions` is already at its cap.
     #[error("max_sessions ({0}) reached")]
     MaxSessions(usize),
+    /// `500` -- validation passed but `pty::spawn` itself failed.
     #[error("spawning the session: {0}")]
     Spawn(#[from] anyhow::Error),
 }
@@ -132,6 +136,8 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// A manager rooted at `root` (`<data_dir>/sessions`), default limits,
+    /// no SQLite -- see [`SessionManager::with_limits`]/[`with_db`](Self::with_db).
     pub fn new(root: PathBuf) -> Self {
         Self::with_limits(root, LogLimits::default())
     }
@@ -398,6 +404,9 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Looks up a live session by id. `None` for an unknown, purged, or
+    /// never-live (SQLite-only) id -- callers needing that last case go
+    /// through `api.rs`'s DB fallback instead.
     pub fn get(&self, id: SessionId) -> Option<Arc<Session>> {
         self.sessions.lock().get(&id).cloned()
     }

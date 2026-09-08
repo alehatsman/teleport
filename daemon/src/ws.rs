@@ -34,6 +34,8 @@ const PONG_TIMEOUT: Duration = Duration::from_mins(1);
 /// not hang on that.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+/// Query params on `GET /api/v1/sessions/{id}/stream`
+/// (docs/04-api-protocol.md#websocket-protocol).
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
     after: Option<u64>,
@@ -62,7 +64,7 @@ enum StreamMode {
 
 /// The route handler: validates the upgrade (Origin/Host, credential,
 /// session existence, mutually-exclusive `after`/`tail`) and, only once all
-/// of that holds, upgrades and hands off to [`run`]. Everything before the
+/// of that holds, upgrades and hands off to `run`. Everything before the
 /// upgrade can still return an ordinary HTTP error response; nothing after
 /// it can, which is exactly why these checks come first.
 ///

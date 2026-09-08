@@ -7,7 +7,7 @@
 //! design so the desktop shell can probe before it holds a credential
 //! (docs/04-api-protocol.md#get-apiv1health), and the WS upgrade in `ws.rs`,
 //! which resolves its credential explicitly via
-//! [`auth::resolve_ws`](crate::auth::resolve_ws) instead -- a ticket is
+//! [`auth::resolve_ws`] instead -- a ticket is
 //! scoped to the session id in the path, which the generic extractor never
 //! sees.
 
@@ -42,18 +42,27 @@ use crate::session::{CreateError, SessionId, SessionManager, SessionState};
 /// behind an `Arc` for the life of the process.
 #[derive(Debug)]
 pub struct AppState {
+    /// Every live session.
     pub sessions: SessionManager,
     /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
     /// that `sessions.get` doesn't know about falls back to this for `GET`
     /// and `/log` -- a `lost`/`exited` row from before this process started
     /// (persistence.rs's module doc explains why those aren't `Session`s).
     pub db: Option<persistence::Db>,
+    /// The daemon's own effective configuration.
     pub config: Config,
+    /// This machine's identity (docs/12-identity-and-connectivity.md).
     pub device: Device,
+    /// The long-lived bearer token every non-ticket request authenticates
+    /// against.
     pub token: String,
+    /// Loaded from `presets.toml`, if present.
     pub presets: Vec<Preset>,
+    /// Origin/Host allowlisting (docs/06-security.md#browser-origin-defense).
     pub origin_policy: OriginPolicy,
+    /// Process start time, for `/health`'s uptime.
     pub started_at: Instant,
+    /// `env!("CARGO_PKG_VERSION")`, reported by `/health`.
     pub version: &'static str,
     /// Built SPA assets (`web/dist`), if found at startup
     /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
@@ -111,19 +120,25 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 /// "message": "<detail>"}` -- there is no cross-team consumer requiring more.
 #[derive(Debug)]
 pub enum ApiError {
+    /// The credential itself was missing or invalid -- `401`/`403`
+    /// (see [`AuthError`]).
     Auth(AuthError),
+    /// No such session, live or historical -- `404`.
     NotFound,
     /// A session id that's a valid, known row, but whose log GC has already
     /// deleted (docs/05-persistence.md#garbage-collection: directory first,
     /// row second) -- distinct from `NotFound`, which means no such id was
     /// ever known at all.
     Gone,
+    /// The request itself was malformed -- `400`.
     BadRequest(String),
     /// A `historical_row` lookup failed for a reason that isn't "no such
     /// row" -- the db-writer thread is gone, or a real SQLite I/O error.
     /// Kept distinct from `NotFound` so a persistence outage doesn't read as
     /// an ordinary unknown id on monitoring built on this route's 404 rate.
     Internal(String),
+    /// `SessionManager::create` refused the request -- see [`CreateError`]
+    /// for the status-code mapping.
     Create(CreateError),
 }
 
@@ -237,6 +252,8 @@ const CSP_DIRECTIVES: &[&str] = &[
     "frame-ancestors 'none'",
 ];
 
+/// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
+/// router `main.rs` serves and `tests/support` boots for in-process tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))

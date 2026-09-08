@@ -96,6 +96,7 @@ pub trait TerminalSession {
     /// own thread must still not call it inline; wrap it in `spawn_blocking`,
     /// same rule as the reader loop (docs/03-pty-layer.md#the-rule).
     fn write(&self, bytes: &[u8]) -> Result<()>;
+    /// Applies a new PTY size, clamped to `SIZE_RANGE`.
     fn resize(&self, cols: u16, rows: u16) -> Result<()>;
     /// Blocks for up to `GRACEFUL_WAIT + KILL_WAIT` (~7s): the bounded wait
     /// is intrinsic to termination, not a detail the caller schedules
@@ -124,6 +125,7 @@ pub struct PtyExit {
     /// `None` only when `lost_reason` is set -- we gave up without ever
     /// observing a `wait()` result.
     pub status: Option<ExitStatus>,
+    /// Set only when `status` couldn't be obtained -- see [`LostReason`].
     pub lost_reason: Option<LostReason>,
 }
 
@@ -132,15 +134,20 @@ pub struct PtyExit {
 /// (docs/03-pty-layer.md#spawn, docs/06-security.md).
 #[derive(Debug)]
 pub struct SpawnSpec<'a> {
+    /// The executable to spawn -- never a shell string.
     pub program: &'a str,
+    /// `program`'s argv, not including `program` itself.
     pub args: &'a [String],
+    /// Working directory to spawn `program` in.
     pub cwd: &'a Path,
     /// Overrides layered onto the daemon's own environment, which
     /// `CommandBuilder` inherits by default. Do not pre-flatten the full
     /// daemon environment in here -- pass only explicit overrides
     /// (docs/03-pty-layer.md#spawn).
     pub env: &'a [(String, String)],
+    /// Initial PTY size.
     pub cols: u16,
+    /// Initial PTY size.
     pub rows: u16,
 }
 
@@ -149,8 +156,11 @@ pub struct SpawnSpec<'a> {
 /// one to infer the other ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)).
 #[derive(Debug)]
 pub struct SpawnedSession {
+    /// The live handle -- `write`/`resize`/`terminate`.
     pub session: PtySession,
+    /// Fires exactly once, with the child's exit.
     pub exit_rx: Receiver<PtyExit>,
+    /// Fires exactly once, when the reader thread's `read()` reaches EOF.
     pub eof_rx: Receiver<()>,
     /// The child's OS pid, for `GET`'s `pid` field
     /// (docs/04-api-protocol.md#get-apiv1sessions). `None` only on a platform

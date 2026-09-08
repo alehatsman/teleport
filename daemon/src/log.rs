@@ -15,14 +15,14 @@
 //! reader loop requires **persist, then advance the offset, then fan out**, so
 //! the counter has to live behind the same call that does the write, or the
 //! ordering is an unenforced comment. `session.rs` holds an `OutputLog` inside
-//! its fan-out mutex and reads the start offset back out of [`append`].
+//! its fan-out mutex and reads the start offset back out of `append`.
 //!
 //! **Not in scope here:** bounded attach (`tail` / `max_replay_bytes`) is M4 --
 //! this module serves whatever byte range it is asked for, clamped only to
 //! what actually exists. Keeping the bound one layer up is what lets a VT
 //! state snapshot replace a byte range later without a protocol change
 //! (docs/04-api-protocol.md#the-vt-state-caveat--read-this-before-implementing).
-//! Recording [`LogEvent`]s in `session_events` is M7; [`append`] returns them
+//! Recording [`LogEvent`]s in `session_events` is M7; `append` returns them
 //! rather than writing them anywhere.
 //!
 //! **Nothing on the append path ever calls `fsync`.** The periodic sync
@@ -42,20 +42,28 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::warn;
 
+/// Filename every session's log is opened under, inside its own session
+/// directory (docs/05-persistence.md#layout).
 pub const LOG_FILE_NAME: &str = "output.vt";
 
 /// Defaults from docs/05-persistence.md#size-cap. `config.toml` does not
 /// exist yet; when it does, it overrides these rather than replacing them.
 pub const DEFAULT_LOG_WARN_BYTES: u64 = 256 * 1024 * 1024;
+/// See [`DEFAULT_LOG_WARN_BYTES`].
 pub const DEFAULT_LOG_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// Never `fsync` per chunk -- that couples PTY drain rate to disk latency
 /// (docs/05-persistence.md#output-log). Sync on this interval instead.
 pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Size/sync thresholds for one session's log (docs/05-persistence.md#size-cap).
 #[derive(Debug, Clone, Copy)]
 pub struct LogLimits {
+    /// Emit [`LogEvent::Warned`] once the log crosses this size.
     pub warn_bytes: u64,
+    /// Stop growing the file once the log reaches this size
+    /// ([`LogEvent::Capped`]); the offset stream keeps advancing regardless.
     pub max_bytes: u64,
+    /// How often the background syncer flushes this log's file.
     pub sync_interval: Duration,
 }
 
@@ -74,31 +82,46 @@ impl Default for LogLimits {
 /// fills it in, and until then every open is a fresh one.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StoredState {
+    /// The `output_bytes` column as SQLite last recorded it.
     pub output_bytes: u64,
+    /// The `log_capped_at` column as SQLite last recorded it.
     pub log_capped_at: Option<u64>,
 }
 
 /// Something worth a `session_events` row (M7) or an operator-visible log
-/// line. Returned rather than written, because [`append`] runs on the PTY
+/// line. Returned rather than written, because `append` runs on the PTY
 /// reader thread and nothing on that thread may touch SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogEvent {
     /// Crossed `log_warn_bytes`. Emitted once per log.
-    Warned { output_bytes: u64 },
+    Warned {
+        /// The log's total size at the moment it crossed the threshold.
+        output_bytes: u64,
+    },
     /// Hit `log_max_bytes`. The file stops growing here; `next_offset` keeps
     /// advancing and live streaming continues.
-    Capped { at: u64 },
+    Capped {
+        /// The offset the file was capped at.
+        at: u64,
+    },
     /// A write or sync failed. Persistence stops; the session keeps running
     /// (docs/05-persistence.md: `lost_reason='io_error'` is the one reason
     /// that can be set while the child is still alive).
-    IoError { at: u64, error: String },
+    IoError {
+        /// The offset the write/sync was attempted at.
+        at: u64,
+        /// The `io::Error`'s display text.
+        error: String,
+    },
 }
 
 /// The result of one append. `start` is the offset of the chunk's first byte
 /// -- the value the subscriber fan-out tags the chunk with.
 #[derive(Debug)]
 pub struct Appended {
+    /// Offset of the chunk's first byte.
     pub start: u64,
+    /// Anything worth recording that this append triggered.
     pub events: Vec<LogEvent>,
 }
 
@@ -233,6 +256,7 @@ impl OutputLog {
         self.file_len
     }
 
+    /// This log's `output.vt` path.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -282,10 +306,12 @@ pub struct SyncHandle {
 }
 
 impl SyncHandle {
+    /// `fsync`s the underlying file.
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_data()
     }
 
+    /// This log's `output.vt` path.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -306,6 +332,8 @@ pub struct LogSyncer {
 }
 
 impl LogSyncer {
+    /// Starts the syncer thread, flushing every registered log every
+    /// `interval`.
     pub fn new(interval: Duration) -> Self {
         let (tx, rx) = mpsc::channel::<(Weak<File>, PathBuf)>();
         let thread = std::thread::Builder::new()
@@ -385,6 +413,8 @@ pub struct LogReader {
 }
 
 impl LogReader {
+    /// Opens `path` for reading. Independent of any writer -- see the
+    /// struct doc.
     pub fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             file: File::open(path)?,

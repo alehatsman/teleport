@@ -66,11 +66,21 @@ pub struct Config {
     /// single-user-machine convenience, not the default
     /// (docs/06-security.md#authentication).
     pub auth_token: bool,
+    /// Refuse to spawn past this many concurrent sessions -- `429`
+    /// (docs/06-security.md#process-spawning).
     pub max_sessions: usize,
+    /// How long a disconnected controller keeps its lease before it's up
+    /// for grabs (docs/04-api-protocol.md#disconnect-grace).
     pub control_grace_ms: u64,
+    /// Default replay window on attach when the client sends neither
+    /// `after` nor `tail` (docs/04-api-protocol.md#bounded-attach).
     pub default_tail: u64,
+    /// Hard cap on how much history a single attach may replay
+    /// (docs/04-api-protocol.md#bounded-attach).
     pub max_replay_bytes: u64,
+    /// See [`crate::log::LogLimits::warn_bytes`].
     pub log_warn_bytes: u64,
+    /// See [`crate::log::LogLimits::max_bytes`].
     pub log_max_bytes: u64,
     /// GC threshold, in days since `exited_at_ms` (docs/05-persistence.md#garbage-collection).
     pub retain_days: u64,

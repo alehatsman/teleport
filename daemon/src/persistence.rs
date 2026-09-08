@@ -79,22 +79,41 @@ use crate::now_ms;
 /// nothing downstream should touch the JSON encoding directly.
 #[derive(Debug, Clone)]
 pub struct SessionRow {
+    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
     pub id: String,
+    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
+    /// not interpreted here.
     pub kind: String,
+    /// Preset this session was created from, if any.
     pub preset: Option<String>,
+    /// The program that was spawned.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     pub args: Vec<String>,
+    /// Working directory the program was spawned in.
     pub cwd: String,
+    /// `"running"`, `"closing"`, `"exited"`, or `"lost"`
+    /// (docs/05-persistence.md#schema).
     pub state: String,
+    /// OS pid, when the platform reported one.
     pub pid: Option<u32>,
+    /// PTY size at last resize, or at creation if never resized.
     pub cols: u16,
+    /// PTY size at last resize, or at creation if never resized.
     pub rows: u16,
+    /// Bytes written to `output.vt` so far.
     pub output_bytes: u64,
+    /// Byte offset the log was capped at, if it hit its size cap.
     pub log_capped_at: Option<u64>,
+    /// Row-insert time, ms since epoch.
     pub created_at_ms: i64,
+    /// `== created_at_ms` (docs/05-persistence.md: no separate `started` write).
     pub started_at_ms: Option<i64>,
+    /// When the session reached `exited`/`lost`, ms since epoch.
     pub exited_at_ms: Option<i64>,
+    /// Process exit code, if it exited cleanly.
     pub exit_code: Option<i32>,
+    /// Why this row is `lost` rather than a clean `exited`, if it is.
     pub lost_reason: Option<String>,
 }
 
@@ -131,15 +150,26 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
 /// module doc on why there is no separate `started` write).
 #[derive(Debug, Clone)]
 pub struct NewSessionRow {
+    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
     pub id: String,
+    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
+    /// not interpreted here.
     pub kind: String,
+    /// Preset this session was created from, if any.
     pub preset: Option<String>,
+    /// The program being spawned.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     pub args: Vec<String>,
+    /// Working directory the program is spawned in.
     pub cwd: String,
+    /// OS pid, when the platform reports one.
     pub pid: Option<u32>,
+    /// PTY size at creation.
     pub cols: u16,
+    /// PTY size at creation.
     pub rows: u16,
+    /// Row-insert time, ms since epoch; also used as `started_at_ms`.
     pub created_at_ms: i64,
 }
 
@@ -293,7 +323,7 @@ impl Db {
     /// `state='exited'` (docs/05-persistence.md: `lost_reason` can be set
     /// here too, for `spawn_failed`/`kill_timeout`/`wait_error`, but `state`
     /// only becomes `'lost'` via restart recovery, never from a live
-    /// process -- see [`recover`]).
+    /// process -- see `recover`).
     pub fn mark_exited_blocking(
         &self,
         id: &str,
@@ -312,6 +342,8 @@ impl Db {
         })
     }
 
+    /// Blocking counterpart to [`Db::delete_session`], for a caller already
+    /// on a blocking-pool thread.
     pub fn delete_session_blocking(&self, id: &str) -> Result<()> {
         self.call_blocking(|reply| Command::Delete {
             id: id.to_string(),
@@ -340,6 +372,9 @@ impl Db {
         }
     }
 
+    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: a resize is
+    /// a user action, not the hot path, but there is still no reason to make
+    /// the caller wait on disk for it.
     pub fn note_size(&self, id: &str, cols: u16, rows: u16) {
         if self
             .tx
@@ -357,6 +392,8 @@ impl Db {
         }
     }
 
+    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: records a
+    /// `session_events` row (D3, docs/04-api-protocol.md#get-apiv1sessions).
     pub fn note_event(&self, id: &str, event_type: &'static str) {
         if self
             .tx
@@ -390,6 +427,8 @@ impl Db {
         self.call(|reply| Command::List { reply }).await
     }
 
+    /// Removes the row outright (`api.rs`'s `?purge=true` path). Async
+    /// counterpart to [`Db::delete_session_blocking`].
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         self.call(|reply| Command::Delete {
             id: id.to_string(),
@@ -398,6 +437,8 @@ impl Db {
         .await
     }
 
+    /// Rows GC may reclaim: terminal (`exited`/`lost`) and older than
+    /// `older_than_ms` (docs/05-persistence.md#garbage-collection).
     pub async fn gc_candidates(&self, older_than_ms: i64) -> Result<Vec<SessionRow>> {
         self.call(|reply| Command::GcCandidates {
             older_than_ms,
