@@ -38,7 +38,7 @@ fn temp_dir(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ));
     #[expect(
@@ -84,7 +84,7 @@ fn spawn_daemon(data_dir: &Path) -> KillOnDrop {
         Command::new(bin())
             .args([
                 "--data-dir",
-                data_dir.to_str().unwrap(),
+                data_dir.to_str().expect("temp dir path is valid UTF-8"),
                 "--listen",
                 "127.0.0.1:0",
             ])
@@ -101,7 +101,7 @@ fn read_port(data_dir: &Path) -> u16 {
         "port file never appeared"
     );
     std::fs::read_to_string(data_dir.join("port"))
-        .unwrap()
+        .expect("read port file")
         .trim()
         .parse()
         .expect("port file")
@@ -109,7 +109,7 @@ fn read_port(data_dir: &Path) -> u16 {
 
 fn read_token(data_dir: &Path) -> String {
     std::fs::read_to_string(data_dir.join("token"))
-        .unwrap()
+        .expect("read token file")
         .trim()
         .to_string()
 }

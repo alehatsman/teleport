@@ -39,7 +39,7 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    builder.body(Body::empty()).unwrap()
+    builder.body(Body::empty()).expect("valid request")
 }
 
 fn post_json(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
@@ -53,7 +53,7 @@ fn post_json(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
             format!("Bearer {}", token.unwrap_or("")),
         )
         .body(Body::from(body.to_string()))
-        .unwrap()
+        .expect("valid request")
 }
 
 /// `oneshot` bypasses real HTTP/1.1 framing, which is normally what adds a
@@ -69,7 +69,7 @@ fn delete_request(uri: &str, token: &str) -> Request<Body> {
         .header(header::HOST, "127.0.0.1")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
-        .unwrap()
+        .expect("valid request")
 }
 
 #[tokio::test]
