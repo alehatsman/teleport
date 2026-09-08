@@ -69,6 +69,7 @@ fn should_register(gap: u64, stalled_rounds: u32, total_rounds: u32) -> bool {
 /// any history has been written, which is why `ready` can still be the first
 /// frame. Drive it with [`next_round`](Self::next_round) until it hands back
 /// an [`Attach`].
+#[derive(Debug)]
 pub struct Replay {
     /// Where replay actually starts -- `ready.replay_from`. The requested
     /// offset, except for a client attaching past a cap: there it is
@@ -104,6 +105,7 @@ pub struct Replay {
 /// One step of a catch-up loop. The `History` variant carries the rest of the
 /// [`Replay`] rather than borrowing it, so a caller cannot pump a replay that
 /// has already gone live and register a second subscriber by accident.
+#[derive(Debug)]
 pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
     /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
@@ -125,6 +127,7 @@ pub enum ReplayStep {
 /// (docs/04-api-protocol.md#catch-up--register-late-not-early) from a
 /// comment into something the compiler checks: there is no path from a
 /// `History` step to the next one that does not pass through `bytes`.
+#[derive(Debug)]
 pub struct HistoryReplay {
     round_len: usize,
     replay: Replay,
@@ -150,6 +153,7 @@ impl HistoryReplay {
 /// history it still owes. Write `replay` (starting at `replay_from`), then
 /// every chunk from `subscription`; the two meet exactly once -- no gap, no
 /// duplicate.
+#[derive(Debug)]
 pub struct Attach {
     /// Where the final stretch of replay starts.
     pub replay_from: u64,

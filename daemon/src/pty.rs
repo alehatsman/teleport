@@ -130,6 +130,7 @@ pub struct PtyExit {
 /// What to spawn. Argv array, never a concatenated shell string -- a shell is
 /// only ever `program` because the caller deliberately chose it
 /// (docs/03-pty-layer.md#spawn, docs/06-security.md).
+#[derive(Debug)]
 pub struct SpawnSpec<'a> {
     pub program: &'a str,
     pub args: &'a [String],
@@ -146,6 +147,7 @@ pub struct SpawnSpec<'a> {
 /// Handle plus the two independent one-shot signals a caller needs: the
 /// child's eventual exit, and the pty master's eventual EOF. Never wait for
 /// one to infer the other ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)).
+#[derive(Debug)]
 pub struct SpawnedSession {
     pub session: PtySession,
     pub exit_rx: Receiver<PtyExit>,
@@ -249,6 +251,7 @@ pub fn spawn(
 /// `&self` methods mean that owner does not need a `Mutex` to do it -- the
 /// session directory (`SessionManager`) just holds this behind its own
 /// `Arc<Session>`.
+#[derive(Debug)]
 pub struct PtySession {
     write_tx: SyncSender<Vec<u8>>,
     control_tx: SyncSender<ControlEvent>,
