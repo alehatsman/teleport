@@ -47,6 +47,10 @@ const MAX_STALLED_ROUNDS: u32 = 4;
 /// on-disk log never trips it; a client that still hasn't converged after
 /// this many rounds gets the same clamp-and-report-the-hole treatment a
 /// stalled one does.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "4 * (1 GiB default cap / a round size measured in KiB-MiB) is nowhere near u32::MAX"
+)]
 const MAX_CATCHUP_ROUNDS: u32 = 4 * (crate::log::DEFAULT_LOG_MAX_BYTES / REPLAY_ROUND_BYTES) as u32;
 
 /// Whether this round should register the subscriber and go live. A pure

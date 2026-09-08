@@ -81,8 +81,13 @@ async fn next_binary(ws: &mut WsStream) -> (u64, Vec<u8>) {
                 bytes.len() >= 8,
                 "binary frame shorter than the offset prefix"
             );
-            let offset = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-            (offset, bytes[8..].to_vec())
+            let (offset_bytes, payload) = bytes.split_at(8);
+            let offset = u64::from_be_bytes(
+                offset_bytes
+                    .try_into()
+                    .expect("split_at(8) always returns an 8-byte head"),
+            );
+            (offset, payload.to_vec())
         }
         #[expect(
             clippy::panic,

@@ -128,9 +128,17 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         args,
         cwd: row.get("cwd")?,
         state: row.get("state")?,
-        pid: row.get::<_, Option<i64>>("pid")?.map(|v| v as u32),
-        cols: row.get::<_, i64>("cols")? as u16,
-        rows: row.get::<_, i64>("rows")? as u16,
+        // A cols/rows/pid column out of its type's range only happens to a
+        // hand-edited or corrupted database -- SQLite has no native u16/u32,
+        // so every write here goes through `i64` regardless. `pid` degrades
+        // to "we don't actually know" (`None`, same as a platform that never
+        // reported one); `cols`/`rows` saturate, since a display value has
+        // no "unknown" to fall back to.
+        pid: row
+            .get::<_, Option<i64>>("pid")?
+            .and_then(|v| u32::try_from(v).ok()),
+        cols: u16::try_from(row.get::<_, i64>("cols")?).unwrap_or(u16::MAX),
+        rows: u16::try_from(row.get::<_, i64>("rows")?).unwrap_or(u16::MAX),
         output_bytes: row.get::<_, i64>("output_bytes")? as u64,
         log_capped_at: row
             .get::<_, Option<i64>>("log_capped_at")?
@@ -494,7 +502,10 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, even
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let current = current.max(0) as usize;
+    // SQLite's `user_version` is a 32-bit signed field by definition, so this
+    // always fits `usize` -- `usize::MAX` on the (impossible) alternative
+    // just means `.skip()` below runs no migrations, not a panic.
+    let current = usize::try_from(current.max(0)).unwrap_or(usize::MAX);
     for migration in MIGRATIONS.iter().skip(current) {
         conn.execute_batch(migration)?;
     }

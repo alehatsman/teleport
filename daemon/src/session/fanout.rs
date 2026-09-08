@@ -116,7 +116,8 @@ impl Fanout {
             // Chunks are bounded by pty.rs's READ_BUFFER_SIZE (64 KiB), so
             // this always fits u32; MAX_QUEUE_BYTES itself fits comfortably
             // under Semaphore's permit ceiling.
-            let cost = queue_cost(payload.len()) as u32;
+            let cost = u32::try_from(queue_cost(payload.len()))
+                .expect("a chunk cannot exceed pty.rs's READ_BUFFER_SIZE");
             let Ok(permit) = sub.budget.try_acquire_many(cost) else {
                 return false; // bound tripped -- disconnect, don't wait.
             };
@@ -326,10 +327,9 @@ mod tests {
                 chunk.bytes.len(),
                 on_disk.len()
             );
-            assert_eq!(
-                &on_disk[chunk.offset as usize..][..chunk.bytes.len()],
-                &*chunk.bytes
-            );
+            let offset =
+                usize::try_from(chunk.offset).expect("checked against on_disk.len() above");
+            assert_eq!(&on_disk[offset..][..chunk.bytes.len()], &*chunk.bytes);
         }
         #[expect(
             clippy::let_underscore_must_use,

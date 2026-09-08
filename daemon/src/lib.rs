@@ -21,6 +21,10 @@ pub mod ws;
 /// across `session.rs`/`persistence.rs`/`main.rs` and the matching SQLite
 /// columns (docs/05-persistence.md#schema). One definition so a future fix
 /// to its clock-skew handling can't land in some call sites and not others.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "i64::MAX ms since 1970 is year ~292,471,208 -- this process will not still be running"
+)]
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
