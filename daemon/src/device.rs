@@ -11,10 +11,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+/// This machine's identity (docs/12-identity-and-connectivity.md). Generated
+/// once on first run and persisted; stable across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
+    /// ULID, generated on first run.
     pub device_id: String,
+    /// Human-readable label shown in the UI.
     pub device_name: String,
+    /// `std::env::consts::OS`-shaped platform string.
     pub platform: String,
 }
 

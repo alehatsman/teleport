@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use ulid::Ulid;
 
+/// A session's identity: a ULID, so ids sort by creation time and never
+/// collide across a restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(Ulid);
 
@@ -43,7 +45,9 @@ impl std::str::FromStr for SessionId {
 /// clones of a refcount, not N copies of the chunk.
 #[derive(Debug, Clone)]
 pub struct Chunk {
+    /// Offset of `bytes`'s first byte in the session's overall output stream.
     pub offset: u64,
+    /// The chunk's payload.
     pub bytes: Arc<[u8]>,
 }
 
@@ -52,12 +56,18 @@ pub struct Chunk {
 /// restart to detect a stale row, and nothing persists across a restart yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
+    /// The pty is live; this is the only state a fresh session starts in.
     Running,
+    /// `terminate()` has been called; waiting for the exit listener thread
+    /// to observe the child's exit.
     Closing,
+    /// Terminal: the child exited (cleanly or not) and the listener thread
+    /// recorded it.
     Exited,
 }
 
 impl SessionState {
+    /// The wire/`state` column spelling (docs/05-persistence.md#schema).
     pub fn as_str(&self) -> &'static str {
         match self {
             SessionState::Running => "running",
@@ -89,6 +99,7 @@ pub enum SessionLostReason {
 }
 
 impl SessionLostReason {
+    /// The wire/`lost_reason` column spelling (docs/05-persistence.md#schema).
     pub fn as_str(&self) -> &'static str {
         match self {
             SessionLostReason::SpawnFailed => "spawn_failed",
@@ -105,10 +116,16 @@ impl SessionLostReason {
 /// (docs/06-security.md#secrets-and-environment).
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
+    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
+    /// not interpreted here.
     pub kind: String,
+    /// Preset this session was created from, if any.
     pub preset: Option<String>,
+    /// The program that was spawned.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     pub args: Vec<String>,
+    /// Working directory the program was spawned in.
     pub cwd: PathBuf,
 }
 
@@ -171,8 +188,11 @@ pub(super) struct ControlLease {
 /// (docs/04-api-protocol.md#control-messages).
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
+    /// Another client resized the PTY.
     Resized {
+        /// The new size.
         cols: u16,
+        /// The new size.
         rows: u16,
     },
     /// `lost_by` addresses the notification -- only the connection whose
@@ -182,8 +202,11 @@ pub enum SessionEvent {
     /// `{"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}`
     /// -- both fields describe the new holder, not the one losing it).
     ControlRevoked {
+        /// `client_id` of the connection that just lost control.
         lost_by: String,
+        /// `client_id` of the connection control was given to.
         new_controller_id: String,
+        /// Display name of the connection control was given to.
         new_controller_name: String,
     },
 }

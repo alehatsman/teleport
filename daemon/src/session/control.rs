@@ -116,6 +116,7 @@ impl Session {
         self.write(bytes).map_err(Some)
     }
 
+    /// Display name of the current controller, if there is one.
     pub fn controller_name(&self) -> Option<String> {
         self.control.lock().holder_name.clone()
     }

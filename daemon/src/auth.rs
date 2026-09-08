@@ -37,11 +37,20 @@ pub enum Principal {
     /// Presented a valid bearer token issued to a specific device. Not
     /// distinguished from `LocalUser` yet -- stage 1 has one token, not one
     /// per device -- but the variant exists so the shape is already right.
-    DeviceToken { token_id: String },
+    DeviceToken {
+        /// The device the presented token was issued to.
+        token_id: String,
+    },
     /// Stage 3, established by the cloud backend. Unreachable in the MVP.
-    Account { user_id: String, device_id: String },
+    Account {
+        /// The authenticated cloud account.
+        user_id: String,
+        /// The specific device within that account.
+        device_id: String,
+    },
 }
 
+/// Why [`resolve`]/[`resolve_ws`] refused a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     /// Maps to the `unauthorized` error code / `401`
@@ -140,6 +149,7 @@ impl Default for TicketStore {
 }
 
 impl TicketStore {
+    /// An empty store.
     pub fn new() -> Self {
         Self {
             tickets: parking_lot::Mutex::new(HashMap::new()),

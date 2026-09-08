@@ -125,7 +125,9 @@ pub const IDLE_SWEEP_INTERVAL_MS: u64 = 5_000;
 /// and wedge `terminate` behind it.
 #[derive(Debug)]
 pub struct Session {
+    /// This session's identity.
     pub id: SessionId,
+    /// What was spawned and how -- fixed at creation, never changes.
     pub meta: SessionMeta,
     pty: PtySession,
     fanout: Arc<Mutex<Fanout>>,
@@ -255,10 +257,13 @@ impl Session {
         self.fanout.lock().log.next_offset()
     }
 
+    /// Offset at which persistence stopped, or `None` while the whole
+    /// stream is still on disk.
     pub fn log_capped_at(&self) -> Option<u64> {
         self.fanout.lock().log.log_capped_at()
     }
 
+    /// This session's `output.vt` path.
     pub fn log_path(&self) -> PathBuf {
         self.fanout.lock().log.path().to_path_buf()
     }
@@ -327,30 +332,37 @@ impl Session {
         (r.cols, r.rows)
     }
 
+    /// `running | closing | exited` (docs/05-persistence.md#schema).
     pub fn state(&self) -> SessionState {
         self.runtime.lock().state
     }
 
+    /// OS pid, when the platform reported one.
     pub fn pid(&self) -> Option<u32> {
         self.runtime.lock().pid
     }
 
+    /// Row-insert time, ms since epoch.
     pub fn created_at_ms(&self) -> i64 {
         self.runtime.lock().created_at_ms
     }
 
+    /// `== created_at_ms` (docs/05-persistence.md: no separate `started` write).
     pub fn started_at_ms(&self) -> Option<i64> {
         self.runtime.lock().started_at_ms
     }
 
+    /// When the session reached `exited`/`lost`, ms since epoch.
     pub fn exited_at_ms(&self) -> Option<i64> {
         self.runtime.lock().exited_at_ms
     }
 
+    /// Process exit code, if it exited cleanly.
     pub fn exit_code(&self) -> Option<i32> {
         self.runtime.lock().exit_code
     }
 
+    /// Why this session is `lost` rather than a clean `exited`, if it is.
     pub fn lost_reason(&self) -> Option<SessionLostReason> {
         self.runtime.lock().lost_reason
     }
@@ -432,7 +444,7 @@ impl Session {
     }
 
     /// An owned `watch::Receiver` for a caller (`ws.rs`) that needs to hold
-    /// it across a `tokio::select!` loop. Distinct from [`watch_exited`],
+    /// it across a `tokio::select!` loop. Distinct from [`Self::watch_exited`],
     /// and not a substitute for it: this says "the reader thread has drained
     /// the pty to EOF," which `ws.rs` uses only to bound the `exit` frame's
     /// drain grace after `exited` fires -- never for `SessionState`

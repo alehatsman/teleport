@@ -110,8 +110,12 @@ pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
     /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
     History {
+        /// Offset of `bytes`'s first byte.
         offset: u64,
+        /// This round's stretch of history.
         bytes: Vec<u8>,
+        /// Call [`HistoryReplay::written`] on this, with `bytes` back, to
+        /// get the next step.
         replay: HistoryReplay,
     },
     /// The gap closed: the subscriber is registered and the handover is set
@@ -164,6 +168,7 @@ pub struct Attach {
     /// `N` -- the boundary. Every chunk from `subscription` starts here or
     /// later, guaranteed by the single lock the registering round takes.
     pub next_offset: u64,
+    /// The cap as of registration, if the log was capped.
     pub log_capped_at: Option<u64>,
     /// False when the catch-up loop gave up: the client kept losing ground,
     /// so `replay_from` was moved forward and the bytes behind it were
@@ -171,6 +176,8 @@ pub struct Attach {
     /// in the offset prefix, which clients must already handle for the
     /// log-cap case (docs/04-api-protocol.md#offsets-are-the-replay-index).
     pub caught_up: bool,
+    /// The live handle: every chunk from here starts at or after
+    /// `next_offset`.
     pub subscription: Subscription,
 }
 
@@ -276,13 +283,19 @@ impl Replay {
     }
 }
 
+/// Why `Session::attach` couldn't produce an [`Attach`].
 #[derive(Debug, thiserror::Error)]
 pub enum AttachError {
     /// The client holds an offset the daemon never handed out -- a purged
     /// log, or a stale client after a `lost` session. M4 renders this as the
     /// `offset_ahead` error frame (docs/04-api-protocol.md#attach-race).
     #[error("requested offset {requested} is ahead of next_offset {next_offset}")]
-    OffsetAhead { requested: u64, next_offset: u64 },
+    OffsetAhead {
+        /// The offset the client asked to resume from.
+        requested: u64,
+        /// The offset the daemon actually has data from.
+        next_offset: u64,
+    },
     /// `Session::attach`'s own `fanout.log.reader()` call failed before any
     /// round ever ran.
     #[error("opening the log for replay: {0}")]
@@ -303,7 +316,12 @@ pub enum AttachError {
     /// itself from prior rounds, but only for a round that isn't the first;
     /// carrying it here means that isn't a special case.
     #[error("reading a replay range at offset {offset}: {source}")]
-    Read { offset: u64, source: std::io::Error },
+    Read {
+        /// Where this round was about to read from.
+        offset: u64,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
