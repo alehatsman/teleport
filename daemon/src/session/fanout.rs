@@ -53,6 +53,7 @@ fn queue_cost(len: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SubscriberId(u64);
 
+#[derive(Debug)]
 pub(super) struct SubscriberSlot {
     id: SubscriberId,
     tx: mpsc::Sender<Chunk>,
@@ -77,6 +78,7 @@ pub(super) struct SubscriberSlot {
 /// `pub(super)`: constructed in `manager.rs`'s `create()`, held by
 /// `mod.rs`'s `Session` and by `replay.rs`'s `Replay`, so the whole
 /// `session` subtree needs to see it -- no wider.
+#[derive(Debug)]
 pub(super) struct Fanout {
     pub(super) log: OutputLog,
     pub(super) subscribers: Vec<SubscriberSlot>,
@@ -114,10 +116,10 @@ impl Fanout {
             // Chunks are bounded by pty.rs's READ_BUFFER_SIZE (64 KiB), so
             // this always fits u32; MAX_QUEUE_BYTES itself fits comfortably
             // under Semaphore's permit ceiling.
-            let cost = queue_cost(payload.len()) as u32;
-            let permit = match sub.budget.try_acquire_many(cost) {
-                Ok(permit) => permit,
-                Err(_) => return false, // bound tripped -- disconnect, don't wait.
+            let cost = u32::try_from(queue_cost(payload.len()))
+                .expect("a chunk cannot exceed pty.rs's READ_BUFFER_SIZE");
+            let Ok(permit) = sub.budget.try_acquire_many(cost) else {
+                return false; // bound tripped -- disconnect, don't wait.
             };
             let chunk = Chunk {
                 offset: start,
@@ -166,6 +168,7 @@ impl Fanout {
 /// A live subscription to a session's output. Dropping it unregisters from
 /// the session's `Fanout` -- an idle session does not accumulate dead slots
 /// waiting for the next chunk to notice them.
+#[derive(Debug)]
 pub struct Subscription {
     id: SubscriberId,
     rx: mpsc::Receiver<Chunk>,
@@ -223,6 +226,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -245,6 +252,10 @@ mod tests {
             0,
             "Drop must remove the slot without waiting for output"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -284,6 +295,10 @@ mod tests {
             admitted > 256 * 100,
             "still effectively slot-bound at {admitted} chunks -- N5 has regressed"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -312,11 +327,14 @@ mod tests {
                 chunk.bytes.len(),
                 on_disk.len()
             );
-            assert_eq!(
-                &on_disk[chunk.offset as usize..][..chunk.bytes.len()],
-                &*chunk.bytes
-            );
+            let offset =
+                usize::try_from(chunk.offset).expect("checked against on_disk.len() above");
+            assert_eq!(&on_disk[offset..][..chunk.bytes.len()], &*chunk.bytes);
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

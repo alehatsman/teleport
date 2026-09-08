@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 /// (docs/06-security.md#token-on-the-websocket-upgrade), so the credential
 /// here is the whole authentication story for this client, not a fallback.
 #[derive(Debug)]
-pub struct Connection {
+pub(crate) struct Connection {
     pub base_url: String,
     pub token: String,
 }
@@ -34,7 +34,7 @@ pub struct Connection {
 /// (the one part a shared call can't catch) fails loudly here rather than
 /// showing up as "no local teleportd found" against a directory the daemon
 /// never wrote to.
-pub fn data_dir(override_dir: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn data_dir(override_dir: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(dir) = override_dir {
         return Ok(dir);
     }
@@ -47,7 +47,7 @@ pub fn data_dir(override_dir: Option<PathBuf>) -> Result<PathBuf> {
 /// `TELEPORT_URL`) come next; local auto-discovery is the fallback and only
 /// ever applies to *both* url and token together -- a `<data_dir>/token`
 /// on this machine is never a credential for someone else's `--url`.
-pub fn resolve(
+pub(crate) fn resolve(
     url_flag: Option<String>,
     token_flag: Option<String>,
     data_dir_override: Option<PathBuf>,
@@ -134,6 +134,12 @@ mod tests {
     fn scratch_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("teleport-cli-test-{name}-{}", std::process::id()));
+        // Clearing a stale dir from a previous failed run; fine if it
+        // wasn't there to begin with.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "clearing a stale dir from a previous run; fine if absent"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

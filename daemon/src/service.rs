@@ -9,7 +9,7 @@
 //! install path that needs no GUI.
 //!
 //! Linux only for now. macOS/Windows autostart is deliberately login-scoped
-//! (a LaunchDaemon or a boot trigger both need root/elevation, which
+//! (a `LaunchDaemon` or a boot trigger both need root/elevation, which
 //! docs/06-security.md#privilege rejects), so there is no headless story to
 //! give them here — `install()`/`uninstall()` say so explicitly instead of
 //! silently no-op'ing.
@@ -62,10 +62,13 @@ mod linux {
     /// "real" install location to fall back to (daemon/ ships no installer,
     /// docs/08-packaging.md), so warn rather than silently trust it.
     fn warn_if_build_output(exe: &Path) {
-        let comps: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
+        let comps: Vec<_> = exe
+            .components()
+            .map(std::path::Component::as_os_str)
+            .collect();
         let is_build_output = comps
             .windows(2)
-            .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"));
+            .any(|w| matches!(w, [a, b] if *a == "target" && (*b == "debug" || *b == "release")));
         if is_build_output {
             eprintln!(
                 "warning: {} looks like a `cargo build` output path, not a stable install \
@@ -78,7 +81,7 @@ mod linux {
     }
 
     /// Current lingering state for this user, queried rather than assumed --
-    /// see install()/uninstall() for why. `None` means the query itself
+    /// see `install()/uninstall()` for why. `None` means the query itself
     /// failed (older systemd without `--value`, no `id` binary, etc.); the
     /// caller treats that the same as "not currently lingering".
     fn linger_enabled() -> Option<bool> {
@@ -97,7 +100,7 @@ mod linux {
         Some(String::from_utf8_lossy(&out.stdout).trim() == "yes")
     }
 
-    pub fn install() -> Result<()> {
+    pub(crate) fn install() -> Result<()> {
         let exe = std::env::current_exe().context("resolving this binary's own path")?;
         warn_if_build_output(&exe);
         let dir = unit_dir()?;
@@ -121,9 +124,17 @@ mod linux {
         // Best-effort, like desktop's copy of this: don't fail install() if
         // there's no active systemd --user session (docs/11-mvp-plan.md#m10
         // edge cases) -- autostart is a convenience, not a launch dependency.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort, like desktop's copy of this: don't fail install() if there's no active systemd --user session -- autostart is a convenience, not a launch dependency"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort, like desktop's copy of this: don't fail install() if there's no active systemd --user session -- autostart is a convenience, not a launch dependency"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "enable", "teleportd.service"])
             .status();
@@ -142,7 +153,15 @@ mod linux {
         // lingering this user enabled for an unrelated reason.
         let already_lingering = linger_enabled().unwrap_or(false);
         if !already_lingering {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "same best-effort convenience as the systemctl calls above"
+            )]
             let _ = Command::new("loginctl").arg("enable-linger").status();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "same best-effort convenience as the systemctl calls above; a failed marker write just means uninstall() won't know to turn lingering back off, no worse than not having enabled it"
+            )]
             let _ = fs::write(linger_marker_path()?, "");
         }
 
@@ -158,7 +177,11 @@ mod linux {
         Ok(())
     }
 
-    pub fn uninstall() -> Result<()> {
+    pub(crate) fn uninstall() -> Result<()> {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "symmetric with install()'s best-effort systemctl calls"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", "teleportd.service"])
             .status();
@@ -166,6 +189,10 @@ mod linux {
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "symmetric with install()'s best-effort systemctl calls"
+        )]
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
@@ -175,7 +202,15 @@ mod linux {
         let marker = linger_marker_path()?;
         let we_enabled_linger = marker.exists();
         if we_enabled_linger {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "symmetric with install()'s best-effort convenience"
+            )]
             let _ = Command::new("loginctl").arg("disable-linger").status();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "symmetric with install()'s best-effort marker write"
+            )]
             let _ = fs::remove_file(&marker);
         }
 
@@ -193,10 +228,10 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{install, uninstall};
+pub(crate) use linux::{install, uninstall};
 
 #[cfg(not(target_os = "linux"))]
-pub fn install() -> anyhow::Result<()> {
+pub(crate) fn install() -> anyhow::Result<()> {
     anyhow::bail!(
         "`teleportd service install` is Linux-only for now -- on this platform, autostart \
          is only reachable from the desktop app's tray menu (\"Start at login\"), which \
@@ -205,7 +240,7 @@ pub fn install() -> anyhow::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn uninstall() -> anyhow::Result<()> {
+pub(crate) fn uninstall() -> anyhow::Result<()> {
     anyhow::bail!(
         "`teleportd service uninstall` is Linux-only for now -- use the desktop app's \
          tray menu instead"

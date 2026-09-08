@@ -25,7 +25,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -44,10 +44,14 @@ fn spec<'a>(args: &'a [String], cwd: &'a PathBuf) -> SpawnSpec<'a> {
 /// The daemon's own `now_ms()` is private to `main.rs`; tests use
 /// `SystemTime` directly, the same way `support/mod.rs`'s directory-naming
 /// helpers already do.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "i64::MAX ms since 1970 is year ~292,471,208 -- this test will not still be running"
+)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before 1970")
         .as_millis() as i64
 }
 
@@ -60,7 +64,7 @@ async fn a_bel_byte_in_the_output_sets_last_bell_ms() {
     let cwd = temp_dir();
     let args = vec![];
     let session = manager
-        .create(spec(&args, &cwd), "shell", None)
+        .create(&spec(&args, &cwd), "shell", None)
         .expect("create session");
 
     assert_eq!(session.last_bell_ms(), None, "no bell has happened yet");
@@ -88,7 +92,7 @@ async fn tick_idle_sets_and_clears_idle_since_ms() {
     // below on its own.
     let args = vec!["-c".to_string(), "sleep 5".to_string()];
     let session = manager
-        .create(spec(&args, &cwd), "shell", None)
+        .create(&spec(&args, &cwd), "shell", None)
         .expect("create session");
 
     let created_at = session.created_at_ms();
@@ -133,7 +137,7 @@ async fn tick_idle_is_a_no_op_once_the_session_has_exited() {
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), "true".to_string()];
     let session = manager
-        .create(spec(&args, &cwd), "shell", None)
+        .create(&spec(&args, &cwd), "shell", None)
         .expect("create session");
 
     session.exited().await;

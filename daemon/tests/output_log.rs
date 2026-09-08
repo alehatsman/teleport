@@ -16,9 +16,13 @@ fn scratch(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -93,6 +97,10 @@ fn append_offsets_and_range_reads_agree() {
         "an inverted range is empty, not a panic"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -153,6 +161,10 @@ fn hitting_the_cap_stops_the_file_but_not_the_offset() {
         "a read past the cap returns only what is on disk"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -184,6 +196,10 @@ fn reopening_a_capped_log_does_not_rewind_next_offset() {
     assert_eq!(reopened.log_capped_at(), Some(50));
     assert_invariant(&reopened, &dir);
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -214,6 +230,10 @@ fn recovery_takes_the_larger_of_the_file_and_the_column() {
     );
     assert_invariant(&recovered, &dir);
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -241,6 +261,10 @@ fn a_column_ahead_of_the_file_is_reported_as_capped() {
     );
     assert_invariant(&recovered, &dir);
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -272,5 +296,9 @@ fn a_reopened_capped_log_does_not_resume_appending() {
     );
     assert_invariant(&log, &dir);
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
 }

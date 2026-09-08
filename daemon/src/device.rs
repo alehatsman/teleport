@@ -11,10 +11,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+/// This machine's identity (docs/12-identity-and-connectivity.md). Generated
+/// once on first run and persisted; stable across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
+    /// ULID, generated on first run.
     pub device_id: String,
+    /// Human-readable label shown in the UI.
     pub device_name: String,
+    /// `std::env::consts::OS`-shaped platform string.
     pub platform: String,
 }
 
@@ -55,10 +60,11 @@ fn hostname() -> String {
         let mut buf = [0u8; 256];
         // SAFETY: buf is a valid, appropriately sized C string buffer; gethostname
         // writes at most buf.len() bytes and null-terminates on success.
+        #[expect(unsafe_code, reason = "gethostname(2) via libc; no safe wrapper")]
         let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
         if rc == 0 {
             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            if let Ok(name) = std::str::from_utf8(&buf[..end]) {
+            if let Some(Ok(name)) = buf.get(..end).map(std::str::from_utf8) {
                 if !name.is_empty() {
                     return name.to_string();
                 }

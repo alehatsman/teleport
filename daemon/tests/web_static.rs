@@ -13,7 +13,7 @@ fn get(uri: &str) -> Request<Body> {
         .method("GET")
         .uri(uri)
         .body(Body::empty())
-        .unwrap()
+        .expect("valid request")
 }
 
 async fn body_string(response: axum::response::Response) -> String {
@@ -24,9 +24,10 @@ async fn body_string(response: axum::response::Response) -> String {
 }
 
 fn write_dist(dir: &std::path::Path) {
-    std::fs::create_dir_all(dir.join("assets")).unwrap();
-    std::fs::write(dir.join("index.html"), "<html>spa shell</html>").unwrap();
-    std::fs::write(dir.join("assets/app.js"), "console.log('app')").unwrap();
+    std::fs::create_dir_all(dir.join("assets")).expect("create test dist dir");
+    std::fs::write(dir.join("index.html"), "<html>spa shell</html>")
+        .expect("write test index.html");
+    std::fs::write(dir.join("assets/app.js"), "console.log('app')").expect("write test app.js");
 }
 
 #[tokio::test]
@@ -53,7 +54,11 @@ async fn known_asset_is_served_from_web_dist() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_string(response).await, "console.log('app')");
 
-    std::fs::remove_dir_all(&dist).ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&dist);
 }
 
 #[tokio::test]
@@ -76,7 +81,11 @@ async fn unknown_client_route_falls_back_to_index_html() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_string(response).await, "<html>spa shell</html>");
 
-    std::fs::remove_dir_all(&dist).ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&dist);
 }
 
 #[tokio::test]
@@ -99,7 +108,11 @@ async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_ne!(body_string(response).await, "<html>spa shell</html>");
 
-    std::fs::remove_dir_all(&dist).ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&dist);
 }
 
 /// docs/06-security.md's CSP applies to *every* response -- a single
@@ -133,5 +146,9 @@ async fn every_response_carries_the_content_security_policy() {
         .get(header::CONTENT_SECURITY_POLICY)
         .is_some());
 
-    std::fs::remove_dir_all(&dist).ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&dist);
 }

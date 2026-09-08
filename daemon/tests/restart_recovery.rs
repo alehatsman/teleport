@@ -38,9 +38,13 @@ fn temp_dir(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -62,7 +66,15 @@ struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.kill();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.wait();
     }
 }
@@ -72,7 +84,7 @@ fn spawn_daemon(data_dir: &Path) -> KillOnDrop {
         Command::new(bin())
             .args([
                 "--data-dir",
-                data_dir.to_str().unwrap(),
+                data_dir.to_str().expect("temp dir path is valid UTF-8"),
                 "--listen",
                 "127.0.0.1:0",
             ])
@@ -89,7 +101,7 @@ fn read_port(data_dir: &Path) -> u16 {
         "port file never appeared"
     );
     std::fs::read_to_string(data_dir.join("port"))
-        .unwrap()
+        .expect("read port file")
         .trim()
         .parse()
         .expect("port file")
@@ -97,7 +109,7 @@ fn read_port(data_dir: &Path) -> u16 {
 
 fn read_token(data_dir: &Path) -> String {
     std::fs::read_to_string(data_dir.join("token"))
-        .unwrap()
+        .expect("read token file")
         .trim()
         .to_string()
 }
@@ -108,7 +120,7 @@ fn read_token(data_dir: &Path) -> String {
 /// a `GET`/`POST` that returns a body; `Value::Null` on a bodyless response
 /// like `204`).
 fn http(port: u16, method: &str, path: &str, token: &str, body: Option<&Value>) -> (u16, Value) {
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let body = body.map(ToString::to_string).unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: 127.0.0.1\r\n\
@@ -173,9 +185,7 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     // docs/01-architecture.md#the-crash-boundary describes, not a clean
     // shutdown. Poll briefly for bytes to land rather than a fixed sleep.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) == 0
-        && Instant::now() < deadline
-    {
+    while std::fs::metadata(&log_path).map_or(0, |m| m.len()) == 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     let file_len_before_kill = std::fs::metadata(&log_path).expect("output.vt").len();
@@ -184,13 +194,24 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
         "the session must have actually produced output before the kill"
     );
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for signaling an arbitrary pid"
+    )]
     // SAFETY: sending SIGKILL to a child process this test just spawned and owns.
     unsafe {
-        libc::kill(child.0.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(
+            libc::pid_t::try_from(child.0.id()).expect("a real OS pid fits pid_t"),
+            libc::SIGKILL,
+        );
     }
     // `KillOnDrop` will also reap it; wait here so the port is free before
     // the next spawn tries to reuse the same data dir.
     let mut child = child;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+    )]
     let _ = child.0.wait();
     drop(child);
     // SIGKILL skips `remove_port_file` entirely -- the port file from the
@@ -198,6 +219,10 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     // `wait_for_file` below would otherwise see it as "already there" and
     // `read_port` would hand back that stale, unlistened-on number instead
     // of waiting for the restarted daemon's real one.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_file(data_dir.join("port"));
 
     // Restart against the same data dir -- a fresh port and (for this run
@@ -264,5 +289,9 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
         "the full log must be readable after recovery, not truncated"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }

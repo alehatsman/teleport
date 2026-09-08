@@ -7,7 +7,7 @@
 //! design so the desktop shell can probe before it holds a credential
 //! (docs/04-api-protocol.md#get-apiv1health), and the WS upgrade in `ws.rs`,
 //! which resolves its credential explicitly via
-//! [`auth::resolve_ws`](crate::auth::resolve_ws) instead -- a ticket is
+//! [`auth::resolve_ws`] instead -- a ticket is
 //! scoped to the session id in the path, which the generic extractor never
 //! sees.
 
@@ -40,19 +40,29 @@ use crate::session::{CreateError, SessionId, SessionManager, SessionState};
 /// once in `main.rs` after the listener is bound (the origin policy needs
 /// the actual port -- docs/06-security.md#browser-origin-defense) and held
 /// behind an `Arc` for the life of the process.
+#[derive(Debug)]
 pub struct AppState {
+    /// Every live session.
     pub sessions: SessionManager,
     /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
     /// that `sessions.get` doesn't know about falls back to this for `GET`
     /// and `/log` -- a `lost`/`exited` row from before this process started
     /// (persistence.rs's module doc explains why those aren't `Session`s).
     pub db: Option<persistence::Db>,
+    /// The daemon's own effective configuration.
     pub config: Config,
+    /// This machine's identity (docs/12-identity-and-connectivity.md).
     pub device: Device,
+    /// The long-lived bearer token every non-ticket request authenticates
+    /// against.
     pub token: String,
+    /// Loaded from `presets.toml`, if present.
     pub presets: Vec<Preset>,
+    /// Origin/Host allowlisting (docs/06-security.md#browser-origin-defense).
     pub origin_policy: OriginPolicy,
+    /// Process start time, for `/health`'s uptime.
     pub started_at: Instant,
+    /// `env!("CARGO_PKG_VERSION")`, reported by `/health`.
     pub version: &'static str,
     /// Built SPA assets (`web/dist`), if found at startup
     /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
@@ -79,18 +89,20 @@ pub struct AppState {
 impl FromRequestParts<Arc<AppState>> for Principal {
     type Rejection = ApiError;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> {
         let query_token = query_param(parts.uri.query().unwrap_or(""), "token");
-        auth::resolve(
-            &parts.headers,
-            query_token,
-            &state.token,
-            state.config.auth_token,
+        std::future::ready(
+            auth::resolve(
+                &parts.headers,
+                query_token,
+                &state.token,
+                state.config.auth_token,
+            )
+            .map_err(ApiError::from),
         )
-        .map_err(ApiError::from)
     }
 }
 
@@ -108,20 +120,27 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 /// Uniform HTTP error shape and status mapping for everything this module
 /// returns. Wire shape is deliberately minimal -- `{"error": "<code>",
 /// "message": "<detail>"}` -- there is no cross-team consumer requiring more.
+#[derive(Debug)]
 pub enum ApiError {
+    /// The credential itself was missing or invalid -- `401`/`403`
+    /// (see [`AuthError`]).
     Auth(AuthError),
+    /// No such session, live or historical -- `404`.
     NotFound,
     /// A session id that's a valid, known row, but whose log GC has already
     /// deleted (docs/05-persistence.md#garbage-collection: directory first,
     /// row second) -- distinct from `NotFound`, which means no such id was
     /// ever known at all.
     Gone,
+    /// The request itself was malformed -- `400`.
     BadRequest(String),
     /// A `historical_row` lookup failed for a reason that isn't "no such
     /// row" -- the db-writer thread is gone, or a real SQLite I/O error.
     /// Kept distinct from `NotFound` so a persistence outage doesn't read as
     /// an ordinary unknown id on monitoring built on this route's 404 rate.
     Internal(String),
+    /// `SessionManager::create` refused the request -- see [`CreateError`]
+    /// for the status-code mapping.
     Create(CreateError),
 }
 
@@ -235,6 +254,8 @@ const CSP_DIRECTIVES: &[&str] = &[
     "frame-ancestors 'none'",
 ];
 
+/// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
+/// router `main.rs` serves and `tests/support` boots for in-process tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
@@ -340,11 +361,19 @@ async fn health(
         "api_versions": API_VERSIONS,
         "capabilities": CAPABILITIES,
     });
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "serde_json::Value's Index/IndexMut on a &str key only panics on a non-object; `body` was just built as one"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "u64::MAX ms is ~584 million years of uptime"
+    )]
     if authenticated {
         // The hostname-derived device name is mildly identifying, so it sits
         // behind the principal -- nothing in the unauthenticated shape above
         // may be sensitive (docs/04-api-protocol.md#get-apiv1health).
-        body["device_id"] = state.device.device_id.to_string().into();
+        body["device_id"] = state.device.device_id.clone().into();
         body["device_name"] = state.device.device_name.clone().into();
         body["platform"] = state.device.platform.clone().into();
         body["pid"] = std::process::id().into();
@@ -410,7 +439,7 @@ async fn create_session(
         .and_then(|id| state.presets.iter().find(|p| p.id == id));
     let command = req
         .command
-        .or_else(|| preset.map(|p| p.resolved_command()))
+        .or_else(|| preset.map(Preset::resolved_command))
         .ok_or_else(|| {
             ApiError::BadRequest("command is required unless a preset supplies it".to_string())
         })?;
@@ -436,7 +465,7 @@ async fn create_session(
             cols,
             rows,
         };
-        state.sessions.create(spec, kind, preset_id)
+        state.sessions.create(&spec, kind, preset_id)
     })
     .await
     .map_err(|e| ApiError::Create(CreateError::Spawn(e.into())))??;
@@ -570,8 +599,7 @@ async fn list_sessions(
                     let is_live = row
                         .id
                         .parse::<SessionId>()
-                        .map(|id| live_ids.contains(&id))
-                        .unwrap_or(false);
+                        .is_ok_and(|id| live_ids.contains(&id));
                     if !is_live {
                         views.push(SessionView::from_row(row));
                     }
@@ -604,6 +632,10 @@ async fn get_session(
 /// db-writer thread is gone, or a genuine SQLite I/O error) -- that case
 /// must not read as an ordinary unknown id on monitoring built on this
 /// route's 404 rate.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a malformed id and an unknown id share the same 404 by design (docs/04-api-protocol.md#error-codes); the parse error has nothing more specific to add"
+)]
 async fn historical_row(state: &AppState, id: &str) -> Result<persistence::SessionRow, ApiError> {
     let _: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     let db = state.db.as_ref().ok_or(ApiError::NotFound)?;
@@ -636,6 +668,10 @@ struct DeleteQuery {
 /// Without `?purge=true` on such a row there is nothing to do either: it is
 /// already in a terminal state, so this is a no-op `202`, the same shape
 /// `terminate()`'s own idempotency gives a live already-`exited` session.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "four real outcomes (historical/live x purge/no-purge), each with its own error handling; splitting them out is a deliberate follow-up, not a change to make alongside a lint sweep on a deletion path"
+)]
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -673,11 +709,11 @@ async fn delete_session(
             let terminate_session = Arc::clone(&session);
             match tokio::task::spawn_blocking(move || terminate_session.terminate()).await {
                 Ok(Err(e)) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed")
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed");
                 }
                 Ok(Ok(())) => {}
                 Err(e) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked")
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked");
                 }
             }
             session.exited().await;
@@ -685,8 +721,7 @@ async fn delete_session(
         let log_dir = session
             .log_path()
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| session.log_path());
+            .map_or_else(|| session.log_path(), std::path::Path::to_path_buf);
         // `remove_dir_all` is blocking fs work too.
         if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
         {
@@ -872,6 +907,10 @@ async fn create_ws_ticket(
     }))
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
+)]
 fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {
     let id: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
     state.sessions.get(id).ok_or(ApiError::NotFound)
@@ -886,7 +925,7 @@ mod tests {
             id: "shell".to_string(),
             label: "Shell".to_string(),
             command: "$SHELL".to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             icon: "terminal".to_string(),
         }
     }

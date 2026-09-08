@@ -32,7 +32,7 @@ const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
 
 /// D3 (docs/04-api-protocol.md#get-apiv1sessions): a BEL
 /// byte can repeat fast (a spinner, a broken script) -- throttle the
-/// `session_events` write the same way output_bytes is throttled. The
+/// `session_events` write the same way `output_bytes` is throttled. The
 /// in-memory `last_bell_ms` (what `GET` actually reports) always reflects the
 /// most recent bell regardless of this throttle.
 const BELL_PERSIST_INTERVAL_MS: i64 = 1000;
@@ -48,12 +48,16 @@ const DEFAULT_MAX_SESSIONS: usize = 50;
 /// `MaxSessions`, `500` for `Spawn`.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
+    /// `422` -- the requested `command` isn't resolvable on `PATH`.
     #[error("executable not found on PATH: {0}")]
     ExecutableNotFound(String),
+    /// `422` -- the requested `cwd` doesn't exist or isn't a directory.
     #[error("cwd does not exist or is not a directory: {}", .0.display())]
     InvalidCwd(PathBuf),
+    /// `429` -- `max_sessions` is already at its cap.
     #[error("max_sessions ({0}) reached")]
     MaxSessions(usize),
+    /// `500` -- validation passed but `pty::spawn` itself failed.
     #[error("spawning the session: {0}")]
     Spawn(#[from] anyhow::Error),
 }
@@ -80,7 +84,7 @@ type SessionDirectory = Mutex<HashMap<SessionId, Arc<Session>>>;
 /// pulling in the rest of `SessionManager` (the `LogSyncer` thread, cap
 /// state). Shares the same underlying map, so it always reflects current
 /// membership; see [`SessionManager::live_handle`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LiveSessions(Arc<SessionDirectory>);
 
 impl LiveSessions {
@@ -106,6 +110,7 @@ impl LiveSessions {
 /// `Session` keeps no back-link to it: [`SessionManager::purge`] removes by
 /// id through this map directly, and `terminate()` no longer self-removes
 /// (see the M4 module doc on `session/mod.rs`).
+#[derive(Debug)]
 pub struct SessionManager {
     /// `<data_dir>/sessions`. Each session's log is `<root>/<id>/output.vt`
     /// (docs/05-persistence.md#layout).
@@ -131,6 +136,8 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// A manager rooted at `root` (`<data_dir>/sessions`), default limits,
+    /// no SQLite -- see [`SessionManager::with_limits`]/[`with_db`](Self::with_db).
     pub fn new(root: PathBuf) -> Self {
         Self::with_limits(root, LogLimits::default())
     }
@@ -153,6 +160,7 @@ impl SessionManager {
     /// docs/07-remote-access.md#daemon-configuration-surface). A builder
     /// method rather than a `with_limits` parameter so every existing call
     /// site -- tests included -- keeps working unchanged.
+    #[must_use]
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
@@ -161,6 +169,7 @@ impl SessionManager {
     /// Wires SQLite persistence in (docs/11-mvp-plan.md#m7). `main.rs` is
     /// the only real caller; tests that don't exercise M7 leave `db: None`
     /// and every write below quietly no-ops.
+    #[must_use]
     pub fn with_db(mut self, db: persistence::Db) -> Self {
         self.db = Some(db);
         self
@@ -218,7 +227,7 @@ impl SessionManager {
     /// enforced first, before either check, so a saturated daemon fails fast.
     pub fn create(
         &self,
-        spec: SpawnSpec,
+        spec: &SpawnSpec<'_>,
         kind: impl Into<String>,
         preset: Option<String>,
     ) -> Result<Arc<Session>, CreateError> {
@@ -395,6 +404,9 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Looks up a live session by id. `None` for an unknown, purged, or
+    /// never-live (SQLite-only) id -- callers needing that last case go
+    /// through `api.rs`'s DB fallback instead.
     pub fn get(&self, id: SessionId) -> Option<Arc<Session>> {
         self.sessions.lock().get(&id).cloned()
     }
@@ -448,9 +460,7 @@ fn resolve_executable(command: &str, cwd: &Path) -> bool {
 #[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
@@ -493,7 +503,14 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
             let Ok(exit) = exit_rx.recv() else { return };
 
             let (exit_code, lost_reason) = match exit.status {
-                Some(status) => (Some(status.exit_code() as i32), None),
+                // `-1` is the "couldn't be represented" sentinel every shell
+                // uses for the same case (`$?` from a signal-death, a status
+                // wait(2) can't decode as a plain exit code) -- exit codes
+                // are conventionally 0..=255 in practice.
+                Some(status) => (
+                    Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
+                    None,
+                ),
                 None => (
                     None,
                     Some(match exit.lost_reason {
@@ -531,6 +548,7 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
             // `send` on a `watch` never fails as long as this `Sender` (owned
             // by `session`, which this thread also holds a strong ref to) is
             // alive -- it always is here.
+            #[expect(clippy::let_underscore_must_use, reason = "send on a watch never fails as long as this Sender (owned by session, held here too) is alive -- it always is here")]
             let _ = session.exited_tx.send(true);
         })
         .expect("spawning session-exit thread");
@@ -549,6 +567,7 @@ fn spawn_eof_listener(session: Arc<Session>, eof_rx: std::sync::mpsc::Receiver<(
         .name("session-eof".into())
         .spawn(move || {
             if eof_rx.recv().is_ok() {
+                #[expect(clippy::let_underscore_must_use, reason = "same guarantee as spawn_exit_listener's send above -- this watch's Sender outlives this thread")]
                 let _ = session.eof_tx.send(true);
             }
         })
@@ -573,6 +592,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("run.sh");
@@ -591,6 +614,10 @@ mod tests {
         ));
         assert!(resolve_executable("./run.sh", &dir));
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

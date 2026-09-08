@@ -19,7 +19,10 @@
 //! touches HTTP; `http_api.rs` never opens a WebSocket; `ws_protocol.rs`
 //! never inspects `base_url`), and each is compiled as its own separate test
 //! binary -- hence the blanket `dead_code` allow rather than per-item ones.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different subset of this shared support module"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,7 +59,7 @@ const MAX_TEST_ROUNDS: u32 = 1024;
 /// every caller of this helper drives a client that outruns the producer, so
 /// a catch-up that gives up and clamps means the fixture stopped testing
 /// what it says it tests, not a real assertion about the product.
-pub async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach, u32) {
+pub(crate) async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach, u32) {
     let mut acc = Vec::new();
     let mut next = replay.replay_from;
     let mut rounds = 0u32;
@@ -98,7 +101,7 @@ pub async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach
 /// stalled/total-round clamp D1's own fixture in `session_catchup.rs`
 /// exercises deliberately. Always paced at `Duration::ZERO`: a storm client
 /// is modeling "reconnect as fast as possible," not a slow network.
-pub async fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
+pub(crate) fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
     let mut acc = Vec::new();
     let mut next = replay.replay_from;
     let mut rounds = 0u32;
@@ -128,20 +131,20 @@ pub async fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
     }
 }
 
-pub const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+pub(crate) const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-pub struct Daemon {
+pub(crate) struct Daemon {
     pub addr: std::net::SocketAddr,
     pub state: Arc<AppState>,
     server: JoinHandle<()>,
 }
 
 impl Daemon {
-    pub fn base_url(&self) -> String {
+    pub(crate) fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    pub fn ws_url(&self, path_and_query: &str) -> String {
+    pub(crate) fn ws_url(&self, path_and_query: &str) -> String {
         format!("ws://{}{}", self.addr, path_and_query)
     }
 }
@@ -158,7 +161,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -167,14 +170,14 @@ fn sessions_root(name: &str) -> PathBuf {
 /// ephemeral loopback port with the given config, for tests that need an
 /// actual WebSocket connection rather than an in-process request. Dropping
 /// the returned [`Daemon`] aborts the server task.
-pub async fn spawn(config: Config) -> Daemon {
+pub(crate) async fn spawn(config: Config) -> Daemon {
     spawn_with_web_dist(config, None).await
 }
 
 /// Like [`spawn`], but with `AppState::web_dist` set -- for the SPA-fallback
 /// tests, which need a router that actually serves `web/dist`
 /// (docs/08-packaging.md#build-pipeline).
-pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> Daemon {
+pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -208,6 +211,10 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
 
     let app = teleportd::api::build_router(Arc::clone(&state));
     let server = tokio::spawn(async move {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "background server task; an error here (or the task being aborted when the test's Daemon handle drops) isn't something the test needs to observe"
+        )]
         let _ = axum::serve(listener, app).await;
     });
 
@@ -218,18 +225,21 @@ pub async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> D
     }
 }
 
-pub fn default_config() -> Config {
+pub(crate) fn default_config() -> Config {
     Config::default()
 }
 
 /// Creates a `shell`-kind `/bin/sh` session directly through the
 /// `SessionManager` (bypassing HTTP) -- the fastest way for a WS-focused
 /// test to get a session id to attach to.
-pub fn create_shell_session(daemon: &Daemon, args: Vec<String>) -> teleportd::session::SessionId {
+pub(crate) fn create_shell_session(
+    daemon: &Daemon,
+    args: &[String],
+) -> teleportd::session::SessionId {
     let cwd = std::env::temp_dir();
     let spec = teleportd::pty::SpawnSpec {
         program: "/bin/sh",
-        args: &args,
+        args,
         cwd: &cwd,
         env: &[],
         cols: 80,
@@ -238,7 +248,7 @@ pub fn create_shell_session(daemon: &Daemon, args: Vec<String>) -> teleportd::se
     let session = daemon
         .state
         .sessions
-        .create(spec, "shell", None)
+        .create(&spec, "shell", None)
         .expect("create session");
     session.id
 }

@@ -24,7 +24,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -53,7 +53,7 @@ fn spawn_emitting(manager: &SessionManager, bytes: usize) -> std::sync::Arc<Sess
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,
@@ -79,7 +79,7 @@ fn spawn_emitting_forever(manager: &SessionManager) -> std::sync::Arc<Session> {
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,
@@ -261,7 +261,7 @@ async fn attaching_past_next_offset_is_offset_ahead() {
     const BURST: u64 = 1024;
 
     let manager = SessionManager::new(sessions_root("ahead"));
-    let session = spawn_emitting(&manager, BURST as usize);
+    let session = spawn_emitting(&manager, usize::try_from(BURST).expect("BURST is 1024"));
 
     // Let the whole burst land before attaching to anything. `spawn_emitting`
     // writes exactly `BURST` bytes and then blocks in `cat` forever, so once

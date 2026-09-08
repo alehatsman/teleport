@@ -47,6 +47,10 @@ const MAX_STALLED_ROUNDS: u32 = 4;
 /// on-disk log never trips it; a client that still hasn't converged after
 /// this many rounds gets the same clamp-and-report-the-hole treatment a
 /// stalled one does.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "4 * (1 GiB default cap / a round size measured in KiB-MiB) is nowhere near u32::MAX"
+)]
 const MAX_CATCHUP_ROUNDS: u32 = 4 * (crate::log::DEFAULT_LOG_MAX_BYTES / REPLAY_ROUND_BYTES) as u32;
 
 /// Whether this round should register the subscriber and go live. A pure
@@ -69,6 +73,7 @@ fn should_register(gap: u64, stalled_rounds: u32, total_rounds: u32) -> bool {
 /// any history has been written, which is why `ready` can still be the first
 /// frame. Drive it with [`next_round`](Self::next_round) until it hands back
 /// an [`Attach`].
+#[derive(Debug)]
 pub struct Replay {
     /// Where replay actually starts -- `ready.replay_from`. The requested
     /// offset, except for a client attaching past a cap: there it is
@@ -104,12 +109,17 @@ pub struct Replay {
 /// One step of a catch-up loop. The `History` variant carries the rest of the
 /// [`Replay`] rather than borrowing it, so a caller cannot pump a replay that
 /// has already gone live and register a second subscriber by accident.
+#[derive(Debug)]
 pub enum ReplayStep {
     /// A bounded stretch of history. Write it to the client, then call
     /// [`HistoryReplay::written`], handing `bytes` back, to get the next step.
     History {
+        /// Offset of `bytes`'s first byte.
         offset: u64,
+        /// This round's stretch of history.
         bytes: Vec<u8>,
+        /// Call [`HistoryReplay::written`] on this, with `bytes` back, to
+        /// get the next step.
         replay: HistoryReplay,
     },
     /// The gap closed: the subscriber is registered and the handover is set
@@ -125,6 +135,7 @@ pub enum ReplayStep {
 /// (docs/04-api-protocol.md#catch-up--register-late-not-early) from a
 /// comment into something the compiler checks: there is no path from a
 /// `History` step to the next one that does not pass through `bytes`.
+#[derive(Debug)]
 pub struct HistoryReplay {
     round_len: usize,
     replay: Replay,
@@ -135,6 +146,10 @@ impl HistoryReplay {
     /// checked by length, not just present for the type checker's sake -- so
     /// passing back the wrong thing (or a placeholder) fails loudly here
     /// rather than quietly reintroducing the pre-fetch race D1 closed.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "bytes: Vec<u8> by value is the point, not an oversight -- see above; a reference would let a caller satisfy the length check without actually handing the round's own buffer back"
+    )]
     pub fn written(self, bytes: Vec<u8>) -> Result<ReplayStep, AttachError> {
         assert_eq!(
             bytes.len(),
@@ -150,6 +165,7 @@ impl HistoryReplay {
 /// history it still owes. Write `replay` (starting at `replay_from`), then
 /// every chunk from `subscription`; the two meet exactly once -- no gap, no
 /// duplicate.
+#[derive(Debug)]
 pub struct Attach {
     /// Where the final stretch of replay starts.
     pub replay_from: u64,
@@ -160,6 +176,7 @@ pub struct Attach {
     /// `N` -- the boundary. Every chunk from `subscription` starts here or
     /// later, guaranteed by the single lock the registering round takes.
     pub next_offset: u64,
+    /// The cap as of registration, if the log was capped.
     pub log_capped_at: Option<u64>,
     /// False when the catch-up loop gave up: the client kept losing ground,
     /// so `replay_from` was moved forward and the bytes behind it were
@@ -167,6 +184,8 @@ pub struct Attach {
     /// in the offset prefix, which clients must already handle for the
     /// log-cap case (docs/04-api-protocol.md#offsets-are-the-replay-index).
     pub caught_up: bool,
+    /// The live handle: every chunk from here starts at or after
+    /// `next_offset`.
     pub subscription: Subscription,
 }
 
@@ -272,13 +291,19 @@ impl Replay {
     }
 }
 
+/// Why `Session::attach` couldn't produce an [`Attach`].
 #[derive(Debug, thiserror::Error)]
 pub enum AttachError {
     /// The client holds an offset the daemon never handed out -- a purged
     /// log, or a stale client after a `lost` session. M4 renders this as the
     /// `offset_ahead` error frame (docs/04-api-protocol.md#attach-race).
     #[error("requested offset {requested} is ahead of next_offset {next_offset}")]
-    OffsetAhead { requested: u64, next_offset: u64 },
+    OffsetAhead {
+        /// The offset the client asked to resume from.
+        requested: u64,
+        /// The offset the daemon actually has data from.
+        next_offset: u64,
+    },
     /// `Session::attach`'s own `fanout.log.reader()` call failed before any
     /// round ever ran.
     #[error("opening the log for replay: {0}")]
@@ -299,7 +324,12 @@ pub enum AttachError {
     /// itself from prior rounds, but only for a round that isn't the first;
     /// carrying it here means that isn't a special case.
     #[error("reading a replay range at offset {offset}: {source}")]
-    Read { offset: u64, source: std::io::Error },
+    Read {
+        /// Where this round was about to read from.
+        offset: u64,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -322,6 +352,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -424,6 +458,10 @@ mod tests {
             fanout.lock().subscribers.is_empty(),
             "dropping the attach unregisters"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -463,7 +501,8 @@ mod tests {
         };
 
         assert_eq!(
-            rounds, MAX_STALLED_ROUNDS as u64,
+            rounds,
+            u64::from(MAX_STALLED_ROUNDS),
             "one round to set the baseline, then four stalls"
         );
         assert!(!attach.caught_up, "a clamped replay must say so");
@@ -482,6 +521,10 @@ mod tests {
             attach.next_offset,
             "and it still meets the live boundary exactly -- the hole is behind it, not in front"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -504,7 +547,15 @@ mod tests {
             panic!("3 MiB backlog must not go live on the first round");
         };
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "this call exists to trigger written()'s own panic (see #[should_panic] above); its Ok/Err value is irrelevant either way"
+        )]
         let _ = replay.written(vec![0u8; 1]); // not this round's REPLAY_ROUND_BYTES-sized stretch
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 

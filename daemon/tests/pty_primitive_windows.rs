@@ -14,7 +14,7 @@
 //! byte-exact payload (all 256 byte values, including control bytes) survives
 //! a raw-mode round trip -- has no meaningful Windows equivalent through
 //! `portable_pty`. Unix raw mode (`stty raw -echo`) turns the pty into a
-//! plain byte pipe with *no* interpretation. ConPTY has no equivalent "raw"
+//! plain byte pipe with *no* interpretation. `ConPTY` has no equivalent "raw"
 //! state for its *input* direction: every byte written to the master always
 //! passes through conhost's own VT input parser before the child ever sees
 //! it, regardless of what console mode the child sets on its own stdin
@@ -101,7 +101,8 @@ fn spawn_cmd_script(
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
+        #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn cmd.exe /c");
@@ -121,7 +122,8 @@ fn spawn_interactive_cmd(cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
+        #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn interactive cmd.exe");
@@ -140,13 +142,12 @@ fn recv_until(
     let mut acc = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "timed out waiting for predicate; got {} bytes: {:?}",
-                acc.len(),
-                String::from_utf8_lossy(&acc)
-            );
-        }
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for predicate; got {} bytes: {:?}",
+            acc.len(),
+            String::from_utf8_lossy(&acc)
+        );
         match rx.recv_timeout(remaining) {
             Ok(chunk) => {
                 acc.extend_from_slice(&chunk);
@@ -154,8 +155,12 @@ fn recv_until(
                     return acc;
                 }
             }
-            Err(_) => panic!(
-                "output channel closed before predicate matched; got {} bytes: {:?}",
+            #[expect(
+                clippy::panic,
+                reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+            )]
+            Err(e) => panic!(
+                "output channel closed before predicate matched ({e}); got {} bytes: {:?}",
                 acc.len(),
                 String::from_utf8_lossy(&acc)
             ),
@@ -180,26 +185,31 @@ fn strip_vt_sequences(input: &[u8]) -> Vec<u8> {
     const ESC: u8 = 0x1B;
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
-    while i < input.len() {
-        if input[i] != ESC || i + 1 >= input.len() {
-            out.push(input[i]);
+    while let Some(&b) = input.get(i) {
+        let Some(&next) = input.get(i + 1) else {
+            out.push(b);
+            i += 1;
+            continue;
+        };
+        if b != ESC {
+            out.push(b);
             i += 1;
             continue;
         }
-        match input[i + 1] {
+        match next {
             b'[' => {
                 let mut j = i + 2;
-                while j < input.len() && (0x30..=0x3F).contains(&input[j]) {
+                while input.get(j).is_some_and(|c| (0x30..=0x3F).contains(c)) {
                     j += 1;
                 }
-                while j < input.len() && (0x20..=0x2F).contains(&input[j]) {
+                while input.get(j).is_some_and(|c| (0x20..=0x2F).contains(c)) {
                     j += 1;
                 }
                 i = (j + 1).min(input.len()); // consume the final byte, if present
             }
             b']' => {
                 let mut j = i + 2;
-                while j < input.len() && input[j] != 0x07 {
+                while input.get(j).is_some_and(|c| *c != 0x07) {
                     j += 1;
                 }
                 i = (j + 1).min(input.len()); // consume the BEL terminator, if present
@@ -216,13 +226,13 @@ fn strip_vt_sequences(input: &[u8]) -> Vec<u8> {
 /// count).
 fn number_after(text: &str, label: &str) -> Option<u32> {
     let start = text.find(label)? + label.len();
-    let rest = &text[start..];
+    let rest = text.get(start..)?;
     let digits_start = rest.find(|c: char| c.is_ascii_digit())?;
-    let digits_end = rest[digits_start..]
+    let digits_end = rest
+        .get(digits_start..)?
         .find(|c: char| !c.is_ascii_digit())
-        .map(|i| digits_start + i)
-        .unwrap_or(rest.len());
-    rest[digits_start..digits_end].parse().ok()
+        .map_or(rest.len(), |i| digits_start + i);
+    rest.get(digits_start..digits_end)?.parse().ok()
 }
 
 /// Process ids (there can legitimately be more than one, or none) whose
@@ -264,7 +274,7 @@ fn echo_roundtrip() {
 
 #[test]
 fn large_text_burst_read_drops_nothing() {
-    let _guard = serialize();
+    const LINES: usize = 200_000;
     // No `yes`, and no raw mode to avoid ONLCR inflation (see the module doc
     // on why raw-mode byte-exactness isn't attempted at all here) -- a
     // `for /L` loop is cmd.exe's own repeat-N-times primitive, and CRLF line
@@ -295,7 +305,7 @@ fn large_text_burst_read_drops_nothing() {
     // line -- leaving only the loop's own printable output, which should be
     // *exactly* `LINES` copies of "y\r\n" with nothing else interleaved, in
     // order. No sentinel needed because there is nothing left to skip past.
-    const LINES: usize = 200_000;
+    let _guard = serialize();
     let (spawned, out_rx) =
         spawn_cmd_script(&format!("for /L %i in (1,1,{LINES}) do @echo y"), 80, 24);
 
@@ -423,7 +433,7 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
         .recv_timeout(Duration::from_secs(1))
         .expect("exit_rx should already have fired by the time terminate() returns");
     assert!(
-        !exit.status.map(|s| s.success()).unwrap_or(false),
+        !exit.status.is_some_and(|s| s.success()),
         "a forcibly-closed ping should not report a successful exit"
     );
 }
@@ -462,7 +472,7 @@ fn terminate_under_output_load_does_not_deadlock() {
     // lost tail, no stuck reader.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(()) => {}
-        Err(_) => panic!("reader never reached EOF after terminate"),
+        Err(e) => panic!("reader never reached EOF after terminate ({e})"),
     }
 }
 

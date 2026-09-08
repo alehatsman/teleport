@@ -36,7 +36,8 @@ fn spawn_sh(script: &str, cols: u16, rows: u16) -> (pty::SpawnedSession, Receive
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
+        #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn /bin/sh");
@@ -56,7 +57,8 @@ fn spawn_interactive_sh(cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver<
         cols,
         rows,
     };
-    let spawned = pty::spawn(spec, move |chunk| {
+    let spawned = pty::spawn(&spec, move |chunk| {
+        #[expect(clippy::let_underscore_must_use, reason = "the test's receiver may already be gone (session dropped, test moved on); nothing to do")]
         let _ = out_tx.send(chunk.to_vec());
     })
     .expect("spawn /bin/sh");
@@ -74,13 +76,12 @@ fn recv_until(
     let mut acc = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "timed out waiting for predicate; got {} bytes: {:?}",
-                acc.len(),
-                String::from_utf8_lossy(&acc)
-            );
-        }
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for predicate; got {} bytes: {:?}",
+            acc.len(),
+            String::from_utf8_lossy(&acc)
+        );
         match rx.recv_timeout(remaining) {
             Ok(chunk) => {
                 acc.extend_from_slice(&chunk);
@@ -88,8 +89,12 @@ fn recv_until(
                     return acc;
                 }
             }
-            Err(_) => panic!(
-                "output channel closed before predicate matched; got {} bytes: {:?}",
+            #[expect(
+                clippy::panic,
+                reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+            )]
+            Err(e) => panic!(
+                "output channel closed before predicate matched ({e}); got {} bytes: {:?}",
                 acc.len(),
                 String::from_utf8_lossy(&acc)
             ),
@@ -128,7 +133,9 @@ fn large_write_arrives_intact_and_in_order() {
     // 0x04, ...) instead of passing it through untouched.
     recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "READY"));
 
-    let payload: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+    let payload: Vec<u8> = (0..1024 * 1024)
+        .map(|i| u8::try_from(i % 256).expect("i % 256 is always in 0..256"))
+        .collect();
     spawned.session.write(&payload).unwrap();
 
     let got = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| acc.len() >= payload.len());
@@ -309,8 +316,13 @@ fn eof_and_exit_are_independent_signals() {
         .and_then(|s| s.parse().ok())
         .expect("should have parsed the detached grandchild's pid from output");
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
-    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "grandchild should still be alive right after exit_rx fired -- it should be mid-`sleep 2`, not gone already");
+    let rc = unsafe { libc::kill(pid, 0) };
+    assert_eq!(rc, 0, "grandchild should still be alive right after exit_rx fired -- it should be mid-`sleep 2`, not gone already");
 
     // EOF should arrive later, once the grandchild's sleep ends and it exits too.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {
@@ -321,7 +333,7 @@ fn eof_and_exit_are_independent_signals() {
                 "EOF arrived suspiciously early: {eof_latency:?}"
             );
         }
-        Err(_) => panic!("EOF never arrived within 5s of the grandchild's sleep ending"),
+        Err(e) => panic!("EOF never arrived within 5s of the grandchild's sleep ending ({e})"),
     }
 }
 
@@ -381,10 +393,14 @@ fn eof_follows_the_session_leaders_exit_even_with_a_live_grandchild() {
         "EOF should coincide with the session leader's exit on macOS, not lag it: {eof_latency:?}"
     );
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
+    let rc = unsafe { libc::kill(pid, 0) };
     assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        0,
+        rc, 0,
         "the grandchild must still be alive after EOF -- macOS revoked its pty \
          descriptor, it did not kill the process (docs/15-open-questions.md#s5)"
     );
@@ -413,7 +429,7 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
         .recv_timeout(Duration::from_secs(1))
         .expect("exit_rx should already have fired by the time terminate() returns");
     assert!(
-        !exit.status.map(|s| s.success()).unwrap_or(false),
+        !exit.status.is_some_and(|s| s.success()),
         "a signal-killed sleep should not report success"
     );
 }
@@ -445,7 +461,7 @@ fn terminate_under_output_load_does_not_deadlock() {
     // lost tail, no stuck reader.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(()) => {}
-        Err(_) => panic!("reader never reached EOF after terminate"),
+        Err(e) => panic!("reader never reached EOF after terminate ({e})"),
     }
 }
 
@@ -464,12 +480,13 @@ fn terminate_kills_the_grandchild_process_tree() {
         .and_then(|s| s.parse().ok())
         .expect("should have parsed the grandchild pid from output");
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
-    assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        0,
-        "grandchild should be alive before terminate"
-    );
+    let rc = unsafe { libc::kill(pid, 0) };
+    assert_eq!(rc, 0, "grandchild should be alive before terminate");
 
     spawned
         .session
@@ -478,18 +495,21 @@ fn terminate_kills_the_grandchild_process_tree() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
+        #[expect(
+            unsafe_code,
+            reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+        )]
         // SAFETY: same liveness probe.
         if unsafe { libc::kill(pid, 0) } == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
             return; // gone -- the whole tree was killed via killpg, not just the shell
         }
-        if Instant::now() > deadline {
-            panic!(
-                "grandchild pid {pid} was still alive {:?} after terminate",
-                deadline.elapsed()
-            );
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "grandchild pid {pid} was still alive {:?} after terminate",
+            deadline.elapsed()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }

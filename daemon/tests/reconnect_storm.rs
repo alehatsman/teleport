@@ -87,7 +87,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -123,7 +123,7 @@ fn spawn_hot_session(manager: &SessionManager) -> Arc<Session> {
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,
@@ -241,7 +241,7 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
             let session = Arc::clone(&session);
             tokio::spawn(async move {
                 let replay = session.attach(0).expect("storm client attach");
-                let (_acc, _attach, rounds) = support::catch_up_allow_clamp(replay).await;
+                let (_acc, _attach, rounds) = support::catch_up_allow_clamp(replay);
                 rounds
             })
         })

@@ -58,6 +58,10 @@ impl Session {
             (previous, lease.epoch)
         };
         if let Some((lost_by, _lost_name)) = previous {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "broadcast send; a failure here just means no one is currently listening for control-lease changes"
+            )]
             let _ = self.events.send(SessionEvent::ControlRevoked {
                 lost_by,
                 new_controller_id: client_id.to_string(),
@@ -112,6 +116,7 @@ impl Session {
         self.write(bytes).map_err(Some)
     }
 
+    /// Display name of the current controller, if there is one.
     pub fn controller_name(&self) -> Option<String> {
         self.control.lock().holder_name.clone()
     }

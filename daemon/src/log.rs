@@ -15,14 +15,14 @@
 //! reader loop requires **persist, then advance the offset, then fan out**, so
 //! the counter has to live behind the same call that does the write, or the
 //! ordering is an unenforced comment. `session.rs` holds an `OutputLog` inside
-//! its fan-out mutex and reads the start offset back out of [`append`].
+//! its fan-out mutex and reads the start offset back out of `append`.
 //!
 //! **Not in scope here:** bounded attach (`tail` / `max_replay_bytes`) is M4 --
 //! this module serves whatever byte range it is asked for, clamped only to
 //! what actually exists. Keeping the bound one layer up is what lets a VT
 //! state snapshot replace a byte range later without a protocol change
 //! (docs/04-api-protocol.md#the-vt-state-caveat--read-this-before-implementing).
-//! Recording [`LogEvent`]s in `session_events` is M7; [`append`] returns them
+//! Recording [`LogEvent`]s in `session_events` is M7; `append` returns them
 //! rather than writing them anywhere.
 //!
 //! **Nothing on the append path ever calls `fsync`.** The periodic sync
@@ -42,20 +42,28 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::warn;
 
+/// Filename every session's log is opened under, inside its own session
+/// directory (docs/05-persistence.md#layout).
 pub const LOG_FILE_NAME: &str = "output.vt";
 
 /// Defaults from docs/05-persistence.md#size-cap. `config.toml` does not
 /// exist yet; when it does, it overrides these rather than replacing them.
 pub const DEFAULT_LOG_WARN_BYTES: u64 = 256 * 1024 * 1024;
+/// See [`DEFAULT_LOG_WARN_BYTES`].
 pub const DEFAULT_LOG_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// Never `fsync` per chunk -- that couples PTY drain rate to disk latency
 /// (docs/05-persistence.md#output-log). Sync on this interval instead.
 pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Size/sync thresholds for one session's log (docs/05-persistence.md#size-cap).
 #[derive(Debug, Clone, Copy)]
 pub struct LogLimits {
+    /// Emit [`LogEvent::Warned`] once the log crosses this size.
     pub warn_bytes: u64,
+    /// Stop growing the file once the log reaches this size
+    /// ([`LogEvent::Capped`]); the offset stream keeps advancing regardless.
     pub max_bytes: u64,
+    /// How often the background syncer flushes this log's file.
     pub sync_interval: Duration,
 }
 
@@ -74,36 +82,52 @@ impl Default for LogLimits {
 /// fills it in, and until then every open is a fresh one.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StoredState {
+    /// The `output_bytes` column as SQLite last recorded it.
     pub output_bytes: u64,
+    /// The `log_capped_at` column as SQLite last recorded it.
     pub log_capped_at: Option<u64>,
 }
 
 /// Something worth a `session_events` row (M7) or an operator-visible log
-/// line. Returned rather than written, because [`append`] runs on the PTY
+/// line. Returned rather than written, because `append` runs on the PTY
 /// reader thread and nothing on that thread may touch SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogEvent {
     /// Crossed `log_warn_bytes`. Emitted once per log.
-    Warned { output_bytes: u64 },
+    Warned {
+        /// The log's total size at the moment it crossed the threshold.
+        output_bytes: u64,
+    },
     /// Hit `log_max_bytes`. The file stops growing here; `next_offset` keeps
     /// advancing and live streaming continues.
-    Capped { at: u64 },
+    Capped {
+        /// The offset the file was capped at.
+        at: u64,
+    },
     /// A write or sync failed. Persistence stops; the session keeps running
     /// (docs/05-persistence.md: `lost_reason='io_error'` is the one reason
     /// that can be set while the child is still alive).
-    IoError { at: u64, error: String },
+    IoError {
+        /// The offset the write/sync was attempted at.
+        at: u64,
+        /// The `io::Error`'s display text.
+        error: String,
+    },
 }
 
 /// The result of one append. `start` is the offset of the chunk's first byte
 /// -- the value the subscriber fan-out tags the chunk with.
 #[derive(Debug)]
 pub struct Appended {
+    /// Offset of the chunk's first byte.
     pub start: u64,
+    /// Anything worth recording that this append triggered.
     pub events: Vec<LogEvent>,
 }
 
 /// The append side of one session's log. Single-writer by construction:
 /// `session.rs` keeps it inside the mutex the reader loop takes.
+#[derive(Debug)]
 pub struct OutputLog {
     path: PathBuf,
     /// Shared with every [`SyncHandle`] handed out for this log, so the
@@ -182,10 +206,15 @@ impl OutputLog {
             // Fill the budget exactly, then stop: `log_capped_at` is always
             // `max_bytes` for a log that got there by growing.
             let room = self.limits.max_bytes.saturating_sub(self.file_len);
-            let fits = room.min(bytes.len() as u64) as usize;
+            // `usize::MAX` as the fallback, not 0: room clamped that high
+            // means "no meaningful cap on a machine with a smaller usize",
+            // so the `.min(bytes.len())` right after is the only bound that
+            // actually applies.
+            let room = usize::try_from(room).unwrap_or(usize::MAX);
+            let fits = room.min(bytes.len());
 
             if fits > 0 {
-                match (&*self.file).write_all(&bytes[..fits]) {
+                match (&*self.file).write_all(bytes.get(..fits).unwrap_or(&[])) {
                     Ok(()) => self.file_len += fits as u64,
                     Err(e) => self.fail(&mut events, &e),
                 }
@@ -232,6 +261,7 @@ impl OutputLog {
         self.file_len
     }
 
+    /// This log's `output.vt` path.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -274,17 +304,19 @@ impl OutputLog {
 /// A second reference to a log's open file, used only to `fsync` it. Exists
 /// so the flush never happens on the PTY reader thread or under the fan-out
 /// mutex (docs/05-persistence.md#output-log).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SyncHandle {
     file: Arc<File>,
     path: PathBuf,
 }
 
 impl SyncHandle {
+    /// `fsync`s the underlying file.
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_data()
     }
 
+    /// This log's `output.vt` path.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -298,12 +330,15 @@ impl SyncHandle {
 /// per-session thread budget is already spent on the four `pty.rs` needs.
 /// Registrations are `Weak`, so a log whose session is gone is pruned on the
 /// next tick rather than kept alive by the syncer.
+#[derive(Debug)]
 pub struct LogSyncer {
     tx: Option<Sender<(Weak<File>, PathBuf)>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl LogSyncer {
+    /// Starts the syncer thread, flushing every registered log every
+    /// `interval`.
     pub fn new(interval: Duration) -> Self {
         let (tx, rx) = mpsc::channel::<(Weak<File>, PathBuf)>();
         let thread = std::thread::Builder::new()
@@ -340,6 +375,10 @@ impl LogSyncer {
     /// `SyncHandle` and `OutputLog` for that file unregisters it.
     pub fn register(&self, handle: &SyncHandle) {
         if let Some(tx) = &self.tx {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the syncer thread is gone (daemon shutting down) if this fails; there's nothing left to register the file with"
+            )]
             let _ = tx.send((Arc::downgrade(&handle.file), handle.path.clone()));
         }
     }
@@ -351,6 +390,10 @@ impl Drop for LogSyncer {
     fn drop(&mut self) {
         self.tx = None;
         if let Some(thread) = self.thread.take() {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "joining our own sync thread in Drop; a panicked thread's result can't be propagated from here anyway"
+            )]
             let _ = thread.join();
         }
     }
@@ -369,11 +412,14 @@ fn sync_all(registered: &mut Vec<(Weak<File>, PathBuf)>) {
 }
 
 /// The read side. Cheap to create, one per replay.
+#[derive(Debug)]
 pub struct LogReader {
     file: File,
 }
 
 impl LogReader {
+    /// Opens `path` for reading. Independent of any writer -- see the
+    /// struct doc.
     pub fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             file: File::open(path)?,
@@ -394,7 +440,12 @@ impl LogReader {
         self.file.seek(SeekFrom::Start(from))?;
         // `len` is now bounded by the file size, so this cannot truncate on a
         // 32-bit target the way the requested range could.
-        let mut buf = Vec::with_capacity(len as usize);
+        // `with_capacity` allocates eagerly, so the fallback on truncation
+        // is 0, not `usize::MAX` -- an under-sized capacity just costs a
+        // reallocation later; an oversized one is an instant abort. `len` is
+        // bounded by the file size in practice (see above), so this never
+        // actually fires.
+        let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
         Read::by_ref(&mut self.file)
             .take(len)
             .read_to_end(&mut buf)?;
@@ -428,7 +479,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
         dir
     }
 
@@ -476,7 +531,7 @@ mod tests {
 
         // The invariant still holds, which is the whole point of setting the
         // cap: file_length == min(next_offset, log_capped_at).
-        let on_disk = std::fs::metadata(log.path()).unwrap().len();
+        let on_disk = fs::metadata(log.path()).unwrap().len();
         assert_eq!(on_disk, log.next_offset().min(log.log_capped_at().unwrap()));
 
         // And it is sticky: a later append neither retries nor re-reports.
@@ -492,7 +547,11 @@ mod tests {
             "the cap must not move to the new offset"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `LogSyncer` flushes registered logs off the caller's thread and stops
@@ -507,7 +566,7 @@ mod tests {
         log.append(b"flush me");
 
         std::thread::sleep(Duration::from_millis(80));
-        assert_eq!(std::fs::read(log.path()).unwrap(), b"flush me");
+        assert_eq!(fs::read(log.path()).unwrap(), b"flush me");
 
         // Dropping the log drops the last strong `Arc<File>`, so the syncer's
         // `Weak` stops upgrading and the entry is pruned. Nothing to assert
@@ -517,6 +576,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         drop(syncer);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
     }
 }

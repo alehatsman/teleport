@@ -90,7 +90,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -125,7 +125,7 @@ fn spawn_backlog_then_trickle(
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,

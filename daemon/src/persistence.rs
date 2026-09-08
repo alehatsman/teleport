@@ -79,26 +79,45 @@ use crate::now_ms;
 /// nothing downstream should touch the JSON encoding directly.
 #[derive(Debug, Clone)]
 pub struct SessionRow {
+    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
     pub id: String,
+    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
+    /// not interpreted here.
     pub kind: String,
+    /// Preset this session was created from, if any.
     pub preset: Option<String>,
+    /// The program that was spawned.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     pub args: Vec<String>,
+    /// Working directory the program was spawned in.
     pub cwd: String,
+    /// `"running"`, `"closing"`, `"exited"`, or `"lost"`
+    /// (docs/05-persistence.md#schema).
     pub state: String,
+    /// OS pid, when the platform reported one.
     pub pid: Option<u32>,
+    /// PTY size at last resize, or at creation if never resized.
     pub cols: u16,
+    /// PTY size at last resize, or at creation if never resized.
     pub rows: u16,
+    /// Bytes written to `output.vt` so far.
     pub output_bytes: u64,
+    /// Byte offset the log was capped at, if it hit its size cap.
     pub log_capped_at: Option<u64>,
+    /// Row-insert time, ms since epoch.
     pub created_at_ms: i64,
+    /// `== created_at_ms` (docs/05-persistence.md: no separate `started` write).
     pub started_at_ms: Option<i64>,
+    /// When the session reached `exited`/`lost`, ms since epoch.
     pub exited_at_ms: Option<i64>,
+    /// Process exit code, if it exited cleanly.
     pub exit_code: Option<i32>,
+    /// Why this row is `lost` rather than a clean `exited`, if it is.
     pub lost_reason: Option<String>,
 }
 
-fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
+fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let argv_json: String = row.get("argv_json")?;
     let args: Vec<String> = serde_json::from_str(&argv_json).unwrap_or_default();
     Ok(SessionRow {
@@ -109,13 +128,23 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         args,
         cwd: row.get("cwd")?,
         state: row.get("state")?,
-        pid: row.get::<_, Option<i64>>("pid")?.map(|v| v as u32),
-        cols: row.get::<_, i64>("cols")? as u16,
-        rows: row.get::<_, i64>("rows")? as u16,
-        output_bytes: row.get::<_, i64>("output_bytes")? as u64,
+        // A cols/rows/pid column out of its type's range only happens to a
+        // hand-edited or corrupted database -- SQLite has no native u16/u32,
+        // so every write here goes through `i64` regardless. `pid` degrades
+        // to "we don't actually know" (`None`, same as a platform that never
+        // reported one); `cols`/`rows` saturate, since a display value has
+        // no "unknown" to fall back to.
+        pid: row
+            .get::<_, Option<i64>>("pid")?
+            .and_then(|v| u32::try_from(v).ok()),
+        cols: u16::try_from(row.get::<_, i64>("cols")?).unwrap_or(u16::MAX),
+        rows: u16::try_from(row.get::<_, i64>("rows")?).unwrap_or(u16::MAX),
+        // Negative here means a corrupted row (byte counts are never
+        // written negative); 0 is the honest "nothing recorded" fallback.
+        output_bytes: u64::try_from(row.get::<_, i64>("output_bytes")?).unwrap_or(0),
         log_capped_at: row
             .get::<_, Option<i64>>("log_capped_at")?
-            .map(|v| v as u64),
+            .map(|v| u64::try_from(v).unwrap_or(0)),
         created_at_ms: row.get("created_at_ms")?,
         started_at_ms: row.get("started_at_ms")?,
         exited_at_ms: row.get("exited_at_ms")?,
@@ -131,15 +160,26 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
 /// module doc on why there is no separate `started` write).
 #[derive(Debug, Clone)]
 pub struct NewSessionRow {
+    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
     pub id: String,
+    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
+    /// not interpreted here.
     pub kind: String,
+    /// Preset this session was created from, if any.
     pub preset: Option<String>,
+    /// The program being spawned.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     pub args: Vec<String>,
+    /// Working directory the program is spawned in.
     pub cwd: String,
+    /// OS pid, when the platform reports one.
     pub pid: Option<u32>,
+    /// PTY size at creation.
     pub cols: u16,
+    /// PTY size at creation.
     pub rows: u16,
+    /// Row-insert time, ms since epoch; also used as `started_at_ms`.
     pub created_at_ms: i64,
 }
 
@@ -202,7 +242,7 @@ enum Command {
 }
 
 /// A cheap, `Clone`-able handle to the writer actor's command channel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Db {
     tx: mpsc::Sender<Command>,
 }
@@ -230,12 +270,16 @@ impl Db {
         let (tx, rx) = mpsc::channel(256);
         std::thread::Builder::new()
             .name("db-writer".into())
-            .spawn(move || writer_loop(conn, rx))
+            .spawn(move || writer_loop(&conn, rx))
             .context("spawning db-writer thread")?;
 
         Ok((Db { tx }, summary))
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "SendError/RecvError carry no diagnostic beyond \"the other end is gone\", which the replacement message already says"
+    )]
     fn call_blocking<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
@@ -249,6 +293,10 @@ impl Db {
             .map_err(|_| anyhow!("db-writer thread dropped the reply"))?
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "same as call_blocking: SendError/RecvError add nothing beyond \"the other end is gone\""
+    )]
     async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command) -> Result<T>
     where
         T: Send,
@@ -285,8 +333,7 @@ impl Db {
     /// `state='exited'` (docs/05-persistence.md: `lost_reason` can be set
     /// here too, for `spawn_failed`/`kill_timeout`/`wait_error`, but `state`
     /// only becomes `'lost'` via restart recovery, never from a live
-    /// process -- see [`recover`]).
-    #[allow(clippy::too_many_arguments)]
+    /// process -- see `recover`).
     pub fn mark_exited_blocking(
         &self,
         id: &str,
@@ -305,6 +352,8 @@ impl Db {
         })
     }
 
+    /// Blocking counterpart to [`Db::delete_session`], for a caller already
+    /// on a blocking-pool thread.
     pub fn delete_session_blocking(&self, id: &str) -> Result<()> {
         self.call_blocking(|reply| Command::Delete {
             id: id.to_string(),
@@ -333,6 +382,9 @@ impl Db {
         }
     }
 
+    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: a resize is
+    /// a user action, not the hot path, but there is still no reason to make
+    /// the caller wait on disk for it.
     pub fn note_size(&self, id: &str, cols: u16, rows: u16) {
         if self
             .tx
@@ -350,6 +402,8 @@ impl Db {
         }
     }
 
+    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: records a
+    /// `session_events` row (D3, docs/04-api-protocol.md#get-apiv1sessions).
     pub fn note_event(&self, id: &str, event_type: &'static str) {
         if self
             .tx
@@ -383,6 +437,8 @@ impl Db {
         self.call(|reply| Command::List { reply }).await
     }
 
+    /// Removes the row outright (`api.rs`'s `?purge=true` path). Async
+    /// counterpart to [`Db::delete_session_blocking`].
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         self.call(|reply| Command::Delete {
             id: id.to_string(),
@@ -391,6 +447,8 @@ impl Db {
         .await
     }
 
+    /// Rows GC may reclaim: terminal (`exited`/`lost`) and older than
+    /// `older_than_ms` (docs/05-persistence.md#garbage-collection).
     pub async fn gc_candidates(&self, older_than_ms: i64) -> Result<Vec<SessionRow>> {
         self.call(|reply| Command::GcCandidates {
             older_than_ms,
@@ -406,7 +464,7 @@ impl Db {
 /// No migration framework, no external tool.
 const MIGRATIONS: &[&str] = &[SCHEMA_V1];
 
-const SCHEMA_V1: &str = r#"
+const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
     id              TEXT PRIMARY KEY,
     kind            TEXT NOT NULL,
@@ -442,16 +500,23 @@ CREATE TABLE IF NOT EXISTS session_events (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, event_id);
-"#;
+";
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let current = current.max(0) as usize;
+    // SQLite's `user_version` is a 32-bit signed field by definition, so this
+    // always fits `usize` -- `usize::MAX` on the (impossible) alternative
+    // just means `.skip()` below runs no migrations, not a panic.
+    let current = usize::try_from(current.max(0)).unwrap_or(usize::MAX);
     for migration in MIGRATIONS.iter().skip(current) {
         conn.execute_batch(migration)?;
     }
     if MIGRATIONS.len() > current {
-        conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
+        conn.pragma_update(
+            None,
+            "user_version",
+            i64::try_from(MIGRATIONS.len()).expect("a handful of migrations, not billions"),
+        )?;
     }
     Ok(())
 }
@@ -499,9 +564,12 @@ fn recover(conn: &Connection, sessions_root: &Path) -> Result<RecoverySummary> {
         let Ok(meta) = std::fs::metadata(&log_path) else {
             continue;
         };
+        // Saturating, not truncating: a file over i64::MAX bytes is not a
+        // realistic case to under-record instead of over-record.
+        let recovered_len = i64::try_from(meta.len()).unwrap_or(i64::MAX);
         conn.execute(
             "UPDATE sessions SET output_bytes = MAX(output_bytes, ?1) WHERE id = ?2",
-            params![meta.len() as i64, id],
+            params![recovered_len, id],
         )?;
     }
 
@@ -525,9 +593,9 @@ fn insert_session(conn: &Connection, row: &NewSessionRow) -> Result<()> {
             row.command,
             argv_json,
             row.cwd,
-            row.pid.map(|p| p as i64),
-            row.cols as i64,
-            row.rows as i64,
+            row.pid.map(i64::from),
+            i64::from(row.cols),
+            i64::from(row.rows),
             row.created_at_ms,
         ],
     )?;
@@ -554,11 +622,14 @@ fn mark_exited(
     lost_reason: Option<&str>,
     output_bytes: u64,
 ) -> Result<()> {
+    // Saturating, not truncating: a session over i64::MAX bytes of output is
+    // not a realistic case to under-record instead of over-record.
+    let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
     let updated = conn.execute(
         "UPDATE sessions
          SET state = 'exited', exited_at_ms = ?1, exit_code = ?2, lost_reason = ?3, output_bytes = ?4
          WHERE id = ?5",
-        params![exited_at_ms, exit_code, lost_reason, output_bytes as i64, id],
+        params![exited_at_ms, exit_code, lost_reason, output_bytes, id],
     )?;
     if updated == 0 {
         // The row is already gone -- a concurrent `?purge=true` (`api.rs`'s
@@ -620,29 +691,35 @@ fn gc_candidates(conn: &Connection, older_than_ms: i64) -> Result<Vec<SessionRow
     Ok(rows)
 }
 
-fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Command>) {
+fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Insert(row, reply) => {
-                let _ = reply.send(insert_session(&conn, &row));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(insert_session(conn, &row));
             }
             Command::MarkClosing { id, reply } => {
-                let _ = reply.send(mark_closing(&conn, &id));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(mark_closing(conn, &id));
             }
             Command::MarkExited { id, exited_at_ms, exit_code, lost_reason, output_bytes, reply } => {
-                let _ = reply.send(mark_exited(&conn, &id, exited_at_ms, exit_code, lost_reason, output_bytes));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(mark_exited(conn, &id, exited_at_ms, exit_code, lost_reason, output_bytes));
             }
             Command::NoteOutputBytes { id, output_bytes } => {
-                if let Err(e) =
-                    conn.execute("UPDATE sessions SET output_bytes = ?1 WHERE id = ?2", params![output_bytes as i64, id])
-                {
+                // Saturating, not truncating: see mark_exited's identical cast.
+                let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
+                if let Err(e) = conn.execute(
+                    "UPDATE sessions SET output_bytes = ?1 WHERE id = ?2",
+                    params![output_bytes, id],
+                ) {
                     warn!(session_id = id, error = %e, "persisting output_bytes failed");
                 }
             }
             Command::NoteSize { id, cols, rows } => {
                 if let Err(e) = conn.execute(
                     "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
-                    params![cols as i64, rows as i64, id],
+                    params![i64::from(cols), i64::from(rows), id],
                 ) {
                     warn!(session_id = id, error = %e, "persisting cols/rows failed");
                 }
@@ -656,16 +733,20 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Command>) {
                 }
             }
             Command::Delete { id, reply } => {
-                let _ = reply.send(delete_session(&conn, &id));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(delete_session(conn, &id));
             }
             Command::Get { id, reply } => {
-                let _ = reply.send(get_session(&conn, &id));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(get_session(conn, &id));
             }
             Command::List { reply } => {
-                let _ = reply.send(list_sessions(&conn));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(list_sessions(conn));
             }
             Command::GcCandidates { older_than_ms, reply } => {
-                let _ = reply.send(gc_candidates(&conn, older_than_ms));
+                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                let _ = reply.send(gc_candidates(conn, older_than_ms));
             }
         }
     }
@@ -763,6 +844,10 @@ mod tests {
         assert_eq!(fetched.state, "running");
         assert_eq!(fetched.args, row.args);
         assert_eq!(fetched.started_at_ms, Some(row.created_at_ms));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -792,6 +877,10 @@ mod tests {
         assert_eq!(row.state, "lost");
         assert_eq!(row.lost_reason.as_deref(), Some("daemon_restart"));
         assert_eq!(row.output_bytes, "hello world".len() as u64);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -832,6 +921,10 @@ mod tests {
             row.output_bytes, 1000,
             "the column must not rewind below what clients already hold"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -847,6 +940,10 @@ mod tests {
         assert_eq!(row.state, "exited");
         assert_eq!(row.exit_code, Some(0));
         assert_eq!(row.output_bytes, 123);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -859,6 +956,10 @@ mod tests {
         db.delete_session("s1").await.unwrap();
 
         assert!(db.get_session("s1").await.unwrap().is_none());
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -875,6 +976,10 @@ mod tests {
         let candidates = db.gc_candidates(now_ms() - 1_000).await.unwrap();
         let ids: Vec<&str> = candidates.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["old"]);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -885,6 +990,10 @@ mod tests {
         let sessions_root = dir.join("sessions");
         Db::open(&db_path, &sessions_root).unwrap();
         Db::open(&db_path, &sessions_root).unwrap();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

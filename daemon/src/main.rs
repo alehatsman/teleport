@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     // script can capture it cleanly.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.log_level))
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     if !cli.listen.ip().is_loopback() {
@@ -353,7 +353,7 @@ fn spawn_gc_task(
     live: teleportd::session::LiveSessions,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        let mut interval = tokio::time::interval(Duration::from_hours(6));
         loop {
             interval.tick().await;
             run_gc_pass(&db, &sessions_root, retain_days, &live).await;
@@ -370,13 +370,18 @@ fn spawn_gc_task(
 /// instead.
 const MAX_RETAIN_DAYS: u64 = 365 * 100;
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "one GC pass, several independent cleanup steps (rows, directories, live-session sweep) that each need their own error handling; splitting them out is a deliberate follow-up"
+)]
 async fn run_gc_pass(
     db: &teleportd::persistence::Db,
     sessions_root: &Path,
     retain_days: u64,
     live: &teleportd::session::LiveSessions,
 ) {
-    let retain_days = retain_days.min(MAX_RETAIN_DAYS) as i64;
+    let retain_days = i64::try_from(retain_days.min(MAX_RETAIN_DAYS))
+        .expect("MAX_RETAIN_DAYS (36,500) bounds this to a tiny number");
     let cutoff_ms = now_ms() - retain_days * 24 * 60 * 60 * 1000;
     let candidates = match db.gc_candidates(cutoff_ms).await {
         Ok(rows) => rows,
@@ -429,6 +434,10 @@ async fn run_gc_pass(
 /// case (`api.rs`'s `shutdown` handler doc comment has the full reasoning).
 async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     let ctrl_c = async {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "either outcome means give up waiting on ctrl_c; treating an install error as \"fired\" is the safe default for a shutdown trigger"
+        )]
         let _ = tokio::signal::ctrl_c().await;
     };
 
@@ -441,7 +450,7 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
             }
             Err(e) => {
                 warn!(error = %e, "failed to install SIGTERM handler");
-                std::future::pending::<()>().await
+                std::future::pending::<()>().await;
             }
         }
     };
@@ -449,9 +458,9 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-        _ = shutdown_trigger.notified() => {}
+        () = ctrl_c => {}
+        () = terminate => {}
+        () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
 }

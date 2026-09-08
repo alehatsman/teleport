@@ -32,7 +32,7 @@ fn shutdown_request(
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    builder.body(Body::empty()).unwrap()
+    builder.body(Body::empty()).expect("valid request")
 }
 
 #[tokio::test]
@@ -209,16 +209,18 @@ fn post_shutdown_stops_the_real_daemon_process() {
     // reasoning as pty_primitive*.rs's terminate fixtures.
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => break status,
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    panic!("teleportd did not exit within 10s of POST /api/v1/shutdown");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
         }
+        if Instant::now() >= deadline {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+            )]
+            let _ = child.kill();
+            panic!("teleportd did not exit within 10s of POST /api/v1/shutdown");
+        }
+        std::thread::sleep(Duration::from_millis(50));
     };
     assert!(
         status.success(),
@@ -233,5 +235,9 @@ fn post_shutdown_stops_the_real_daemon_process() {
         "the port file should be removed on clean shutdown"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }

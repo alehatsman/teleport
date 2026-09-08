@@ -37,13 +37,20 @@ pub enum Principal {
     /// Presented a valid bearer token issued to a specific device. Not
     /// distinguished from `LocalUser` yet -- stage 1 has one token, not one
     /// per device -- but the variant exists so the shape is already right.
-    #[allow(dead_code)]
-    DeviceToken { token_id: String },
+    DeviceToken {
+        /// The device the presented token was issued to.
+        token_id: String,
+    },
     /// Stage 3, established by the cloud backend. Unreachable in the MVP.
-    #[allow(dead_code)]
-    Account { user_id: String, device_id: String },
+    Account {
+        /// The authenticated cloud account.
+        user_id: String,
+        /// The specific device within that account.
+        device_id: String,
+    },
 }
 
+/// Why [`resolve`]/[`resolve_ws`] refused a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     /// Maps to the `unauthorized` error code / `401`
@@ -92,7 +99,6 @@ pub fn resolve(
 /// recent, separately-authenticated `POST /api/v1/ws-ticket` call, so there
 /// is nothing left for the disabled-auth escape hatch to add
 /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_ws(
     store: &TicketStore,
     session_id: SessionId,
@@ -122,6 +128,7 @@ pub const TICKET_TTL: Duration = Duration::from_secs(30);
 /// stands in for).
 const TICKET_BYTES: usize = 16;
 
+#[derive(Debug)]
 struct Ticket {
     session_id: SessionId,
     expires_at: Instant,
@@ -130,6 +137,7 @@ struct Ticket {
 /// In-memory, single-use tickets for the WS upgrade. Never persisted --
 /// restarting the daemon invalidates every outstanding ticket, which is
 /// correct: nothing durable should ever depend on a 30-second credential.
+#[derive(Debug)]
 pub struct TicketStore {
     tickets: parking_lot::Mutex<HashMap<String, Ticket>>,
 }
@@ -141,6 +149,7 @@ impl Default for TicketStore {
 }
 
 impl TicketStore {
+    /// An empty store.
     pub fn new() -> Self {
         Self {
             tickets: parking_lot::Mutex::new(HashMap::new()),
@@ -479,7 +488,7 @@ mod tests {
         let ticket = store.issue(session).unwrap();
         // Backdate it past its TTL directly rather than sleeping 30s in a test.
         store.tickets.lock().get_mut(&ticket).unwrap().expires_at =
-            Instant::now() - Duration::from_secs(1);
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
 
         assert!(!store.redeem(&ticket, session));
     }

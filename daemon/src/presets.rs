@@ -14,15 +14,20 @@ use serde::{Deserialize, Serialize};
 /// returns verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
+    /// Stable identifier, referenced by `POST /api/v1/sessions`'s `preset`
+    /// field.
     pub id: String,
+    /// Display label for the UI.
     pub label: String,
     /// May be the literal `"$SHELL"` (Unix) placeholder -- see
     /// [`Preset::resolved_command`]. Stored as written; expansion happens at
     /// use time, not load time, so a login shell change takes effect on the
     /// next session without editing `presets.toml`.
     pub command: String,
+    /// `command`'s argv, not including `command` itself.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Icon name for the UI; not interpreted here.
     pub icon: String,
 }
 
@@ -162,6 +167,10 @@ mod tests {
         let reloaded = load_or_create(&dir).expect("reload");
         assert_eq!(reloaded.len(), 3);
         assert_eq!(reloaded[0].id, presets[0].id);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -169,7 +178,11 @@ mod tests {
     fn a_malformed_file_is_a_clean_error_not_a_silent_overwrite() {
         let dir = scratch_dir("malformed");
         fs::write(dir.join("presets.toml"), "not valid toml {{{").unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -196,7 +209,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -215,7 +232,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 

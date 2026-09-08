@@ -10,7 +10,7 @@ use std::path::Path;
 /// Reads `<data_dir>/cli-identity`, or generates and persists a fresh ULID
 /// if it doesn't exist yet. Not sensitive -- no `0600` restriction needed,
 /// unlike `connect.rs`'s token handling.
-pub fn client_id(data_dir: &Path) -> String {
+pub(crate) fn client_id(data_dir: &Path) -> String {
     let path = data_dir.join("cli-identity");
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
@@ -22,7 +22,15 @@ pub fn client_id(data_dir: &Path) -> String {
     // Best-effort: a write failure (read-only data dir, race with another
     // `teleport` invocation) just means this run gets an id nobody
     // persisted -- the next run tries again. Not fatal to attaching now.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort persist; the next run just tries again"
+    )]
     let _ = std::fs::create_dir_all(data_dir);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort persist; the next run just tries again"
+    )]
     let _ = std::fs::write(&path, &id);
     id
 }
@@ -32,7 +40,7 @@ pub fn client_id(data_dir: &Path) -> String {
 /// browser's user-agent string -- the closest CLI equivalent of "who is
 /// this". No new dependency for hostname lookup; the username env var is
 /// enough to be recognizable in the controller label.
-pub fn default_client_name() -> String {
+pub(crate) fn default_client_name() -> String {
     default_client_name_from(std::env::var("USER").ok(), std::env::var("USERNAME").ok())
 }
 

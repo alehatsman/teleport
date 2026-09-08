@@ -21,7 +21,7 @@ use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId, 
 /// Server sends a `Ping` on this cadence (docs/04-api-protocol.md#keepalive-and-reconnection).
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// Closes the connection if no `Pong` arrives within this long.
-const PONG_TIMEOUT: Duration = Duration::from_secs(60);
+const PONG_TIMEOUT: Duration = Duration::from_mins(1);
 /// Once `exited` fires, how long to wait for the reader thread to also
 /// reach EOF before finalizing the `exit` frame anyway. The reaper thread's
 /// `wait()` can return before the reader's next `read()` does (S1/S3 spike:
@@ -34,6 +34,8 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(60);
 /// not hang on that.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+/// Query params on `GET /api/v1/sessions/{id}/stream`
+/// (docs/04-api-protocol.md#websocket-protocol).
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
     after: Option<u64>,
@@ -62,7 +64,7 @@ enum StreamMode {
 
 /// The route handler: validates the upgrade (Origin/Host, credential,
 /// session existence, mutually-exclusive `after`/`tail`) and, only once all
-/// of that holds, upgrades and hands off to [`run`]. Everything before the
+/// of that holds, upgrades and hands off to `run`. Everything before the
 /// upgrade can still return an ordinary HTTP error response; nothing after
 /// it can, which is exactly why these checks come first.
 ///
@@ -158,20 +160,24 @@ fn bound_attach(
     max_replay_bytes: u64,
     next_offset: u64,
 ) -> (u64, bool) {
-    match after {
-        Some(after) => {
-            let earliest = next_offset.saturating_sub(max_replay_bytes);
-            let from = after.max(earliest);
-            (from, from > after)
-        }
-        None => {
-            let tail = tail.unwrap_or(default_tail).min(max_replay_bytes);
-            (next_offset.saturating_sub(tail), false)
-        }
+    if let Some(after) = after {
+        let earliest = next_offset.saturating_sub(max_replay_bytes);
+        let from = after.max(earliest);
+        (from, from > after)
+    } else {
+        let tail = tail.unwrap_or(default_tail).min(max_replay_bytes);
+        (next_offset.saturating_sub(tail), false)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one per attach-query param plus server-side replay/grace config; a params struct would just move the list, not shrink it"
+)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "this is the connection's tokio::select! event loop -- every branch is one frame/timer/channel it reacts to; splitting the match arms out would trade one big function for several that only make sense read together"
+)]
 async fn run(
     mut socket: WebSocket,
     session: Arc<Session>,
@@ -201,11 +207,19 @@ async fn run(
                 &json!({ "type": "error", "code": "offset_ahead", "next_offset": next_offset }),
             )
             .await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1008, "offset_ahead")).await;
             return;
         }
         Err(e) => {
             tracing::warn!(session_id = %session.id, error = %e, "opening replay");
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1011, "internal error")).await;
             return;
         }
@@ -298,21 +312,19 @@ async fn run(
 
         tokio::select! {
             chunk = subscription.recv() => {
-                match chunk {
-                    Some(chunk) => {
-                        if send_binary(&mut socket, chunk.offset, &chunk.bytes).await.is_err() {
-                            break;
-                        }
+                if let Some(chunk) = chunk {
+                    if send_binary(&mut socket, chunk.offset, &chunk.bytes).await.is_err() {
+                        break;
                     }
+                } else {
                     // The only way a subscriber slot disappears while this
                     // task still holds its own `Arc<Session>` (keeping the
                     // fan-out alive) is `Fanout::publish`'s backpressure
                     // eviction -- this is the slow-consumer signal
                     // (docs/04-api-protocol.md#error-codes).
-                    None => {
-                        let _ = socket.send(close(1013, "slow_consumer")).await;
-                        break;
-                    }
+                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
+                    let _ = socket.send(close(1013, "slow_consumer")).await;
+                    break;
                 }
             }
 
@@ -342,7 +354,7 @@ async fn run(
             // The reader never caught up within the grace window (e.g. a
             // grandchild still holds the pty open, S2) -- finalize with
             // whatever has actually been drained rather than hang.
-            _ = grace, if exit_deadline.is_some() => {
+            () = grace, if exit_deadline.is_some() => {
                 finalize_exit(&session, &mut subscription, &mut socket).await;
                 break;
             }
@@ -361,14 +373,19 @@ async fn run(
                     // A lagged receiver only means a missed notification --
                     // every subsequent control/resize check re-reads
                     // authoritative state (`is_controller`, `size`), so
-                    // there is nothing to resync here.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    // there is nothing to resync here. A closed sender is
+                    // the session tearing down; the next loop iteration's
+                    // other branches notice and exit.
+                    Err(
+                        tokio::sync::broadcast::error::RecvError::Lagged(_)
+                        | tokio::sync::broadcast::error::RecvError::Closed,
+                    ) => {}
                 }
             }
 
             _ = ping_interval.tick() => {
                 if last_pong.elapsed() > PONG_TIMEOUT {
+                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
                     let _ = socket.send(close(1001, "ping timeout")).await;
                     break;
                 }
@@ -520,6 +537,10 @@ async fn finalize_exit(session: &Session, subscription: &mut Subscription, socke
         "final_offset": session.next_offset(),
     });
     send_json(socket, &exit).await;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+    )]
     let _ = socket.send(close(1000, "session exited")).await;
 }
 
@@ -539,6 +560,10 @@ async fn replay_round_or_close(
         Ok(step) => Some(step),
         Err(e) => {
             tracing::warn!(session_id = %session_id, error = %e, "replay round failed");
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
+            )]
             let _ = socket.send(close(1011, "internal error")).await;
             None
         }

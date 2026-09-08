@@ -29,7 +29,7 @@ fn sessions_root(name: &str) -> PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before 1970")
             .as_nanos()
     ))
 }
@@ -54,7 +54,7 @@ async fn zero_subscribers_session_survives() {
     let cwd = temp_dir();
     let args = vec![];
     let session = manager
-        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
 
     session
@@ -75,7 +75,7 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
     let cwd = temp_dir();
     let args = vec!["-c".to_string(), "sleep 30".to_string()];
     let session = manager
-        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
 
     // Runs on its own thread, not this test's async task, so a write that
@@ -112,7 +112,7 @@ async fn terminate_leaves_the_session_listed_until_purged() {
     let cwd = temp_dir();
     let args = vec![];
     let session = manager
-        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
     let id = session.id;
 
@@ -166,7 +166,7 @@ fn concurrent_creates_never_exceed_max_sessions() {
             let cwd = cwd.clone();
             std::thread::spawn(move || {
                 let args = vec!["-c".to_string(), "sleep 2".to_string()];
-                manager.create(spec(&args, 80, 24, &cwd), "shell", None)
+                manager.create(&spec(&args, 80, 24, &cwd), "shell", None)
             })
         })
         .collect();
@@ -175,7 +175,7 @@ fn concurrent_creates_never_exceed_max_sessions() {
         .into_iter()
         .map(|h| h.join().expect("creator thread panicked"))
         .collect();
-    let succeeded: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
+    let succeeded: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
     assert_eq!(
         succeeded.len(),
         3,
@@ -183,6 +183,10 @@ fn concurrent_creates_never_exceed_max_sessions() {
     );
 
     for session in succeeded {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort teardown; the process is exiting either way"
+        )]
         let _ = session.terminate();
     }
 }
@@ -206,7 +210,7 @@ async fn subscriber_receives_output_in_order() {
     let cwd = temp_dir();
     let args = vec![];
     let session = manager
-        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
 
     let mut sub = session.subscribe();
@@ -274,7 +278,7 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
         format!("stty raw -echo; yes | head -c {N}"),
     ];
     let session = manager
-        .create(spec(&args, 80, 24, &cwd), "shell", None)
+        .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
 
     let slow = session.subscribe(); // never read from this one.

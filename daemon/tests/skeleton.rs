@@ -19,6 +19,10 @@ fn temp_dir(name: &str) -> PathBuf {
         std::process::id(),
         ulid_like()
     ));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -27,7 +31,7 @@ fn temp_dir(name: &str) -> PathBuf {
 fn ulid_like() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before 1970")
         .as_nanos()
 }
 
@@ -48,7 +52,15 @@ struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.kill();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.wait();
     }
 }
@@ -114,6 +126,10 @@ fn first_run_creates_expected_files_and_prints_url() {
         assert_eq!(mode(&data_dir.join("token")), 0o600);
     }
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
@@ -155,6 +171,10 @@ fn device_id_and_token_survive_a_restart() {
     );
     assert_eq!(token1, token2, "token must not change across restarts");
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
@@ -197,6 +217,10 @@ fn falls_back_to_an_ephemeral_port_when_the_configured_one_is_taken() {
     drop(holder);
     child.0.kill().unwrap();
     child.0.wait().unwrap();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
@@ -222,6 +246,10 @@ fn refuses_non_loopback_without_the_escape_hatch() {
         "must not have bound anything"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
@@ -247,9 +275,16 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
     let port_file = data_dir.join("port");
     assert!(wait_for_file(&port_file, Duration::from_secs(5)));
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for signaling an arbitrary pid"
+    )]
     // SAFETY: sending SIGTERM to a child process we just spawned and own.
     unsafe {
-        libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM);
+        libc::kill(
+            libc::pid_t::try_from(child.0.id()).expect("a real OS pid fits pid_t"),
+            libc::SIGTERM,
+        );
     }
 
     let status = child.0.wait().expect("wait for child");
@@ -262,5 +297,9 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
         "port file should be removed on clean shutdown"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }

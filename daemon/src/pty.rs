@@ -17,11 +17,11 @@
 //! must never block (docs/03-pty-layer.md#the-rule) -- pty.rs cannot enforce
 //! that, it is a contract on the caller.
 //!
-//! **Windows: the ConPTY startup handshake.** conhost.exe's `VtIo::StartIfNeeded`
+//! **Windows: the `ConPTY` startup handshake.** conhost.exe's `VtIo::StartIfNeeded`
 //! writes a Device Status Report / cursor-position query (`ESC[6n`) to the pty
 //! master as the very first bytes of any session, then blocks
 //! `VtInputThread::DoReadInput`'s `ReadFile` on the input side waiting for the
-//! matching CPR reply (`ESC[row;colR`) -- confirmed via WinDbg, unbounded (ran
+//! matching CPR reply (`ESC[row;colR`) -- confirmed via `WinDbg`, unbounded (ran
 //! 265+s with nothing else changing it), see
 //! [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows).
 //! A real terminal emulator answers this automatically; `portable_pty`'s raw
@@ -96,6 +96,7 @@ pub trait TerminalSession {
     /// own thread must still not call it inline; wrap it in `spawn_blocking`,
     /// same rule as the reader loop (docs/03-pty-layer.md#the-rule).
     fn write(&self, bytes: &[u8]) -> Result<()>;
+    /// Applies a new PTY size, clamped to `SIZE_RANGE`.
     fn resize(&self, cols: u16, rows: u16) -> Result<()>;
     /// Blocks for up to `GRACEFUL_WAIT + KILL_WAIT` (~7s): the bounded wait
     /// is intrinsic to termination, not a detail the caller schedules
@@ -107,7 +108,7 @@ pub trait TerminalSession {
 /// Why a session ended up without a clean exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LostReason {
-    /// terminate()'s hard-kill step didn't produce an observed exit within
+    /// `terminate()`'s hard-kill step didn't produce an observed exit within
     /// `KILL_WAIT` (docs/03-pty-layer.md#concrete-policy step 5).
     KillTimeout,
     /// `child.wait()` itself returned an OS error rather than a status.
@@ -122,33 +123,44 @@ pub enum LostReason {
 #[derive(Debug, Clone)]
 pub struct PtyExit {
     /// `None` only when `lost_reason` is set -- we gave up without ever
-    /// observing a wait() result.
+    /// observing a `wait()` result.
     pub status: Option<ExitStatus>,
+    /// Set only when `status` couldn't be obtained -- see [`LostReason`].
     pub lost_reason: Option<LostReason>,
 }
 
 /// What to spawn. Argv array, never a concatenated shell string -- a shell is
 /// only ever `program` because the caller deliberately chose it
 /// (docs/03-pty-layer.md#spawn, docs/06-security.md).
+#[derive(Debug)]
 pub struct SpawnSpec<'a> {
+    /// The executable to spawn -- never a shell string.
     pub program: &'a str,
+    /// `program`'s argv, not including `program` itself.
     pub args: &'a [String],
+    /// Working directory to spawn `program` in.
     pub cwd: &'a Path,
     /// Overrides layered onto the daemon's own environment, which
     /// `CommandBuilder` inherits by default. Do not pre-flatten the full
     /// daemon environment in here -- pass only explicit overrides
     /// (docs/03-pty-layer.md#spawn).
     pub env: &'a [(String, String)],
+    /// Initial PTY size.
     pub cols: u16,
+    /// Initial PTY size.
     pub rows: u16,
 }
 
 /// Handle plus the two independent one-shot signals a caller needs: the
 /// child's eventual exit, and the pty master's eventual EOF. Never wait for
 /// one to infer the other ([S2](../../docs/15-open-questions.md#s2--eof-is-not-exit)).
+#[derive(Debug)]
 pub struct SpawnedSession {
+    /// The live handle -- `write`/`resize`/`terminate`.
     pub session: PtySession,
+    /// Fires exactly once, with the child's exit.
     pub exit_rx: Receiver<PtyExit>,
+    /// Fires exactly once, when the reader thread's `read()` reaches EOF.
     pub eof_rx: Receiver<()>,
     /// The child's OS pid, for `GET`'s `pid` field
     /// (docs/04-api-protocol.md#get-apiv1sessions). `None` only on a platform
@@ -161,7 +173,7 @@ pub struct SpawnedSession {
 /// -- see the module-level "M1 scope boundary" note on why, and its
 /// must-never-block requirement.
 pub fn spawn(
-    spec: SpawnSpec,
+    spec: &SpawnSpec<'_>,
     on_output: impl FnMut(&[u8]) + Send + 'static,
 ) -> Result<SpawnedSession> {
     let system = native_pty_system();
@@ -208,7 +220,7 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("pty-reader".into())
-        .spawn(move || reader_thread_main(reader, on_output, eof_tx))
+        .spawn(move || reader_thread_main(reader, on_output, &eof_tx))
         .context("spawning reader thread")?;
 
     std::thread::Builder::new()
@@ -220,7 +232,7 @@ pub fn spawn(
         .name("pty-reaper".into())
         .spawn({
             let control_tx = control_tx.clone();
-            move || reaper_thread_main(child, control_tx)
+            move || reaper_thread_main(child, &control_tx)
         })
         .context("spawning reaper thread")?;
 
@@ -228,7 +240,7 @@ pub fn spawn(
         .name("pty-control".into())
         .spawn({
             let state = Arc::clone(&state);
-            move || control_thread_main(pair.master, pid, killer, control_rx, exit_tx, state)
+            move || control_thread_main(pair.master, pid, killer, &control_rx, &exit_tx, &state)
         })
         .context("spawning control thread")?;
 
@@ -249,6 +261,7 @@ pub fn spawn(
 /// `&self` methods mean that owner does not need a `Mutex` to do it -- the
 /// session directory (`SessionManager`) just holds this behind its own
 /// `Arc<Session>`.
+#[derive(Debug)]
 pub struct PtySession {
     write_tx: SyncSender<Vec<u8>>,
     control_tx: SyncSender<ControlEvent>,
@@ -308,6 +321,10 @@ impl TerminalSession for PtySession {
         // A broken reply channel means the control thread finished via a
         // race with a spontaneous ChildExited it processed first -- the
         // session is exited either way, so treat that as success too.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a broken reply channel means the control thread finished via a race with a spontaneous ChildExited it processed first -- the session is exited either way, so treat that as success too"
+        )]
         let _ = reply_rx.recv();
         Ok(())
     }
@@ -319,11 +336,11 @@ enum ControlEvent {
     ChildExited(IoResult<ExitStatus>),
 }
 
-/// Windows only: answers conhost's one-time ConPTY startup DSR (cursor
+/// Windows only: answers conhost's one-time `ConPTY` startup DSR (cursor
 /// position) query so `VtIo::StartIfNeeded` can finish initializing --
-/// see the module doc's "Windows: the ConPTY startup handshake" note and
+/// see the module doc's "Windows: the `ConPTY` startup handshake" note and
 /// [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
-/// for the WinDbg evidence and the spike (`spike/src/bin/s9_dsr_reply.rs`)
+/// for the `WinDbg` evidence and the spike (`spike/src/bin/s9_dsr_reply.rs`)
 /// that confirmed this specific fix: with a reply written back, `wait()`
 /// returns in single-digit milliseconds instead of hanging indefinitely.
 ///
@@ -356,10 +373,10 @@ struct ConptyDsrProbe {
 #[cfg(windows)]
 impl ConptyDsrProbe {
     const QUERY: &'static [u8] = b"\x1b[6n";
-    /// A fixed, unverified reply -- portable_pty exposes no way to ask what
+    /// A fixed, unverified reply -- `portable_pty` exposes no way to ask what
     /// cursor position it actually set, so this claims row 1, col 1
     /// (`ESC[1;1R`). conhost only needs *a* well-formed reply to unblock its
-    /// startup `ReadFile`; nothing observed in the WinDbg trace or the exit
+    /// startup `ReadFile`; nothing observed in the `WinDbg` trace or the exit
     /// status of the fixture below depends on this being accurate.
     const REPLY: &'static [u8] = b"\x1b[1;1R";
     /// Generous relative to what's ever been observed (the query arrives
@@ -385,7 +402,9 @@ impl Read for ConptyDsrProbe {
         loop {
             if !self.pending.is_empty() {
                 let n = self.pending.len().min(buf.len());
-                buf[..n].copy_from_slice(&self.pending[..n]);
+                let (dst, _) = buf.split_at_mut(n);
+                let (src, _) = self.pending.split_at(n);
+                dst.copy_from_slice(src);
                 self.pending.drain(..n);
                 return Ok(n);
             }
@@ -398,7 +417,7 @@ impl Read for ConptyDsrProbe {
             if n == 0 {
                 return Ok(0); // EOF before the handshake ever showed up -- give up quietly
             }
-            self.pending.extend_from_slice(&tmp[..n]);
+            self.pending.extend_from_slice(tmp.split_at(n).0);
             self.scanned += n;
 
             if let Some(pos) = self
@@ -406,6 +425,10 @@ impl Read for ConptyDsrProbe {
                 .windows(Self::QUERY.len())
                 .position(|w| w == Self::QUERY)
             {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "best-effort DSR reply; if the write side is already gone, conhost's startup ReadFile just stays blocked a little longer -- not a correctness issue for the rest of the session"
+                )]
                 let _ = self.write_tx.send(Self::REPLY.to_vec());
                 self.pending.drain(pos..pos + Self::QUERY.len());
                 self.done = true;
@@ -420,16 +443,22 @@ impl Read for ConptyDsrProbe {
 fn reader_thread_main(
     mut reader: Box<dyn Read + Send>,
     mut on_output: impl FnMut(&[u8]) + Send,
-    eof_tx: SyncSender<()>,
+    eof_tx: &SyncSender<()>,
 ) {
-    let mut buf = [0u8; READ_BUFFER_SIZE];
+    // Heap, not `[0u8; READ_BUFFER_SIZE]` on this thread's stack -- 64KiB is
+    // over clippy's large_stack_arrays threshold, and there is nothing to
+    // gain from the stack here: the buffer lives for the thread's whole run.
+    let mut buf = vec![0u8; READ_BUFFER_SIZE];
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => on_output(&buf[..n]),
-            Err(_) => break,
+            Ok(0) | Err(_) => break,
+            Ok(n) => on_output(buf.split_at(n).0),
         }
     }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort EOF signal; if nothing is waiting on it anymore there's nothing to do"
+    )]
     let _ = eof_tx.try_send(());
 }
 
@@ -449,35 +478,69 @@ fn writer_thread_main(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<
 
 fn reaper_thread_main(
     mut child: Box<dyn Child + Send + Sync>,
-    control_tx: SyncSender<ControlEvent>,
+    control_tx: &SyncSender<ControlEvent>,
 ) {
     let result = child.wait();
     // Ignored if the control thread already finished (e.g. gave up on a
     // hard-kill timeout) and dropped its receiver -- its result stands.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "ignored if the control thread already finished (e.g. gave up on a hard-kill timeout) and dropped its receiver -- its result stands"
+    )]
     let _ = control_tx.send(ControlEvent::ChildExited(result));
 }
 
-#[allow(unused_mut, unused_variables)]
 fn control_thread_main(
     master: Box<dyn MasterPty + Send>,
+    // Read only by `#[cfg(unix)]`'s Terminate arm below (killpg/kill need
+    // it); `#[cfg(windows)]`'s Terminate arm tears the child down by
+    // dropping the ConPTY master handle instead, so unused_variables firing
+    // here is platform-dependent -- same reasoning, and the same
+    // #[allow] (not #[expect]) plus its own #[expect(allow_attributes)]
+    // pairing, as `mut master` below.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "the #[allow] below has to stay an #[allow]; see the comment on it"
+    )]
+    #[allow(
+        unused_variables,
+        reason = "read only by #[cfg(unix)]'s Terminate arm; #[cfg(windows)] tears the child down via the ConPTY master handle instead"
+    )]
     pid: Option<u32>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
-    control_rx: Receiver<ControlEvent>,
-    exit_tx: SyncSender<PtyExit>,
-    state: Arc<AtomicU8>,
+    control_rx: &Receiver<ControlEvent>,
+    exit_tx: &SyncSender<PtyExit>,
+    state: &Arc<AtomicU8>,
 ) {
+    // `mut`: only `#[cfg(windows)]`'s `master.take()` below needs it --
+    // unused on the platform this gate runs on, load-bearing on the other.
+    // `#[allow]`, not `#[expect]`: whether unused_mut actually fires here is
+    // itself platform-dependent, so `#[expect]` would be unfulfilled on
+    // Windows -- the one case `#[expect]` can't cover, hence this attribute
+    // instead of the allow_attributes lint's usual preference.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "the #[allow] below has to stay an #[allow]; see the comment on it"
+    )]
+    #[allow(
+        unused_mut,
+        reason = "master.take() below is behind #[cfg(windows)]; this platform never uses it"
+    )]
     let mut master = Some(master);
 
     loop {
-        let event = match control_rx.recv() {
-            Ok(event) => event,
-            Err(_) => return, // both session and reaper senders gone
+        let Ok(event) = control_rx.recv() else {
+            return; // both session and reaper senders gone
         };
 
         match event {
             ControlEvent::Resize { cols, rows } => {
                 if state.load(Ordering::SeqCst) == STATE_RUNNING {
                     if let Some(master) = &master {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "best-effort resize; if the pty is already gone there's nothing to resize"
+                        )]
                         let _ = master.resize(PtySize {
                             rows,
                             cols,
@@ -490,6 +553,10 @@ fn control_thread_main(
 
             ControlEvent::ChildExited(result) => {
                 state.store(STATE_EXITED, Ordering::SeqCst);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "try_send is a best-effort exit notification; a full or already-gone receiver doesn't need it"
+                )]
                 let _ = exit_tx.try_send(pty_exit_from_wait(result));
                 return; // post-reap cleanup: `master` drops with this frame
             }
@@ -498,11 +565,23 @@ fn control_thread_main(
                 // Step 2: graceful signal (docs/03-pty-layer.md#concrete-policy).
                 #[cfg(unix)]
                 if let Some(pid) = pid {
-                    // SAFETY: killpg/kill with a pid we own (this session's
-                    // child) and signals that do not affect memory safety.
-                    unsafe {
-                        libc::killpg(pid as libc::pid_t, libc::SIGHUP);
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    // A negative pid_t means "this process's whole group" to
+                    // kill(2)/killpg(2) -- never send one just because a u32
+                    // pid happened to wrap through the cast. No real OS pid
+                    // reaches that range; skipping is the safe failure mode.
+                    if let Ok(pid) = libc::pid_t::try_from(pid) {
+                        // SAFETY: killpg with a pid we own (this session's
+                        // child) and a signal that does not affect memory
+                        // safety.
+                        #[expect(unsafe_code, reason = "killpg(2) via libc; no safe wrapper")]
+                        unsafe {
+                            libc::killpg(pid, libc::SIGHUP);
+                        }
+                        // SAFETY: same, kill instead of killpg.
+                        #[expect(unsafe_code, reason = "kill(2) via libc; no safe wrapper")]
+                        unsafe {
+                            libc::kill(pid, libc::SIGTERM);
+                        }
                     }
                 }
                 #[cfg(windows)]
@@ -513,25 +592,37 @@ fn control_thread_main(
                     drop(master.take());
                 }
 
-                let exit = match wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT)
+                let exit = if let Some(result) =
+                    wait_for_child_exited(control_rx, Instant::now() + GRACEFUL_WAIT)
                 {
-                    Some(result) => pty_exit_from_wait(result),
-                    None => {
-                        // Step 4: hard kill. portable-pty's kill() is a hard
-                        // kill on both platforms (SIGKILL / TerminateProcess).
-                        let _ = killer.kill();
-                        match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
-                            Some(result) => pty_exit_from_wait(result),
-                            None => PtyExit {
-                                status: None,
-                                lost_reason: Some(LostReason::KillTimeout),
-                            },
-                        }
+                    pty_exit_from_wait(result)
+                } else {
+                    // Step 4: hard kill. portable-pty's kill() is a hard
+                    // kill on both platforms (SIGKILL / TerminateProcess).
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "best-effort hard kill; if it fails, the wait below still resolves via KillTimeout"
+                    )]
+                    let _ = killer.kill();
+                    match wait_for_child_exited(control_rx, Instant::now() + KILL_WAIT) {
+                        Some(result) => pty_exit_from_wait(result),
+                        None => PtyExit {
+                            status: None,
+                            lost_reason: Some(LostReason::KillTimeout),
+                        },
                     }
                 };
 
                 state.store(STATE_EXITED, Ordering::SeqCst);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "try_send is a best-effort exit notification, same as the ChildExited arm above"
+                )]
                 let _ = exit_tx.try_send(exit.clone());
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply_tx's receiver may already be gone (e.g. terminate() itself timed out and returned); exit_tx above is the notification of record"
+                )]
                 let _ = reply_tx.send(exit);
                 return; // post-reap cleanup: `master` drops with this frame
             }
@@ -553,7 +644,7 @@ fn wait_for_child_exited(
         }
         match control_rx.recv_timeout(remaining) {
             Ok(ControlEvent::ChildExited(result)) => return Some(result),
-            Ok(ControlEvent::Resize { .. }) => continue, // ignored while closing
+            Ok(ControlEvent::Resize { .. }) => {} // ignored while closing
             Ok(ControlEvent::Terminate { reply_tx }) => {
                 // A second terminate() while already closing shouldn't reach
                 // here (the caller-side compare_exchange makes it a no-op
@@ -561,10 +652,10 @@ fn wait_for_child_exited(
                 // reply_tx makes that caller's recv() return promptly rather
                 // than hang, and this wait continues unaffected.
                 drop(reply_tx);
-                continue;
             }
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => return None, // reaper gone without reporting
+            // Timeout or the reaper gone without reporting -- either way, no
+            // exit result arrived in time.
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
         }
     }
 }
