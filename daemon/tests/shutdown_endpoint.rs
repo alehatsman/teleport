@@ -213,6 +213,10 @@ fn post_shutdown_stops_the_real_daemon_process() {
             break status;
         }
         if Instant::now() >= deadline {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+            )]
             let _ = child.kill();
             panic!("teleportd did not exit within 10s of POST /api/v1/shutdown");
         }
@@ -231,5 +235,9 @@ fn post_shutdown_stops_the_real_daemon_process() {
         "the port file should be removed on clean shutdown"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }

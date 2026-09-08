@@ -145,6 +145,10 @@ mod tests {
         let cfg = Config::load(&dir).expect("load");
         assert_eq!(cfg.max_sessions, DEFAULT_MAX_SESSIONS);
         assert!(cfg.auth_token);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -163,6 +167,10 @@ mod tests {
             cfg.default_tail, DEFAULT_TAIL,
             "unnamed fields keep their default"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 }
