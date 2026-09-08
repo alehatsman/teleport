@@ -89,6 +89,10 @@ fn recv_until(
                     return acc;
                 }
             }
+            #[expect(
+                clippy::panic,
+                reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+            )]
             Err(e) => panic!(
                 "output channel closed before predicate matched ({e}); got {} bytes: {:?}",
                 acc.len(),

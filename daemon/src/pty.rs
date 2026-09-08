@@ -481,6 +481,14 @@ fn control_thread_main(
 ) {
     // `mut`: only `#[cfg(windows)]`'s `master.take()` below needs it --
     // unused on the platform this gate runs on, load-bearing on the other.
+    // `#[allow]`, not `#[expect]`: whether unused_mut actually fires here is
+    // itself platform-dependent, so `#[expect]` would be unfulfilled on
+    // Windows -- the one case `#[expect]` can't cover, hence this attribute
+    // instead of the allow_attributes lint's usual preference.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "the #[allow] below has to stay an #[allow]; see the comment on it"
+    )]
     #[allow(
         unused_mut,
         reason = "master.take() below is behind #[cfg(windows)]; this platform never uses it"
