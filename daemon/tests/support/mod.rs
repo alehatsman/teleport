@@ -234,12 +234,12 @@ pub(crate) fn default_config() -> Config {
 /// test to get a session id to attach to.
 pub(crate) fn create_shell_session(
     daemon: &Daemon,
-    args: Vec<String>,
+    args: &[String],
 ) -> teleportd::session::SessionId {
     let cwd = std::env::temp_dir();
     let spec = teleportd::pty::SpawnSpec {
         program: "/bin/sh",
-        args: &args,
+        args,
         cwd: &cwd,
         env: &[],
         cols: 80,
@@ -248,7 +248,7 @@ pub(crate) fn create_shell_session(
     let session = daemon
         .state
         .sessions
-        .create(spec, "shell", None)
+        .create(&spec, "shell", None)
         .expect("create session");
     session.id
 }

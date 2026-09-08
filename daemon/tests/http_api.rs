@@ -42,7 +42,7 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
-fn post_json(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
+fn post_json(uri: &str, token: Option<&str>, body: &Value) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
@@ -133,7 +133,7 @@ async fn create_session_with_a_nonexistent_executable_is_422_not_404_and_writes_
     });
     let (status, _) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), body),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &body),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -165,19 +165,19 @@ async fn max_sessions_plus_one_is_429_and_the_daemon_stays_healthy() {
 
     let (s1, _) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &make("sleep 5")),
     )
     .await;
     assert_eq!(s1, StatusCode::CREATED);
     let (s2, _) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &make("sleep 5")),
     )
     .await;
     assert_eq!(s2, StatusCode::CREATED);
     let (s3, _) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), make("sleep 5")),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &make("sleep 5")),
     )
     .await;
     assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
@@ -201,7 +201,7 @@ async fn full_lifecycle_create_list_terminate_purge() {
     });
     let (status, created) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), body),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &body),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -285,7 +285,7 @@ async fn purging_an_exited_session_frees_a_max_sessions_slot() {
 
     let (status, created) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), make("true")),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &make("true")),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -313,7 +313,7 @@ async fn purging_an_exited_session_frees_a_max_sessions_slot() {
     // At the cap, but nothing is actually running -- create must not 429.
     let (status, _) = request(
         &daemon,
-        post_json("/api/v1/sessions", Some(support::TOKEN), make("true")),
+        post_json("/api/v1/sessions", Some(support::TOKEN), &make("true")),
     )
     .await;
     assert_eq!(

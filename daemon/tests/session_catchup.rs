@@ -125,7 +125,7 @@ fn spawn_backlog_then_trickle(
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,

@@ -146,6 +146,10 @@ impl HistoryReplay {
     /// checked by length, not just present for the type checker's sake -- so
     /// passing back the wrong thing (or a placeholder) fails loudly here
     /// rather than quietly reintroducing the pre-fetch race D1 closed.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "bytes: Vec<u8> by value is the point, not an oversight -- see above; a reference would let a caller satisfy the length check without actually handing the round's own buffer back"
+    )]
     pub fn written(self, bytes: Vec<u8>) -> Result<ReplayStep, AttachError> {
         assert_eq!(
             bytes.len(),

@@ -227,7 +227,7 @@ impl SessionManager {
     /// enforced first, before either check, so a saturated daemon fails fast.
     pub fn create(
         &self,
-        spec: SpawnSpec<'_>,
+        spec: &SpawnSpec<'_>,
         kind: impl Into<String>,
         preset: Option<String>,
     ) -> Result<Arc<Session>, CreateError> {

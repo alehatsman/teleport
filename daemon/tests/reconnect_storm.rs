@@ -123,7 +123,7 @@ fn spawn_hot_session(manager: &SessionManager) -> Arc<Session> {
     ];
     manager
         .create(
-            SpawnSpec {
+            &SpawnSpec {
                 program: "/bin/sh",
                 args: &args,
                 cwd: &cwd,
