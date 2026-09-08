@@ -1,0 +1,25 @@
+---
+description: full pre-push gate — fmt, clippy, test, rustdoc, deny, machete, lint drift
+
+# rq/ci, once per crate. teleport's crates are four separate Cargo projects,
+# not one workspace, so each is passed by `dir`. Whether they should be a
+# workspace is teleport's question and not the gate's; until it is answered,
+# this is what gating them costs.
+#
+# daemon and cli only. `spike/` is throwaway experiment code by its own README,
+# kept so the M1 results stay reproducible -- gating it would put pressure on
+# code that is deliberately frozen. `desktop/src-tauri` needs the tauri
+# toolchain and the built `web/` assets to compile at all, so a gate there
+# reports the environment, not the code; it has its own CI workflow
+# (.github/workflows/desktop.yml). Both are candidates once those two questions
+# are answered.
+#
+# The checkout is `tasks/tools.yml`'s job and the pin lives there.
+steps:
+  - name: daemon
+    use: ~/.cache/provision/tools/rust-quality/ci.yml
+    props: { dir: daemon }
+
+  - name: cli
+    use: ~/.cache/provision/tools/rust-quality/ci.yml
+    props: { dir: cli }

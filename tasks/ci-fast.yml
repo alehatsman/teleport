@@ -1,0 +1,13 @@
+---
+description: fast pre-commit gate — lockfile drift, fmt, clippy, ai-lint, soft caps
+
+# rq/ci-fast, which is `fast.yml` upstream. Same two crates as tasks/ci.yml,
+# same reasons.
+steps:
+  - name: daemon
+    use: ~/.cache/provision/tools/rust-quality/fast.yml
+    props: { dir: daemon }
+
+  - name: cli
+    use: ~/.cache/provision/tools/rust-quality/fast.yml
+    props: { dir: cli }

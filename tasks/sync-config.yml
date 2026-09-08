@@ -1,0 +1,19 @@
+---
+description: copy rust-quality's config into each crate and print the lint block
+
+# rq/sync-config, once per crate: clippy.toml, rustfmt.toml, deny.toml and
+# .cargo/config.toml land under each `dir`, because cargo reads them relative
+# to the manifest it is building and these crates are not one workspace.
+#
+# The lint block cannot be copied -- cargo has no include mechanism for
+# manifests -- so the preset prints it and `tasks/lints-check.yml` reports
+# drift instead. It is pasted into each crate's Cargo.toml under `[workspace]`,
+# with `[lints] workspace = true` beside `[package]`.
+steps:
+  - name: daemon
+    use: ~/.cache/provision/tools/rust-quality/sync-config.yml
+    props: { dir: daemon }
+
+  - name: cli
+    use: ~/.cache/provision/tools/rust-quality/sync-config.yml
+    props: { dir: cli }
