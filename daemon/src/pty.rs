@@ -336,11 +336,11 @@ enum ControlEvent {
     ChildExited(IoResult<ExitStatus>),
 }
 
-/// Windows only: answers conhost's one-time ConPTY startup DSR (cursor
+/// Windows only: answers conhost's one-time `ConPTY` startup DSR (cursor
 /// position) query so `VtIo::StartIfNeeded` can finish initializing --
-/// see the module doc's "Windows: the ConPTY startup handshake" note and
+/// see the module doc's "Windows: the `ConPTY` startup handshake" note and
 /// [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
-/// for the WinDbg evidence and the spike (`spike/src/bin/s9_dsr_reply.rs`)
+/// for the `WinDbg` evidence and the spike (`spike/src/bin/s9_dsr_reply.rs`)
 /// that confirmed this specific fix: with a reply written back, `wait()`
 /// returns in single-digit milliseconds instead of hanging indefinitely.
 ///
@@ -373,10 +373,10 @@ struct ConptyDsrProbe {
 #[cfg(windows)]
 impl ConptyDsrProbe {
     const QUERY: &'static [u8] = b"\x1b[6n";
-    /// A fixed, unverified reply -- portable_pty exposes no way to ask what
+    /// A fixed, unverified reply -- `portable_pty` exposes no way to ask what
     /// cursor position it actually set, so this claims row 1, col 1
     /// (`ESC[1;1R`). conhost only needs *a* well-formed reply to unblock its
-    /// startup `ReadFile`; nothing observed in the WinDbg trace or the exit
+    /// startup `ReadFile`; nothing observed in the `WinDbg` trace or the exit
     /// status of the fixture below depends on this being accurate.
     const REPLY: &'static [u8] = b"\x1b[1;1R";
     /// Generous relative to what's ever been observed (the query arrives
@@ -402,7 +402,9 @@ impl Read for ConptyDsrProbe {
         loop {
             if !self.pending.is_empty() {
                 let n = self.pending.len().min(buf.len());
-                buf[..n].copy_from_slice(&self.pending[..n]);
+                let (dst, _) = buf.split_at_mut(n);
+                let (src, _) = self.pending.split_at(n);
+                dst.copy_from_slice(src);
                 self.pending.drain(..n);
                 return Ok(n);
             }
@@ -415,7 +417,7 @@ impl Read for ConptyDsrProbe {
             if n == 0 {
                 return Ok(0); // EOF before the handshake ever showed up -- give up quietly
             }
-            self.pending.extend_from_slice(&tmp[..n]);
+            self.pending.extend_from_slice(tmp.split_at(n).0);
             self.scanned += n;
 
             if let Some(pos) = self
@@ -423,6 +425,10 @@ impl Read for ConptyDsrProbe {
                 .windows(Self::QUERY.len())
                 .position(|w| w == Self::QUERY)
             {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "best-effort DSR reply; if the write side is already gone, conhost's startup ReadFile just stays blocked a little longer -- not a correctness issue for the rest of the session"
+                )]
                 let _ = self.write_tx.send(Self::REPLY.to_vec());
                 self.pending.drain(pos..pos + Self::QUERY.len());
                 self.done = true;
@@ -486,6 +492,20 @@ fn reaper_thread_main(
 
 fn control_thread_main(
     master: Box<dyn MasterPty + Send>,
+    // Read only by `#[cfg(unix)]`'s Terminate arm below (killpg/kill need
+    // it); `#[cfg(windows)]`'s Terminate arm tears the child down by
+    // dropping the ConPTY master handle instead, so unused_variables firing
+    // here is platform-dependent -- same reasoning, and the same
+    // #[allow] (not #[expect]) plus its own #[expect(allow_attributes)]
+    // pairing, as `mut master` below.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "the #[allow] below has to stay an #[allow]; see the comment on it"
+    )]
+    #[allow(
+        unused_variables,
+        reason = "read only by #[cfg(unix)]'s Terminate arm; #[cfg(windows)] tears the child down via the ConPTY master handle instead"
+    )]
     pid: Option<u32>,
     mut killer: Box<dyn ChildKiller + Send + Sync>,
     control_rx: &Receiver<ControlEvent>,
