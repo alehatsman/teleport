@@ -1,0 +1,15 @@
+---
+description: write every gate finding to <crate>/.gate/findings.jsonl for an agent to read
+
+# rq/findings. A pure producer: it never re-gates and never aborts, so a crate
+# full of findings still yields a complete file. `out` is relative to `dir`, so
+# each crate writes its own artifact rather than the second overwriting the
+# first. Enforcement stays with `tasks/ci.yml`.
+steps:
+  - name: daemon
+    use: ~/.cache/provision/tools/rust-quality/findings.yml
+    props: { dir: daemon }
+
+  - name: cli
+    use: ~/.cache/provision/tools/rust-quality/findings.yml
+    props: { dir: cli }
