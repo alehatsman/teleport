@@ -231,7 +231,7 @@ mod linux {
 pub(crate) use linux::{install, uninstall};
 
 #[cfg(not(target_os = "linux"))]
-pub fn install() -> anyhow::Result<()> {
+pub(crate) fn install() -> anyhow::Result<()> {
     anyhow::bail!(
         "`teleportd service install` is Linux-only for now -- on this platform, autostart \
          is only reachable from the desktop app's tray menu (\"Start at login\"), which \
@@ -240,7 +240,7 @@ pub fn install() -> anyhow::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn uninstall() -> anyhow::Result<()> {
+pub(crate) fn uninstall() -> anyhow::Result<()> {
     anyhow::bail!(
         "`teleportd service uninstall` is Linux-only for now -- use the desktop app's \
          tray menu instead"
