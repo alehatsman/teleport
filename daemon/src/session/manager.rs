@@ -32,7 +32,7 @@ const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
 
 /// D3 (docs/04-api-protocol.md#get-apiv1sessions): a BEL
 /// byte can repeat fast (a spinner, a broken script) -- throttle the
-/// `session_events` write the same way output_bytes is throttled. The
+/// `session_events` write the same way `output_bytes` is throttled. The
 /// in-memory `last_bell_ms` (what `GET` actually reports) always reflects the
 /// most recent bell regardless of this throttle.
 const BELL_PERSIST_INTERVAL_MS: i64 = 1000;
@@ -448,9 +448,7 @@ fn resolve_executable(command: &str, cwd: &Path) -> bool {
 #[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]

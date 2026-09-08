@@ -21,7 +21,7 @@ use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId, 
 /// Server sends a `Ping` on this cadence (docs/04-api-protocol.md#keepalive-and-reconnection).
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// Closes the connection if no `Pong` arrives within this long.
-const PONG_TIMEOUT: Duration = Duration::from_secs(60);
+const PONG_TIMEOUT: Duration = Duration::from_mins(1);
 /// Once `exited` fires, how long to wait for the reader thread to also
 /// reach EOF before finalizing the `exit` frame anyway. The reaper thread's
 /// `wait()` can return before the reader's next `read()` does (S1/S3 spike:
@@ -158,20 +158,17 @@ fn bound_attach(
     max_replay_bytes: u64,
     next_offset: u64,
 ) -> (u64, bool) {
-    match after {
-        Some(after) => {
-            let earliest = next_offset.saturating_sub(max_replay_bytes);
-            let from = after.max(earliest);
-            (from, from > after)
-        }
-        None => {
-            let tail = tail.unwrap_or(default_tail).min(max_replay_bytes);
-            (next_offset.saturating_sub(tail), false)
-        }
+    if let Some(after) = after {
+        let earliest = next_offset.saturating_sub(max_replay_bytes);
+        let from = after.max(earliest);
+        (from, from > after)
+    } else {
+        let tail = tail.unwrap_or(default_tail).min(max_replay_bytes);
+        (next_offset.saturating_sub(tail), false)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run(
     mut socket: WebSocket,
     session: Arc<Session>,
@@ -342,7 +339,7 @@ async fn run(
             // The reader never caught up within the grace window (e.g. a
             // grandchild still holds the pty open, S2) -- finalize with
             // whatever has actually been drained rather than hang.
-            _ = grace, if exit_deadline.is_some() => {
+            () = grace, if exit_deadline.is_some() => {
                 finalize_exit(&session, &mut subscription, &mut socket).await;
                 break;
             }

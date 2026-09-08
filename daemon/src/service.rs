@@ -9,7 +9,7 @@
 //! install path that needs no GUI.
 //!
 //! Linux only for now. macOS/Windows autostart is deliberately login-scoped
-//! (a LaunchDaemon or a boot trigger both need root/elevation, which
+//! (a `LaunchDaemon` or a boot trigger both need root/elevation, which
 //! docs/06-security.md#privilege rejects), so there is no headless story to
 //! give them here — `install()`/`uninstall()` say so explicitly instead of
 //! silently no-op'ing.
@@ -62,7 +62,10 @@ mod linux {
     /// "real" install location to fall back to (daemon/ ships no installer,
     /// docs/08-packaging.md), so warn rather than silently trust it.
     fn warn_if_build_output(exe: &Path) {
-        let comps: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
+        let comps: Vec<_> = exe
+            .components()
+            .map(std::path::Component::as_os_str)
+            .collect();
         let is_build_output = comps
             .windows(2)
             .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"));
@@ -78,7 +81,7 @@ mod linux {
     }
 
     /// Current lingering state for this user, queried rather than assumed --
-    /// see install()/uninstall() for why. `None` means the query itself
+    /// see `install()/uninstall()` for why. `None` means the query itself
     /// failed (older systemd without `--value`, no `id` binary, etc.); the
     /// caller treats that the same as "not currently lingering".
     fn linger_enabled() -> Option<bool> {
@@ -97,7 +100,7 @@ mod linux {
         Some(String::from_utf8_lossy(&out.stdout).trim() == "yes")
     }
 
-    pub fn install() -> Result<()> {
+    pub(crate) fn install() -> Result<()> {
         let exe = std::env::current_exe().context("resolving this binary's own path")?;
         warn_if_build_output(&exe);
         let dir = unit_dir()?;
@@ -158,7 +161,7 @@ mod linux {
         Ok(())
     }
 
-    pub fn uninstall() -> Result<()> {
+    pub(crate) fn uninstall() -> Result<()> {
         let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", "teleportd.service"])
             .status();
@@ -193,7 +196,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{install, uninstall};
+pub(crate) use linux::{install, uninstall};
 
 #[cfg(not(target_os = "linux"))]
 pub fn install() -> anyhow::Result<()> {

@@ -463,7 +463,8 @@ mod tests {
         };
 
         assert_eq!(
-            rounds, MAX_STALLED_ROUNDS as u64,
+            rounds,
+            u64::from(MAX_STALLED_ROUNDS),
             "one round to set the baseline, then four stalls"
         );
         assert!(!attach.caught_up, "a clamped replay must say so");

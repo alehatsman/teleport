@@ -209,15 +209,14 @@ fn post_shutdown_stops_the_real_daemon_process() {
     // reasoning as pty_primitive*.rs's terminate fixtures.
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => break status,
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    panic!("teleportd did not exit within 10s of POST /api/v1/shutdown");
-                }
-                std::thread::sleep(Duration::from_millis(50));
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        } else {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("teleportd did not exit within 10s of POST /api/v1/shutdown");
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
     };
     assert!(

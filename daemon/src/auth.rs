@@ -37,10 +37,10 @@ pub enum Principal {
     /// Presented a valid bearer token issued to a specific device. Not
     /// distinguished from `LocalUser` yet -- stage 1 has one token, not one
     /// per device -- but the variant exists so the shape is already right.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     DeviceToken { token_id: String },
     /// Stage 3, established by the cloud backend. Unreachable in the MVP.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     Account { user_id: String, device_id: String },
 }
 
@@ -92,7 +92,7 @@ pub fn resolve(
 /// recent, separately-authenticated `POST /api/v1/ws-ticket` call, so there
 /// is nothing left for the disabled-auth escape hatch to add
 /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn resolve_ws(
     store: &TicketStore,
     session_id: SessionId,
@@ -479,7 +479,7 @@ mod tests {
         let ticket = store.issue(session).unwrap();
         // Backdate it past its TTL directly rather than sleeping 30s in a test.
         store.tickets.lock().get_mut(&ticket).unwrap().expires_at =
-            Instant::now() - Duration::from_secs(1);
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
 
         assert!(!store.redeem(&ticket, session));
     }

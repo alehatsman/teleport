@@ -14,7 +14,7 @@
 //! byte-exact payload (all 256 byte values, including control bytes) survives
 //! a raw-mode round trip -- has no meaningful Windows equivalent through
 //! `portable_pty`. Unix raw mode (`stty raw -echo`) turns the pty into a
-//! plain byte pipe with *no* interpretation. ConPTY has no equivalent "raw"
+//! plain byte pipe with *no* interpretation. `ConPTY` has no equivalent "raw"
 //! state for its *input* direction: every byte written to the master always
 //! passes through conhost's own VT input parser before the child ever sees
 //! it, regardless of what console mode the child sets on its own stdin

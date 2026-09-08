@@ -74,13 +74,12 @@ fn recv_until(
     let mut acc = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "timed out waiting for predicate; got {} bytes: {:?}",
-                acc.len(),
-                String::from_utf8_lossy(&acc)
-            );
-        }
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for predicate; got {} bytes: {:?}",
+            acc.len(),
+            String::from_utf8_lossy(&acc)
+        );
         match rx.recv_timeout(remaining) {
             Ok(chunk) => {
                 acc.extend_from_slice(&chunk);
@@ -413,7 +412,7 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
         .recv_timeout(Duration::from_secs(1))
         .expect("exit_rx should already have fired by the time terminate() returns");
     assert!(
-        !exit.status.map(|s| s.success()).unwrap_or(false),
+        !exit.status.is_some_and(|s| s.success()),
         "a signal-killed sleep should not report success"
     );
 }
@@ -484,12 +483,11 @@ fn terminate_kills_the_grandchild_process_tree() {
         {
             return; // gone -- the whole tree was killed via killpg, not just the shell
         }
-        if Instant::now() > deadline {
-            panic!(
-                "grandchild pid {pid} was still alive {:?} after terminate",
-                deadline.elapsed()
-            );
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "grandchild pid {pid} was still alive {:?} after terminate",
+            deadline.elapsed()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }

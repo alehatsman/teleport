@@ -344,7 +344,7 @@ async fn health(
         // The hostname-derived device name is mildly identifying, so it sits
         // behind the principal -- nothing in the unauthenticated shape above
         // may be sensitive (docs/04-api-protocol.md#get-apiv1health).
-        body["device_id"] = state.device.device_id.to_string().into();
+        body["device_id"] = state.device.device_id.clone().into();
         body["device_name"] = state.device.device_name.clone().into();
         body["platform"] = state.device.platform.clone().into();
         body["pid"] = std::process::id().into();
@@ -410,7 +410,7 @@ async fn create_session(
         .and_then(|id| state.presets.iter().find(|p| p.id == id));
     let command = req
         .command
-        .or_else(|| preset.map(|p| p.resolved_command()))
+        .or_else(|| preset.map(Preset::resolved_command))
         .ok_or_else(|| {
             ApiError::BadRequest("command is required unless a preset supplies it".to_string())
         })?;
@@ -570,8 +570,7 @@ async fn list_sessions(
                     let is_live = row
                         .id
                         .parse::<SessionId>()
-                        .map(|id| live_ids.contains(&id))
-                        .unwrap_or(false);
+                        .is_ok_and(|id| live_ids.contains(&id));
                     if !is_live {
                         views.push(SessionView::from_row(row));
                     }
@@ -673,11 +672,11 @@ async fn delete_session(
             let terminate_session = Arc::clone(&session);
             match tokio::task::spawn_blocking(move || terminate_session.terminate()).await {
                 Ok(Err(e)) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed")
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed");
                 }
                 Ok(Ok(())) => {}
                 Err(e) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked")
+                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked");
                 }
             }
             session.exited().await;
@@ -685,8 +684,7 @@ async fn delete_session(
         let log_dir = session
             .log_path()
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| session.log_path());
+            .map_or_else(|| session.log_path(), std::path::Path::to_path_buf);
         // `remove_dir_all` is blocking fs work too.
         if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
         {
@@ -886,7 +884,7 @@ mod tests {
             id: "shell".to_string(),
             label: "Shell".to_string(),
             command: "$SHELL".to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             icon: "terminal".to_string(),
         }
     }
