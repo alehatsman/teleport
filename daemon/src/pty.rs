@@ -457,7 +457,6 @@ fn reaper_thread_main(
     let _ = control_tx.send(ControlEvent::ChildExited(result));
 }
 
-#[expect(unused_mut, unused_variables)]
 fn control_thread_main(
     master: Box<dyn MasterPty + Send>,
     pid: Option<u32>,
