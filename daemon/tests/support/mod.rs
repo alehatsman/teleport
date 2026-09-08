@@ -19,7 +19,10 @@
 //! touches HTTP; `http_api.rs` never opens a WebSocket; `ws_protocol.rs`
 //! never inspects `base_url`), and each is compiled as its own separate test
 //! binary -- hence the blanket `dead_code` allow rather than per-item ones.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different subset of this shared support module"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

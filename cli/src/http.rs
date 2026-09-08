@@ -64,7 +64,10 @@ impl ApiError {
         }
     }
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "kept for callers that want the HTTP status without matching on the ApiError variant; unused today"
+    )]
     pub(crate) fn status(&self) -> Option<reqwest::StatusCode> {
         match self {
             ApiError::Status { status, .. } => Some(*status),
@@ -92,11 +95,20 @@ pub(crate) struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateSessionResponse {
     pub id: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub state: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub pid: Option<u32>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub output_offset: u64,
 }
 
@@ -104,36 +116,72 @@ pub(crate) struct CreateSessionResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SessionSummary {
     pub id: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub kind: String,
     pub preset: Option<String>,
     pub command: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub args: Vec<String>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub cwd: String,
     pub state: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub output_bytes: u64,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub created_at_ms: i64,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub started_at_ms: Option<i64>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub exited_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub lost_reason: Option<String>,
     pub controller: Option<String>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub subscribers: usize,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub last_bell_ms: Option<i64>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub idle_since_ms: Option<i64>,
 }
 
@@ -146,11 +194,20 @@ struct ListSessionsResponse {
 pub(crate) struct Preset {
     pub id: String,
     pub label: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub command: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub args: Vec<String>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
+    )]
     pub icon: String,
 }
 

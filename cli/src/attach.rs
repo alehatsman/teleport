@@ -154,18 +154,30 @@ enum ServerMessage {
     ControlGranted,
     ControlRevoked {
         to: String,
-        #[expect(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "mirrors the daemon's ws frame shape (daemon/src/ws.rs); not every field is read"
+        )]
         client_id: String,
     },
     Resized {
-        #[expect(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "mirrors the daemon's ws frame shape (daemon/src/ws.rs); not every field is read"
+        )]
         cols: u16,
-        #[expect(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "mirrors the daemon's ws frame shape (daemon/src/ws.rs); not every field is read"
+        )]
         rows: u16,
     },
     Exit {
         code: Option<i32>,
-        #[expect(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "mirrors the daemon's ws frame shape (daemon/src/ws.rs); not every field is read"
+        )]
         final_offset: u64,
     },
     Error {
