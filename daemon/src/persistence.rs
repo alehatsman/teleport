@@ -286,7 +286,7 @@ impl Db {
     /// here too, for `spawn_failed`/`kill_timeout`/`wait_error`, but `state`
     /// only becomes `'lost'` via restart recovery, never from a live
     /// process -- see [`recover`]).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn mark_exited_blocking(
         &self,
         id: &str,
@@ -406,7 +406,7 @@ impl Db {
 /// No migration framework, no external tool.
 const MIGRATIONS: &[&str] = &[SCHEMA_V1];
 
-const SCHEMA_V1: &str = r#"
+const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
     id              TEXT PRIMARY KEY,
     kind            TEXT NOT NULL,
@@ -442,7 +442,7 @@ CREATE TABLE IF NOT EXISTS session_events (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, event_id);
-"#;
+";
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -525,9 +525,9 @@ fn insert_session(conn: &Connection, row: &NewSessionRow) -> Result<()> {
             row.command,
             argv_json,
             row.cwd,
-            row.pid.map(|p| p as i64),
-            row.cols as i64,
-            row.rows as i64,
+            row.pid.map(i64::from),
+            i64::from(row.cols),
+            i64::from(row.rows),
             row.created_at_ms,
         ],
     )?;
@@ -642,7 +642,7 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Command>) {
             Command::NoteSize { id, cols, rows } => {
                 if let Err(e) = conn.execute(
                     "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
-                    params![cols as i64, rows as i64, id],
+                    params![i64::from(cols), i64::from(rows), id],
                 ) {
                     warn!(session_id = id, error = %e, "persisting cols/rows failed");
                 }

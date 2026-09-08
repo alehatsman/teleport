@@ -169,7 +169,7 @@ mod tests {
     fn a_malformed_file_is_a_clean_error_not_a_silent_overwrite() {
         let dir = scratch_dir("malformed");
         fs::write(dir.join("presets.toml"), "not valid toml {{{").unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -196,7 +196,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -215,7 +215,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(load_or_create(&dir).is_err());
+        load_or_create(&dir).unwrap_err();
         let _ = fs::remove_dir_all(&dir);
     }
 

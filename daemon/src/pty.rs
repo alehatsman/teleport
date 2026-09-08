@@ -17,11 +17,11 @@
 //! must never block (docs/03-pty-layer.md#the-rule) -- pty.rs cannot enforce
 //! that, it is a contract on the caller.
 //!
-//! **Windows: the ConPTY startup handshake.** conhost.exe's `VtIo::StartIfNeeded`
+//! **Windows: the `ConPTY` startup handshake.** conhost.exe's `VtIo::StartIfNeeded`
 //! writes a Device Status Report / cursor-position query (`ESC[6n`) to the pty
 //! master as the very first bytes of any session, then blocks
 //! `VtInputThread::DoReadInput`'s `ReadFile` on the input side waiting for the
-//! matching CPR reply (`ESC[row;colR`) -- confirmed via WinDbg, unbounded (ran
+//! matching CPR reply (`ESC[row;colR`) -- confirmed via `WinDbg`, unbounded (ran
 //! 265+s with nothing else changing it), see
 //! [W1](../../docs/15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows).
 //! A real terminal emulator answers this automatically; `portable_pty`'s raw
@@ -107,7 +107,7 @@ pub trait TerminalSession {
 /// Why a session ended up without a clean exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LostReason {
-    /// terminate()'s hard-kill step didn't produce an observed exit within
+    /// `terminate()`'s hard-kill step didn't produce an observed exit within
     /// `KILL_WAIT` (docs/03-pty-layer.md#concrete-policy step 5).
     KillTimeout,
     /// `child.wait()` itself returned an OS error rather than a status.
@@ -122,7 +122,7 @@ pub enum LostReason {
 #[derive(Debug, Clone)]
 pub struct PtyExit {
     /// `None` only when `lost_reason` is set -- we gave up without ever
-    /// observing a wait() result.
+    /// observing a `wait()` result.
     pub status: Option<ExitStatus>,
     pub lost_reason: Option<LostReason>,
 }
@@ -457,7 +457,7 @@ fn reaper_thread_main(
     let _ = control_tx.send(ControlEvent::ChildExited(result));
 }
 
-#[allow(unused_mut, unused_variables)]
+#[expect(unused_mut, unused_variables)]
 fn control_thread_main(
     master: Box<dyn MasterPty + Send>,
     pid: Option<u32>,
@@ -513,20 +513,20 @@ fn control_thread_main(
                     drop(master.take());
                 }
 
-                let exit = match wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT)
+                let exit = if let Some(result) =
+                    wait_for_child_exited(&control_rx, Instant::now() + GRACEFUL_WAIT)
                 {
-                    Some(result) => pty_exit_from_wait(result),
-                    None => {
-                        // Step 4: hard kill. portable-pty's kill() is a hard
-                        // kill on both platforms (SIGKILL / TerminateProcess).
-                        let _ = killer.kill();
-                        match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
-                            Some(result) => pty_exit_from_wait(result),
-                            None => PtyExit {
-                                status: None,
-                                lost_reason: Some(LostReason::KillTimeout),
-                            },
-                        }
+                    pty_exit_from_wait(result)
+                } else {
+                    // Step 4: hard kill. portable-pty's kill() is a hard
+                    // kill on both platforms (SIGKILL / TerminateProcess).
+                    let _ = killer.kill();
+                    match wait_for_child_exited(&control_rx, Instant::now() + KILL_WAIT) {
+                        Some(result) => pty_exit_from_wait(result),
+                        None => PtyExit {
+                            status: None,
+                            lost_reason: Some(LostReason::KillTimeout),
+                        },
                     }
                 };
 

@@ -108,7 +108,9 @@ fn read_token(data_dir: &Path) -> String {
 /// a `GET`/`POST` that returns a body; `Value::Null` on a bodyless response
 /// like `204`).
 fn http(port: u16, method: &str, path: &str, token: &str, body: Option<&Value>) -> (u16, Value) {
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let body = body
+        .map(std::string::ToString::to_string)
+        .unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: 127.0.0.1\r\n\
@@ -173,9 +175,7 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     // docs/01-architecture.md#the-crash-boundary describes, not a clean
     // shutdown. Poll briefly for bytes to land rather than a fixed sleep.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) == 0
-        && Instant::now() < deadline
-    {
+    while std::fs::metadata(&log_path).map_or(0, |m| m.len()) == 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     let file_len_before_kill = std::fs::metadata(&log_path).expect("output.vt").len();

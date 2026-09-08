@@ -135,7 +135,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -145,13 +145,13 @@ mod tests {
         let cfg = Config::load(&dir).expect("load");
         assert_eq!(cfg.max_sessions, DEFAULT_MAX_SESSIONS);
         assert!(cfg.auth_token);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_partial_file_only_overrides_what_it_names() {
         let dir = scratch_dir("partial");
-        std::fs::write(
+        fs::write(
             dir.join("config.toml"),
             "max_sessions = 5\nauth_token = false\n",
         )
@@ -163,6 +163,6 @@ mod tests {
             cfg.default_tail, DEFAULT_TAIL,
             "unnamed fields keep their default"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

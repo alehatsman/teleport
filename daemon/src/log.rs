@@ -428,7 +428,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
         dir
     }
 
@@ -476,7 +476,7 @@ mod tests {
 
         // The invariant still holds, which is the whole point of setting the
         // cap: file_length == min(next_offset, log_capped_at).
-        let on_disk = std::fs::metadata(log.path()).unwrap().len();
+        let on_disk = fs::metadata(log.path()).unwrap().len();
         assert_eq!(on_disk, log.next_offset().min(log.log_capped_at().unwrap()));
 
         // And it is sticky: a later append neither retries nor re-reports.
@@ -492,7 +492,7 @@ mod tests {
             "the cap must not move to the new offset"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `LogSyncer` flushes registered logs off the caller's thread and stops
@@ -507,7 +507,7 @@ mod tests {
         log.append(b"flush me");
 
         std::thread::sleep(Duration::from_millis(80));
-        assert_eq!(std::fs::read(log.path()).unwrap(), b"flush me");
+        assert_eq!(fs::read(log.path()).unwrap(), b"flush me");
 
         // Dropping the log drops the last strong `Arc<File>`, so the syncer's
         // `Weak` stops upgrading and the entry is pruned. Nothing to assert
@@ -517,6 +517,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         drop(syncer);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

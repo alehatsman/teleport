@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     // script can capture it cleanly.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.log_level))
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     if !cli.listen.ip().is_loopback() {
@@ -353,7 +353,7 @@ fn spawn_gc_task(
     live: teleportd::session::LiveSessions,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        let mut interval = tokio::time::interval(Duration::from_hours(6));
         loop {
             interval.tick().await;
             run_gc_pass(&db, &sessions_root, retain_days, &live).await;
@@ -441,7 +441,7 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
             }
             Err(e) => {
                 warn!(error = %e, "failed to install SIGTERM handler");
-                std::future::pending::<()>().await
+                std::future::pending::<()>().await;
             }
         }
     };
@@ -449,9 +449,9 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-        _ = shutdown_trigger.notified() => {}
+        () = ctrl_c => {}
+        () = terminate => {}
+        () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
 }
