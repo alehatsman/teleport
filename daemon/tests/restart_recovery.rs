@@ -196,7 +196,10 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
 
     // SAFETY: sending SIGKILL to a child process this test just spawned and owns.
     unsafe {
-        libc::kill(child.0.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(
+            libc::pid_t::try_from(child.0.id()).expect("a real OS pid fits pid_t"),
+            libc::SIGKILL,
+        );
     }
     // `KillOnDrop` will also reap it; wait here so the port is free before
     // the next spawn tries to reuse the same data dir.

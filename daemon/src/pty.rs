@@ -545,11 +545,18 @@ fn control_thread_main(
                 // Step 2: graceful signal (docs/03-pty-layer.md#concrete-policy).
                 #[cfg(unix)]
                 if let Some(pid) = pid {
-                    // SAFETY: killpg/kill with a pid we own (this session's
-                    // child) and signals that do not affect memory safety.
-                    unsafe {
-                        libc::killpg(pid as libc::pid_t, libc::SIGHUP);
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    // A negative pid_t means "this process's whole group" to
+                    // kill(2)/killpg(2) -- never send one just because a u32
+                    // pid happened to wrap through the cast. No real OS pid
+                    // reaches that range; skipping is the safe failure mode.
+                    if let Ok(pid) = libc::pid_t::try_from(pid) {
+                        // SAFETY: killpg/kill with a pid we own (this
+                        // session's child) and signals that do not affect
+                        // memory safety.
+                        unsafe {
+                            libc::killpg(pid, libc::SIGHUP);
+                            libc::kill(pid, libc::SIGTERM);
+                        }
                     }
                 }
                 #[cfg(windows)]

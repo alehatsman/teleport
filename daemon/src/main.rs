@@ -380,7 +380,8 @@ async fn run_gc_pass(
     retain_days: u64,
     live: &teleportd::session::LiveSessions,
 ) {
-    let retain_days = retain_days.min(MAX_RETAIN_DAYS) as i64;
+    let retain_days = i64::try_from(retain_days.min(MAX_RETAIN_DAYS))
+        .expect("MAX_RETAIN_DAYS (36,500) bounds this to a tiny number");
     let cutoff_ms = now_ms() - retain_days * 24 * 60 * 60 * 1000;
     let candidates = match db.gc_candidates(cutoff_ms).await {
         Ok(rows) => rows,

@@ -277,7 +277,10 @@ fn sigterm_triggers_graceful_shutdown_and_removes_the_port_file() {
 
     // SAFETY: sending SIGTERM to a child process we just spawned and own.
     unsafe {
-        libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM);
+        libc::kill(
+            libc::pid_t::try_from(child.0.id()).expect("a real OS pid fits pid_t"),
+            libc::SIGTERM,
+        );
     }
 
     let status = child.0.wait().expect("wait for child");

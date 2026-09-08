@@ -503,7 +503,14 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
             let Ok(exit) = exit_rx.recv() else { return };
 
             let (exit_code, lost_reason) = match exit.status {
-                Some(status) => (Some(status.exit_code() as i32), None),
+                // `-1` is the "couldn't be represented" sentinel every shell
+                // uses for the same case (`$?` from a signal-death, a status
+                // wait(2) can't decode as a plain exit code) -- exit codes
+                // are conventionally 0..=255 in practice.
+                Some(status) => (
+                    Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
+                    None,
+                ),
                 None => (
                     None,
                     Some(match exit.lost_reason {
