@@ -115,9 +115,8 @@ impl Fanout {
             // this always fits u32; MAX_QUEUE_BYTES itself fits comfortably
             // under Semaphore's permit ceiling.
             let cost = queue_cost(payload.len()) as u32;
-            let permit = match sub.budget.try_acquire_many(cost) {
-                Ok(permit) => permit,
-                Err(_) => return false, // bound tripped -- disconnect, don't wait.
+            let Ok(permit) = sub.budget.try_acquire_many(cost) else {
+                return false; // bound tripped -- disconnect, don't wait.
             };
             let chunk = Chunk {
                 offset: start,

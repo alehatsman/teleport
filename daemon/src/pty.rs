@@ -161,7 +161,7 @@ pub struct SpawnedSession {
 /// -- see the module-level "M1 scope boundary" note on why, and its
 /// must-never-block requirement.
 pub fn spawn(
-    spec: SpawnSpec,
+    spec: SpawnSpec<'_>,
     on_output: impl FnMut(&[u8]) + Send + 'static,
 ) -> Result<SpawnedSession> {
     let system = native_pty_system();
@@ -422,12 +422,14 @@ fn reader_thread_main(
     mut on_output: impl FnMut(&[u8]) + Send,
     eof_tx: SyncSender<()>,
 ) {
-    let mut buf = [0u8; READ_BUFFER_SIZE];
+    // Heap, not `[0u8; READ_BUFFER_SIZE]` on this thread's stack -- 64KiB is
+    // over clippy's large_stack_arrays threshold, and there is nothing to
+    // gain from the stack here: the buffer lives for the thread's whole run.
+    let mut buf = vec![0u8; READ_BUFFER_SIZE];
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(n) => on_output(&buf[..n]),
-            Err(_) => break,
         }
     }
     let _ = eof_tx.try_send(());
@@ -465,12 +467,17 @@ fn control_thread_main(
     exit_tx: SyncSender<PtyExit>,
     state: Arc<AtomicU8>,
 ) {
+    // `mut`: only `#[cfg(windows)]`'s `master.take()` below needs it --
+    // unused on the platform this gate runs on, load-bearing on the other.
+    #[allow(
+        unused_mut,
+        reason = "master.take() below is behind #[cfg(windows)]; this platform never uses it"
+    )]
     let mut master = Some(master);
 
     loop {
-        let event = match control_rx.recv() {
-            Ok(event) => event,
-            Err(_) => return, // both session and reaper senders gone
+        let Ok(event) = control_rx.recv() else {
+            return; // both session and reaper senders gone
         };
 
         match event {
@@ -552,7 +559,7 @@ fn wait_for_child_exited(
         }
         match control_rx.recv_timeout(remaining) {
             Ok(ControlEvent::ChildExited(result)) => return Some(result),
-            Ok(ControlEvent::Resize { .. }) => continue, // ignored while closing
+            Ok(ControlEvent::Resize { .. }) => {} // ignored while closing
             Ok(ControlEvent::Terminate { reply_tx }) => {
                 // A second terminate() while already closing shouldn't reach
                 // here (the caller-side compare_exchange makes it a no-op
@@ -560,10 +567,10 @@ fn wait_for_child_exited(
                 // reply_tx makes that caller's recv() return promptly rather
                 // than hang, and this wait continues unaffected.
                 drop(reply_tx);
-                continue;
             }
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => return None, // reaper gone without reporting
+            // Timeout or the reaper gone without reporting -- either way, no
+            // exit result arrived in time.
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
         }
     }
 }

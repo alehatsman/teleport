@@ -175,10 +175,7 @@ fn concurrent_creates_never_exceed_max_sessions() {
         .into_iter()
         .map(|h| h.join().expect("creator thread panicked"))
         .collect();
-    let succeeded: Vec<_> = results
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .collect();
+    let succeeded: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
     assert_eq!(
         succeeded.len(),
         3,

@@ -153,6 +153,7 @@ impl SessionManager {
     /// docs/07-remote-access.md#daemon-configuration-surface). A builder
     /// method rather than a `with_limits` parameter so every existing call
     /// site -- tests included -- keeps working unchanged.
+    #[must_use]
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
@@ -161,6 +162,7 @@ impl SessionManager {
     /// Wires SQLite persistence in (docs/11-mvp-plan.md#m7). `main.rs` is
     /// the only real caller; tests that don't exercise M7 leave `db: None`
     /// and every write below quietly no-ops.
+    #[must_use]
     pub fn with_db(mut self, db: persistence::Db) -> Self {
         self.db = Some(db);
         self
@@ -218,7 +220,7 @@ impl SessionManager {
     /// enforced first, before either check, so a saturated daemon fails fast.
     pub fn create(
         &self,
-        spec: SpawnSpec,
+        spec: SpawnSpec<'_>,
         kind: impl Into<String>,
         preset: Option<String>,
     ) -> Result<Arc<Session>, CreateError> {

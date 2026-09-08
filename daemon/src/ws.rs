@@ -172,6 +172,10 @@ fn bound_attach(
     clippy::too_many_arguments,
     reason = "one per attach-query param plus server-side replay/grace config; a params struct would just move the list, not shrink it"
 )]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "this is the connection's tokio::select! event loop -- every branch is one frame/timer/channel it reacts to; splitting the match arms out would trade one big function for several that only make sense read together"
+)]
 async fn run(
     mut socket: WebSocket,
     session: Arc<Session>,
@@ -298,21 +302,18 @@ async fn run(
 
         tokio::select! {
             chunk = subscription.recv() => {
-                match chunk {
-                    Some(chunk) => {
-                        if send_binary(&mut socket, chunk.offset, &chunk.bytes).await.is_err() {
-                            break;
-                        }
+                if let Some(chunk) = chunk {
+                    if send_binary(&mut socket, chunk.offset, &chunk.bytes).await.is_err() {
+                        break;
                     }
+                } else {
                     // The only way a subscriber slot disappears while this
                     // task still holds its own `Arc<Session>` (keeping the
                     // fan-out alive) is `Fanout::publish`'s backpressure
                     // eviction -- this is the slow-consumer signal
                     // (docs/04-api-protocol.md#error-codes).
-                    None => {
-                        let _ = socket.send(close(1013, "slow_consumer")).await;
-                        break;
-                    }
+                    let _ = socket.send(close(1013, "slow_consumer")).await;
+                    break;
                 }
             }
 
@@ -361,9 +362,13 @@ async fn run(
                     // A lagged receiver only means a missed notification --
                     // every subsequent control/resize check re-reads
                     // authoritative state (`is_controller`, `size`), so
-                    // there is nothing to resync here.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    // there is nothing to resync here. A closed sender is
+                    // the session tearing down; the next loop iteration's
+                    // other branches notice and exit.
+                    Err(
+                        tokio::sync::broadcast::error::RecvError::Lagged(_)
+                        | tokio::sync::broadcast::error::RecvError::Closed,
+                    ) => {}
                 }
             }
 

@@ -241,7 +241,7 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
             let session = Arc::clone(&session);
             tokio::spawn(async move {
                 let replay = session.attach(0).expect("storm client attach");
-                let (_acc, _attach, rounds) = support::catch_up_allow_clamp(replay).await;
+                let (_acc, _attach, rounds) = support::catch_up_allow_clamp(replay);
                 rounds
             })
         })

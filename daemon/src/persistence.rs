@@ -98,7 +98,7 @@ pub struct SessionRow {
     pub lost_reason: Option<String>,
 }
 
-fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
+fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let argv_json: String = row.get("argv_json")?;
     let args: Vec<String> = serde_json::from_str(&argv_json).unwrap_or_default();
     Ok(SessionRow {

@@ -101,7 +101,7 @@ pub(crate) async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>,
 /// stalled/total-round clamp D1's own fixture in `session_catchup.rs`
 /// exercises deliberately. Always paced at `Duration::ZERO`: a storm client
 /// is modeling "reconnect as fast as possible," not a slow network.
-pub(crate) async fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
+pub(crate) fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
     let mut acc = Vec::new();
     let mut next = replay.replay_from;
     let mut rounds = 0u32;
