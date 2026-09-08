@@ -14,3 +14,7 @@
 !.vscode/extensions.json
 .idea/
 .DS_Store
+
+# `provision apply tasks/findings.yml` writes one per crate. A build artifact
+# for agents to read, never committed.
+.gate/

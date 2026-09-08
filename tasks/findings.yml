@@ -6,9 +6,16 @@ description: write every gate finding to <crate>/.gate/findings.jsonl for an age
 # each crate writes its own artifact rather than the second overwriting the
 # first. Enforcement stays with `tasks/ci.yml`.
 steps:
+# daemon takes `feature_args: ""`. `--all-features` turns on `embedded-web`,
+# an optional feature whose `RustEmbed` folder is `../web/dist` -- a release
+# artifact built by npm in `web/`, absent from a normal checkout, and a
+# compile-time error when the feature is on without it (daemon/src/
+# embedded_web.rs says so at the top). GitHub CI builds the daemon with default
+# features for the same reason. Gating a feature the checkout cannot build
+# reports the build, not the code.
   - name: daemon
     use: ~/.cache/provision/tools/rust-quality/findings.yml
-    props: { dir: daemon }
+    props: { dir: daemon, feature_args: "" }
 
   - name: cli
     use: ~/.cache/provision/tools/rust-quality/findings.yml
