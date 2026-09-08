@@ -60,6 +60,7 @@ fn hostname() -> String {
         let mut buf = [0u8; 256];
         // SAFETY: buf is a valid, appropriately sized C string buffer; gethostname
         // writes at most buf.len() bytes and null-terminates on success.
+        #[expect(unsafe_code, reason = "gethostname(2) via libc; no safe wrapper")]
         let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
         if rc == 0 {
             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());

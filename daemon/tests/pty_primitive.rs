@@ -316,8 +316,13 @@ fn eof_and_exit_are_independent_signals() {
         .and_then(|s| s.parse().ok())
         .expect("should have parsed the detached grandchild's pid from output");
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
-    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "grandchild should still be alive right after exit_rx fired -- it should be mid-`sleep 2`, not gone already");
+    let rc = unsafe { libc::kill(pid, 0) };
+    assert_eq!(rc, 0, "grandchild should still be alive right after exit_rx fired -- it should be mid-`sleep 2`, not gone already");
 
     // EOF should arrive later, once the grandchild's sleep ends and it exits too.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {
@@ -388,10 +393,14 @@ fn eof_follows_the_session_leaders_exit_even_with_a_live_grandchild() {
         "EOF should coincide with the session leader's exit on macOS, not lag it: {eof_latency:?}"
     );
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
+    let rc = unsafe { libc::kill(pid, 0) };
     assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        0,
+        rc, 0,
         "the grandchild must still be alive after EOF -- macOS revoked its pty \
          descriptor, it did not kill the process (docs/15-open-questions.md#s5)"
     );
@@ -471,12 +480,13 @@ fn terminate_kills_the_grandchild_process_tree() {
         .and_then(|s| s.parse().ok())
         .expect("should have parsed the grandchild pid from output");
 
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
     // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
-    assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        0,
-        "grandchild should be alive before terminate"
-    );
+    let rc = unsafe { libc::kill(pid, 0) };
+    assert_eq!(rc, 0, "grandchild should be alive before terminate");
 
     spawned
         .session
@@ -485,6 +495,10 @@ fn terminate_kills_the_grandchild_process_tree() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
+        #[expect(
+            unsafe_code,
+            reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+        )]
         // SAFETY: same liveness probe.
         if unsafe { libc::kill(pid, 0) } == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)

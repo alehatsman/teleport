@@ -550,11 +550,16 @@ fn control_thread_main(
                     // pid happened to wrap through the cast. No real OS pid
                     // reaches that range; skipping is the safe failure mode.
                     if let Ok(pid) = libc::pid_t::try_from(pid) {
-                        // SAFETY: killpg/kill with a pid we own (this
-                        // session's child) and signals that do not affect
-                        // memory safety.
+                        // SAFETY: killpg with a pid we own (this session's
+                        // child) and a signal that does not affect memory
+                        // safety.
+                        #[expect(unsafe_code, reason = "killpg(2) via libc; no safe wrapper")]
                         unsafe {
                             libc::killpg(pid, libc::SIGHUP);
+                        }
+                        // SAFETY: same, kill instead of killpg.
+                        #[expect(unsafe_code, reason = "kill(2) via libc; no safe wrapper")]
+                        unsafe {
                             libc::kill(pid, libc::SIGTERM);
                         }
                     }
