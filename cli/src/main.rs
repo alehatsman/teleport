@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             // a fatal reconnect failure), so the process hangs forever,
             // silently, instead of reporting the error. Matching the success
             // arm's hard exit sidesteps the runtime teardown entirely.
-            match attach::run(&conn, &id, &client_id, &client_name).await {
+            match Box::pin(attach::run(&conn, &id, &client_id, &client_name)).await {
                 Ok(code) => std::process::exit(code),
                 Err(e) => {
                     eprintln!("Error: {e:?}");
