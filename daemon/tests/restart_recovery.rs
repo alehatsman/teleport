@@ -41,6 +41,10 @@ fn temp_dir(name: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -62,7 +66,15 @@ struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.kill();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+        )]
         let _ = self.0.wait();
     }
 }
@@ -189,6 +201,10 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     // `KillOnDrop` will also reap it; wait here so the port is free before
     // the next spawn tries to reuse the same data dir.
     let mut child = child;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+    )]
     let _ = child.0.wait();
     drop(child);
     // SIGKILL skips `remove_port_file` entirely -- the port file from the
@@ -196,6 +212,10 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
     // `wait_for_file` below would otherwise see it as "already there" and
     // `read_port` would hand back that stale, unlistened-on number instead
     // of waiting for the restarted daemon's real one.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_file(data_dir.join("port"));
 
     // Restart against the same data dir -- a fresh port and (for this run
@@ -262,5 +282,9 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
         "the full log must be readable after recovery, not truncated"
     );
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
     let _ = std::fs::remove_dir_all(&data_dir);
 }

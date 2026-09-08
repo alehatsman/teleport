@@ -162,6 +162,10 @@ mod tests {
         let reloaded = load_or_create(&dir).expect("reload");
         assert_eq!(reloaded.len(), 3);
         assert_eq!(reloaded[0].id, presets[0].id);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -170,6 +174,10 @@ mod tests {
         let dir = scratch_dir("malformed");
         fs::write(dir.join("presets.toml"), "not valid toml {{{").unwrap();
         load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -197,6 +205,10 @@ mod tests {
         )
         .unwrap();
         load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -216,6 +228,10 @@ mod tests {
         )
         .unwrap();
         load_or_create(&dir).unwrap_err();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 

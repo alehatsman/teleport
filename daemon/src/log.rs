@@ -428,6 +428,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -492,6 +496,10 @@ mod tests {
             "the cap must not move to the new offset"
         );
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -517,6 +525,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         drop(syncer);
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = fs::remove_dir_all(&dir);
     }
 }

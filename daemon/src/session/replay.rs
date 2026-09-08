@@ -322,6 +322,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -424,6 +428,10 @@ mod tests {
             fanout.lock().subscribers.is_empty(),
             "dropping the attach unregisters"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -483,6 +491,10 @@ mod tests {
             attach.next_offset,
             "and it still meets the live boundary exactly -- the hole is behind it, not in front"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -506,6 +518,10 @@ mod tests {
         };
 
         let _ = replay.written(vec![0u8; 1]); // not this round's REPLAY_ROUND_BYTES-sized stretch
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 

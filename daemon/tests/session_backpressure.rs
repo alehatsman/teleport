@@ -183,6 +183,10 @@ fn concurrent_creates_never_exceed_max_sessions() {
     );
 
     for session in succeeded {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort teardown; the process is exiting either way"
+        )]
         let _ = session.terminate();
     }
 }

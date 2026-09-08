@@ -573,6 +573,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("run.sh");
@@ -591,6 +595,10 @@ mod tests {
         ));
         assert!(resolve_executable("./run.sh", &dir));
 
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -762,6 +762,10 @@ mod tests {
         assert_eq!(fetched.state, "running");
         assert_eq!(fetched.args, row.args);
         assert_eq!(fetched.started_at_ms, Some(row.created_at_ms));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -791,6 +795,10 @@ mod tests {
         assert_eq!(row.state, "lost");
         assert_eq!(row.lost_reason.as_deref(), Some("daemon_restart"));
         assert_eq!(row.output_bytes, "hello world".len() as u64);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -831,6 +839,10 @@ mod tests {
             row.output_bytes, 1000,
             "the column must not rewind below what clients already hold"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -846,6 +858,10 @@ mod tests {
         assert_eq!(row.state, "exited");
         assert_eq!(row.exit_code, Some(0));
         assert_eq!(row.output_bytes, 123);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -858,6 +874,10 @@ mod tests {
         db.delete_session("s1").await.unwrap();
 
         assert!(db.get_session("s1").await.unwrap().is_none());
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -874,6 +894,10 @@ mod tests {
         let candidates = db.gc_candidates(now_ms() - 1_000).await.unwrap();
         let ids: Vec<&str> = candidates.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["old"]);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -884,6 +908,10 @@ mod tests {
         let sessions_root = dir.join("sessions");
         Db::open(&db_path, &sessions_root).unwrap();
         Db::open(&db_path, &sessions_root).unwrap();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
