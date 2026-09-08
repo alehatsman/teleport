@@ -58,7 +58,7 @@ async fn next_json(ws: &mut WsStream) -> Value {
             Some(Ok(Message::Text(text))) => {
                 return serde_json::from_str(&text).expect("valid JSON control frame")
             }
-            Some(Ok(Message::Binary(_))) => continue,
+            Some(Ok(Message::Binary(_))) => {}
             other => panic!("expected a text control frame, got {other:?}"),
         }
     }
@@ -578,7 +578,7 @@ async fn exit_frame_carries_the_final_offset() {
             .await
             .expect("timed out waiting for exit")
         {
-            Some(Ok(Message::Binary(_))) => continue,
+            Some(Ok(Message::Binary(_))) => {}
             Some(Ok(Message::Text(text))) => {
                 let value: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(value["type"], "exit");

@@ -370,6 +370,10 @@ fn spawn_gc_task(
 /// instead.
 const MAX_RETAIN_DAYS: u64 = 365 * 100;
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "one GC pass, several independent cleanup steps (rows, directories, live-session sweep) that each need their own error handling; splitting them out is a deliberate follow-up"
+)]
 async fn run_gc_pass(
     db: &teleportd::persistence::Db,
     sessions_root: &Path,

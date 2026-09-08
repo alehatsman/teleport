@@ -87,8 +87,8 @@ fn recv_until(
                     return acc;
                 }
             }
-            Err(_) => panic!(
-                "output channel closed before predicate matched; got {} bytes: {:?}",
+            Err(e) => panic!(
+                "output channel closed before predicate matched ({e}); got {} bytes: {:?}",
                 acc.len(),
                 String::from_utf8_lossy(&acc)
             ),
@@ -320,7 +320,7 @@ fn eof_and_exit_are_independent_signals() {
                 "EOF arrived suspiciously early: {eof_latency:?}"
             );
         }
-        Err(_) => panic!("EOF never arrived within 5s of the grandchild's sleep ending"),
+        Err(e) => panic!("EOF never arrived within 5s of the grandchild's sleep ending ({e})"),
     }
 }
 
@@ -444,7 +444,7 @@ fn terminate_under_output_load_does_not_deadlock() {
     // lost tail, no stuck reader.
     match spawned.eof_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(()) => {}
-        Err(_) => panic!("reader never reached EOF after terminate"),
+        Err(e) => panic!("reader never reached EOF after terminate ({e})"),
     }
 }
 

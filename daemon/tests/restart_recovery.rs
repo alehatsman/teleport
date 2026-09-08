@@ -108,9 +108,7 @@ fn read_token(data_dir: &Path) -> String {
 /// a `GET`/`POST` that returns a body; `Value::Null` on a bodyless response
 /// like `204`).
 fn http(port: u16, method: &str, path: &str, token: &str, body: Option<&Value>) -> (u16, Value) {
-    let body = body
-        .map(std::string::ToString::to_string)
-        .unwrap_or_default();
+    let body = body.map(ToString::to_string).unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: 127.0.0.1\r\n\

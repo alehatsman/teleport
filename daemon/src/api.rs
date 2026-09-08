@@ -635,6 +635,10 @@ struct DeleteQuery {
 /// Without `?purge=true` on such a row there is nothing to do either: it is
 /// already in a terminal state, so this is a no-op `202`, the same shape
 /// `terminate()`'s own idempotency gives a live already-`exited` session.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "four real outcomes (historical/live x purge/no-purge), each with its own error handling; splitting them out is a deliberate follow-up, not a change to make alongside a lint sweep on a deletion path"
+)]
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
