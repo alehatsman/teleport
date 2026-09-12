@@ -189,6 +189,21 @@ pub fn spawn(
     let mut cmd = CommandBuilder::new(spec.program);
     cmd.args(spec.args);
     cmd.cwd(spec.cwd);
+    // `CommandBuilder::new` already inherited the daemon's own environment
+    // (docs/03-pty-layer.md#spawn), TERM included -- fine for `up.sh`/a
+    // manually-started daemon run from an interactive shell, but teleportd's
+    // whole premise is running as a long-lived background service (launchd/
+    // systemd), which typically has no controlling terminal and so no TERM
+    // at all. A child that inherits nothing there gets treated as a "dumb"
+    // terminal by color-detection libraries and silently renders in
+    // monochrome -- same bytes to every client, so every viewer sees it the
+    // same broken way; this isn't a browser/client rendering gap. Only fill
+    // this in when the daemon's own environment left it unset -- an
+    // interactively-started daemon's real TERM (e.g. inside tmux) must win.
+    if cmd.get_env("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+    }
     for (k, v) in spec.env {
         cmd.env(k, v);
     }
