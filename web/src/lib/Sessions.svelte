@@ -10,6 +10,18 @@
   let presets: Preset[] = $state([]);
   let loading = $state(true);
   let loadError: string | null = $state(null);
+  let searchQuery = $state("");
+
+  // Client-side only -- the full list is already on hand from polling, and
+  // a session count that ever justified a server-side search endpoint
+  // instead would justify pagination first. Matches command or cwd
+  // (against the real absolute path, not the "~/..." display string --
+  // typing the username you already know shouldn't be punished for it).
+  let filteredSessions: Session[] = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q));
+  });
   // Which machine this daemon is actually running on -- juggling more than
   // one teleportd (a dev box, a laptop, a work machine) otherwise looks
   // identical from this title alone; GET /api/v1/health already returns it
@@ -414,8 +426,21 @@
         <button class="btn btn--primary" onclick={openLauncher}>New session</button>
       </div>
     {:else}
+      <input
+        type="search"
+        class="sessions__search"
+        placeholder="Search sessions…"
+        aria-label="Search sessions"
+        bind:value={searchQuery}
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+      />
+      {#if filteredSessions.length === 0}
+        <p class="sessions__loading">No sessions match "{searchQuery.trim()}".</p>
+      {/if}
       <ul class="session-list">
-        {#each sessions as session (session.id)}
+        {#each filteredSessions as session (session.id)}
           {@const isDeletable = session.state === "exited" || session.state === "lost"}
           <li class="session-row">
             <!-- svelte-ignore a11y_no_static_element_interactions -- a pure swipe-gesture
@@ -527,6 +552,12 @@
   }
   .sessions__loading {
     opacity: 0.6;
+  }
+  .sessions__search {
+    display: block;
+    width: 100%;
+    margin-bottom: var(--space-3);
+    font-size: 0.9rem;
   }
 
   /* Block: launcher -- the new-session form panel. */
