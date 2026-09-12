@@ -153,7 +153,13 @@
   .session {
     display: flex;
     flex-direction: column;
+    /* dvh, not vh -- vh includes the area behind mobile Chrome's collapsible
+       URL bar, so the page renders taller than what's actually visible
+       (docs/09-frontend.md#mobile). Paired with interactive-widget=resizes-
+       content in index.html so this also shrinks when the soft keyboard
+       opens, instead of leaving the key bar stranded below it. */
     height: 100vh;
+    height: 100dvh;
   }
   .session__header {
     display: flex;
