@@ -27,7 +27,15 @@
 </script>
 
 {#if sessionId}
-  <Session sessionId={sessionId} onBack={backToList} />
+  <!-- Keyed on sessionId: the hash can go straight from one #/sessions/X to
+       another #/sessions/Y without passing back through "#/" (a shared link,
+       a bookmark, Safari's own back/forward across two session views) --
+       without the key Svelte reuses this component across that change,
+       onMount never re-fires, and the old session's stream/data stays on
+       screen mislabeled as the new one. -->
+  {#key sessionId}
+    <Session sessionId={sessionId} onBack={backToList} />
+  {/key}
 {:else}
   <Sessions onOpen={openSession} />
 {/if}
