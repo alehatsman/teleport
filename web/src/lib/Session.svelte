@@ -138,13 +138,19 @@
   </main>
 
   <div class="key-bar">
-    <button class="key-bar__button" onclick={() => sendKey("\x1b")}>Esc</button>
-    <button class="key-bar__button" onclick={() => sendKey("\t")}>Tab</button>
-    <button class="key-bar__button" onclick={() => sendKey("\x03")}>Ctrl-C</button>
-    <button class="key-bar__button" onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
-    <button class="key-bar__button" onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
-    <button class="key-bar__button" onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
-    <button class="key-bar__button" onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
+    <div class="key-bar__row">
+      <button class="key-bar__button" onclick={() => sendKey("\x1b")}>Esc</button>
+      <button class="key-bar__button" onclick={() => sendKey("\t")}>Tab</button>
+      <button class="key-bar__button" onclick={() => sendKey("\x03")}>Ctrl-C</button>
+      <button class="key-bar__button" onclick={() => sendKey("\x1b[Z")}>Shift-Tab</button>
+    </div>
+    <div class="key-bar__row">
+      <button class="key-bar__button" onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
+      <button class="key-bar__button" onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
+      <button class="key-bar__button" onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
+      <button class="key-bar__button" onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
+      <button class="key-bar__button" onclick={() => sendKey("\r")}>Enter</button>
+    </div>
   </div>
 </div>
 
@@ -217,10 +223,15 @@
      (docs/09-frontend.md#mobile). */
   .key-bar {
     display: none;
-    gap: 0.3rem;
-    padding: 0.4rem;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.3rem;
     border-top: 1px solid var(--border);
     background: var(--surface);
+  }
+  .key-bar__row {
+    display: flex;
+    gap: 0.25rem;
   }
   .key-bar__button {
     flex: 1;
@@ -228,7 +239,8 @@
     color: inherit;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
-    padding: 0.5rem 0;
+    padding: 0.3rem 0;
+    font-size: 0.8rem;
   }
   .key-bar__button:active {
     background: var(--surface-hover);
