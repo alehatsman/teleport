@@ -14,6 +14,7 @@
   let term: XTerm;
   let fitAddon: FitAddon;
   let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
+  let letterboxRaf: number | null = null;
   let ptyCols = 80;
   let ptyRows = 24;
   // N3 (docs/15-open-questions.md#n3--xtermjs-write-pacing-on-reattach): a
@@ -56,6 +57,11 @@
     return () => {
       resizeObserver.disconnect();
       if (resizeDebounce) clearTimeout(resizeDebounce);
+      // setGeometry's rAF (below) outlives a teardown that lands between it
+      // being scheduled and the next paint -- a `resized` frame arriving
+      // right as the observer navigates away otherwise fires letterbox()
+      // after wrapperEl is unbound, throwing on wrapperEl.clientWidth.
+      if (letterboxRaf !== null) cancelAnimationFrame(letterboxRaf);
       term.dispose();
     };
   });
@@ -86,7 +92,7 @@
   // result is what makes that read as an intentional letterbox instead of a
   // terminal glued into the corner with the rest of the screen looking broken.
   function letterbox() {
-    if (!term?.element) return;
+    if (!term?.element || !wrapperEl) return;
     const scaleX = wrapperEl.clientWidth / term.element.scrollWidth;
     const scaleY = wrapperEl.clientHeight / term.element.scrollHeight;
     const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1);
@@ -133,7 +139,7 @@
     ptyRows = rows;
     if (term && !isController) {
       term.resize(cols, rows);
-      requestAnimationFrame(letterbox);
+      letterboxRaf = requestAnimationFrame(letterbox);
     }
   }
 
