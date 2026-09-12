@@ -84,7 +84,13 @@
     try {
       const res = await api.listPresets();
       presets = res.presets;
-      if (presets.length > 0) selectedPreset = presets[0].id;
+      // Claude Code is the common case -- default to it by id rather than
+      // presets[0], so a reordered or hand-edited presets.toml (M8's
+      // load_or_create writes the built-in default order, but nothing
+      // pins it) can't silently change what a blank launcher submits to.
+      const claude = presets.find((p) => p.id === "claude");
+      if (claude) selectedPreset = claude.id;
+      else if (presets.length > 0) selectedPreset = presets[0].id;
     } catch {
       // Presets are a convenience; the shell-command fallback still works.
     }
@@ -93,6 +99,10 @@
   async function openLauncher() {
     launchError = null;
     showLauncher = true;
+    // Prefill with the last-used directory -- typing the same path every
+    // launch is the friction this is meant to remove. Only when empty:
+    // never clobber whatever the person is mid-typing across a reopen.
+    if (!cwd && recentCwds.length > 0) cwd = recentCwds[0];
     await tick();
     firstFieldEl?.focus();
   }
@@ -217,6 +227,19 @@
             </datalist>
           {/if}
         </label>
+        {#if recentCwds.length > 0}
+          <!-- datalist above covers typing; these are for tapping -- a
+               datalist's dropdown affordance is inconsistent on mobile
+               (docs/09-frontend.md#mobile), and re-typing a path you've
+               already used is exactly the friction this removes. -->
+          <div class="launcher__recent">
+            {#each recentCwds as dir (dir)}
+              <button type="button" class="cwd-chip" class:cwd-chip--active={dir === cwd} onclick={() => (cwd = dir)}>
+                {dir}
+              </button>
+            {/each}
+          </div>
+        {/if}
         {#if launchError}
           <div class="banner banner--error" role="alert">{launchError}</div>
         {/if}
@@ -325,6 +348,42 @@
     display: flex;
     justify-content: flex-end;
     gap: var(--space-2);
+  }
+  .launcher__recent {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: -0.4rem;
+  }
+
+  /* Block: cwd-chip -- a tap-to-fill recent working directory (sibling of
+     launcher, not launcher__recent__chip: BEM elements don't nest). */
+  .cwd-chip {
+    background: var(--surface);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.3rem 0.55rem;
+    font-size: 0.78rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color var(--transition-fast),
+      border-color var(--transition-fast),
+      color var(--transition-fast);
+  }
+  .cwd-chip:hover {
+    border-color: var(--muted);
+    color: var(--fg);
+  }
+  .cwd-chip--active {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+    color: var(--fg);
   }
 
   /* Block: empty -- the no-sessions-yet placeholder. */
