@@ -166,6 +166,12 @@
        opens, instead of leaving the key bar stranded below it. */
     height: 100vh;
     height: 100dvh;
+    /* .toast (app.css) is position:absolute and there's no other positioned
+       ancestor anywhere in the app -- without this it anchors to the
+       initial containing block instead of this view, which only happens to
+       look right today because .session fills the viewport with no page
+       scroll. Making the actual containing block explicit here. */
+    position: relative;
   }
   .session__header {
     display: flex;
