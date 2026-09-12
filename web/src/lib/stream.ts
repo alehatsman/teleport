@@ -5,6 +5,7 @@
 
 import { createWsTicket, streamUrl } from "./api";
 import { CLIENT_ID, CLIENT_NAME } from "./identity";
+import { ApiError } from "./types";
 import type { ClientMessage, ErrorFrame, ServerFrame, StreamState } from "./types";
 
 const DESKTOP_TAIL = 1024 * 1024; // 1 MiB -- matches the daemon's own default_tail
@@ -94,8 +95,19 @@ export class SessionStream {
     let ticket: string;
     try {
       ticket = (await createWsTicket(this.sessionId)).ticket;
-    } catch {
+    } catch (e) {
       if (this.closedByCaller || generation !== this.connectGeneration) return;
+      // A 404 here means the daemon's live registry has no such session --
+      // true for a bad id, a purged session, and (per docs/01-architecture.md
+      // #the-crash-boundary) a "lost" one: its metadata survives a daemon
+      // restart but the live entry ws-ticket looks up does not, and never
+      // will on its own. Retrying that request never turns into a 200, so
+      // treat it like onClose already treats sawExit -- stop, don't spin
+      // "Connecting…" forever against a session that isn't coming back.
+      if (e instanceof ApiError && e.status === 404) {
+        this.callbacks.onState("closed");
+        return;
+      }
       this.scheduleReconnect();
       return;
     }
