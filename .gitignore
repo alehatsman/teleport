@@ -3,6 +3,9 @@
 /spike/target/
 /cli/target/
 
+# Dev daemon data (docs/09-frontend.md#dev-workflow) -- holds the auth token
+/.dev-data/
+
 # Web
 /web/node_modules/
 /web/dist/

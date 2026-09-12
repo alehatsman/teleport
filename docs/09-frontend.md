@@ -235,6 +235,16 @@ Vite's dev proxy must forward **both** `/api` HTTP and the WebSocket upgrade (`w
 The dev origin `http://localhost:5173` is allowlisted only in debug builds
 ([06-security.md](06-security.md#browser-origin-defense)).
 
+**To see it render on an actual phone** (not just resize your desktop
+browser), use [scripts/mobile-dev](../scripts/mobile-dev/README.md) — an
+isolated dev daemon, Tailscale Serve wiring, and two observation tools (Mac
+Chrome via CDP, and a real iOS device via `safaridriver`). Its README also
+covers several non-obvious gotchas (a naive headless-Chrome screenshot flag
+that produces false bug reports, an Origin-vs-Host port-matching rule that
+looks like a stuck "Connecting" state, and why real-device automation has to
+go through Apple's own WebDriver rather than the more obvious-looking
+`ios-webkit-debug-proxy` route).
+
 ## Explicitly not in the frontend
 
 ```text
