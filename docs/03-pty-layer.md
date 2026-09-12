@@ -113,6 +113,16 @@ Rules:
 - `cmd.cwd()` must receive a validated, existing directory.
 - Do **not** copy the daemon's full environment into metadata. The child inherits the
   daemon environment plus explicit overrides; overrides are redacted in API responses.
+- **`TERM`/`COLORTERM` get a default when the daemon's own environment has none** — found
+  live 2026-09-13: a teleportd installed as a background service (launchd/systemd, no
+  controlling terminal) inherits no `TERM` at all, and a child in that state renders
+  monochrome (color-detection libraries treat absent `TERM` as "dumb"). Identical PTY
+  bytes to every client, so every viewer sees it the same broken way regardless of
+  browser/device — not a rendering gap. `pty::spawn` fills in `TERM=xterm-256color` +
+  `COLORTERM=truecolor` only when `TERM` is unset; an interactively-started daemon's real
+  `TERM` (e.g. inside tmux) is left untouched, and an explicit `SpawnSpec::env` override
+  still wins over the default. Regression test:
+  `daemon/tests/pty_term_default.rs`.
 
 ## Reader loop
 
