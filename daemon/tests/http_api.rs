@@ -88,6 +88,10 @@ async fn unauthenticated_health_omits_device_fields() {
         body.get("device_name").is_none(),
         "unauthenticated /health must not leak device_name"
     );
+    assert!(
+        body.get("home_dir").is_none(),
+        "unauthenticated /health must not leak home_dir"
+    );
 }
 
 #[tokio::test]
@@ -99,6 +103,15 @@ async fn authenticated_health_includes_device_fields() {
     assert_eq!(body["device_name"], "test-device");
     assert!(body.get("uptime_ms").is_some());
     assert!(body.get("sessions_running").is_some());
+    // Same resolution the handler itself uses -- this machine really does
+    // have a home directory in CI/dev alike, so this isn't `.is_some()`
+    // padding; it pins the exact value.
+    let expected_home = directories::BaseDirs::new()
+        .expect("this test machine has a home directory")
+        .home_dir()
+        .display()
+        .to_string();
+    assert_eq!(body["home_dir"], expected_home);
 }
 
 #[tokio::test]

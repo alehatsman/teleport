@@ -82,6 +82,8 @@ export interface HealthResponse {
   device_id?: string;
   device_name?: string;
   platform?: string;
+  /** The daemon's own home directory -- lets the UI collapse a session's `cwd` to `~/...`. */
+  home_dir?: string;
   pid?: number;
   uptime_ms?: number;
   sessions_running?: number;

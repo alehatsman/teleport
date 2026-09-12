@@ -17,6 +17,11 @@
   // it. null while loading and left null on failure -- the plain "teleport"
   // title is a fine fallback, not worth a banner over.
   let deviceName: string | null = $state(null);
+  // Same health() call as deviceName -- lets session-row cwds collapse back
+  // to "~/..." instead of showing the full absolute path. null (no
+  // collapsing, cwd shown in full) while loading, on failure, or if the
+  // daemon couldn't resolve its own home directory.
+  let homeDir: string | null = $state(null);
 
   let showLauncher = $state(false);
   let launching = $state(false);
@@ -52,6 +57,21 @@
     return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS;
   }
 
+  // "/Users/aleh/projects/teleport" next to six other rows exactly like it
+  // is mostly noise -- collapse it to "~/projects/teleport" the way a
+  // shell prompt would, once we know the daemon's own home dir (homeDir is
+  // null until loadHealthInfo() resolves, or forever if the daemon
+  // couldn't determine one -- either way this is a no-op fallback, never
+  // wrong, just less pretty). Matches only a real path-segment boundary
+  // (homeDir itself, or homeDir + "/"), not an unrelated sibling directory
+  // that merely starts with the same characters (e.g. "/Users/aleh-test").
+  function displayCwd(cwd: string): string {
+    if (!homeDir) return cwd;
+    if (cwd === homeDir) return "~";
+    if (cwd.startsWith(`${homeDir}/`)) return `~${cwd.slice(homeDir.length)}`;
+    return cwd;
+  }
+
   // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
   // derived from the session list already on hand -- no new storage/endpoint.
   // Most-recent-use-first, deduped, capped so the dropdown stays scannable.
@@ -69,7 +89,7 @@
   });
 
   onMount(async () => {
-    await Promise.all([refresh(), loadPresets(), loadDeviceName()]);
+    await Promise.all([refresh(), loadPresets(), loadHealthInfo()]);
     loading = false;
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
     // open decision -- polling is the pragmatic interim answer for M5, not
@@ -107,10 +127,11 @@
     }
   }
 
-  async function loadDeviceName() {
+  async function loadHealthInfo() {
     try {
       const res = await api.health();
       deviceName = res.device_name ?? null;
+      homeDir = res.home_dir ?? null;
     } catch {
       // Same call the app already makes for other things; if it's failing
       // there's a bigger problem than the title, and that surfaces
@@ -331,7 +352,7 @@
                 <span class="sr-only">Needs attention.</span>
               {/if}
               <span class="session-row__command">{session.command}</span>
-              <span class="session-row__cwd">{session.cwd}</span>
+              <span class="session-row__cwd">{displayCwd(session.cwd)}</span>
               {#if session.controller}
                 <span class="session-row__controller">controlled by {session.controller}</span>
               {/if}

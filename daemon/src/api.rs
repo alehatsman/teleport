@@ -376,6 +376,13 @@ async fn health(
         body["device_id"] = state.device.device_id.clone().into();
         body["device_name"] = state.device.device_name.clone().into();
         body["platform"] = state.device.platform.clone().into();
+        // For the UI to collapse a session's cwd back to "~/..." instead of
+        // showing the full absolute path (docs/09-frontend.md#sessionssvelte)
+        // -- as identifying as device_name (reveals the username via the
+        // path), same authenticated-only gate.
+        if let Some(base) = directories::BaseDirs::new() {
+            body["home_dir"] = base.home_dir().display().to_string().into();
+        }
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
         body["sessions_running"] = state

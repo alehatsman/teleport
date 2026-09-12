@@ -62,6 +62,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "device_id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
   "device_name": "aleh-macbook",
   "platform": "macos-aarch64",
+  "home_dir": "/Users/aleh",
   "pid": 41003,
   "uptime_ms": 913402,
   "sessions_running": 3
@@ -70,6 +71,13 @@ decide whether to spawn a daemon, so it must answer before any credential exists
 
 The hostname is mildly identifying, so it sits behind the principal. Nothing else in the
 unauthenticated shape is sensitive — **do not add fields that are**.
+
+`home_dir` (the daemon process's own home directory, via the `directories` crate — not
+persisted, resolved fresh on every call) exists purely so the UI can collapse a session's
+`cwd` back to `~/...` for display instead of the full absolute path
+([09-frontend.md](09-frontend.md#sessionssvelte)); as identifying as `device_name` (it
+reveals the username via the path), same gate. `null`/omitted if unresolvable — the UI
+falls back to showing the path in full, same as it always has.
 
 `api_versions` and `capabilities` exist for **version skew**, which is unavoidable once
 native apps ship: an App Store build can be months behind a daemon the user updated this
