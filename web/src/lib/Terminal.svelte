@@ -76,8 +76,20 @@
     const scaleX = wrapperEl.clientWidth / term.element.scrollWidth;
     const scaleY = wrapperEl.clientHeight / term.element.scrollHeight;
     const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1);
-    const offsetX = Math.max((wrapperEl.clientWidth - term.element.scrollWidth * scale) / 2, 0);
-    const offsetY = Math.max((wrapperEl.clientHeight - term.element.scrollHeight * scale) / 2, 0);
+    // .terminal__surface (containerEl) is itself a flex container that
+    // centers term.element inside its own *unscaled* box (see that block's
+    // comment below) -- so term.element already sits pre-offset by
+    // (wrapperEl size - term.element size) / 2 on each axis before this
+    // transform ever runs. Centering the *scaled* element in the wrapper
+    // from there means solving for the translate that lands it there given
+    // that pre-offset, not assuming term.element starts at (0, 0). Working
+    // that through, the pre-offset term cancels out completely: the correct
+    // translate is just wrapperEl size * (1 - scale) / 2, independent of
+    // term.element's own size. Using the naive (wrapper - element*scale)/2
+    // here instead double-counts the flex pre-centering and clips
+    // term.element's edges once scale gets anywhere close to 1.
+    const offsetX = (wrapperEl.clientWidth * (1 - scale)) / 2;
+    const offsetY = (wrapperEl.clientHeight * (1 - scale)) / 2;
     containerEl.style.transformOrigin = "top left";
     // translate() composes after scale() here, so the offset is in final
     // (post-scale) screen pixels -- exactly the centering slack computed above.
@@ -150,7 +162,10 @@
        this build, exact amount depends on font metrics/viewport size).
        clientWidth/clientHeight -- what fitAddon.fit() reads to decide
        rows/cols -- come from this flex container itself, not from its
-       (centered) child, so this doesn't feed back into the row count. */
+       (centered) child, so this doesn't feed back into the row count.
+       letterbox() above depends on this centering the child *before* its
+       transform runs -- don't drop align-items/justify-content here
+       without updating that function's offset math to match. */
     display: flex;
     align-items: center;
     justify-content: center;
