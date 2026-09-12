@@ -41,33 +41,33 @@ impl Session {
 
     /// `claim_control`. Always preempts, including during another holder's
     /// grace window (docs/04-api-protocol.md#disconnect-grace: "the lease is
-    /// still preemptible"). Notifies the previous holder, if any and if
-    /// different, via `control_revoked`. Returns the epoch this connection
-    /// now holds.
+    /// still preemptible"). Notifies every *other* connection -- the
+    /// previous holder if any, and every other observer too, so a bystander
+    /// who never held the lease still learns who controls it now instead of
+    /// only finding out on their next reconnect -- via `control_revoked`.
+    /// Returns the epoch this connection now holds.
     pub fn claim_control(&self, client_id: &str, client_name: &str) -> u64 {
-        let (previous, epoch) = {
+        let (lost_by, epoch) = {
             let mut lease = self.control.lock();
-            let previous = match (lease.holder.take(), lease.holder_name.take()) {
-                (Some(holder), Some(name)) if holder != client_id => Some((holder, name)),
+            let lost_by = match (lease.holder.take(), lease.holder_name.take()) {
+                (Some(holder), Some(_name)) if holder != client_id => Some(holder),
                 _ => None,
             };
             lease.holder = Some(client_id.to_string());
             lease.holder_name = Some(client_name.to_string());
             lease.grace = false;
             lease.epoch += 1;
-            (previous, lease.epoch)
+            (lost_by, lease.epoch)
         };
-        if let Some((lost_by, _lost_name)) = previous {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "broadcast send; a failure here just means no one is currently listening for control-lease changes"
-            )]
-            let _ = self.events.send(SessionEvent::ControlRevoked {
-                lost_by,
-                new_controller_id: client_id.to_string(),
-                new_controller_name: client_name.to_string(),
-            });
-        }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "broadcast send; a failure here just means no one is currently listening for control-lease changes"
+        )]
+        let _ = self.events.send(SessionEvent::ControlRevoked {
+            lost_by,
+            new_controller_id: client_id.to_string(),
+            new_controller_name: client_name.to_string(),
+        });
         epoch
     }
 

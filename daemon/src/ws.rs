@@ -364,8 +364,17 @@ async fn run(
                     Ok(SessionEvent::Resized { cols, rows }) => {
                         send_json(&mut socket, &json!({ "type": "resized", "cols": cols, "rows": rows })).await;
                     }
-                    Ok(SessionEvent::ControlRevoked { lost_by, new_controller_id, new_controller_name }) => {
-                        if lost_by == client_id {
+                    Ok(SessionEvent::ControlRevoked { new_controller_id, new_controller_name, .. }) => {
+                        // Every connection except the new controller itself
+                        // -- the previous holder (this used to be the only
+                        // recipient) and any other observer alike, so an
+                        // idle bystander's "Take control (from X)" label
+                        // stays live instead of only updating on next
+                        // reconnect (docs/09-frontend.md: client_id "names
+                        // the controller in everyone else's UI"). Resetting
+                        // is_controlling is a no-op for a connection that
+                        // was never the controller to begin with.
+                        if new_controller_id != client_id {
                             is_controlling = None;
                             send_json(&mut socket, &json!({ "type": "control_revoked", "to": new_controller_name, "client_id": new_controller_id })).await;
                         }

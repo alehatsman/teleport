@@ -211,6 +211,100 @@ async fn claim_control_preempts_and_notifies_the_loser() {
     assert_eq!(revoked["client_id"], "b");
 }
 
+/// A bystander that never held the lease still learns who the new
+/// controller is, live -- not just the connection actually being preempted.
+/// Found live (mobile-dev, real Chrome + iPhone on the same session): an
+/// already-attached observer's "Take control (from X)" label stayed blank
+/// until the page was reloaded, contradicting docs/09-frontend.md's own
+/// claim that `client_id` "names the controller in everyone else's UI".
+#[tokio::test]
+async fn preemption_notifies_bystanders_too_not_just_the_loser() {
+    let daemon = support::spawn(support::default_config()).await;
+    let id = support::create_shell_session(&daemon, &[]);
+
+    let mut a = connect(
+        &daemon.ws_url(&format!(
+            "/api/v1/sessions/{id}/stream?client_id=a&mode=control"
+        )),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect a");
+    let _ = next_json(&mut a).await; // ready, controller
+
+    let mut bystander = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=bystander")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect bystander");
+    let _ = next_json(&mut bystander).await; // ready, observer -- never claims control
+
+    let mut c = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=c")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect c");
+    let _ = next_json(&mut c).await; // ready, observer
+
+    send_text(&mut c, json!({ "type": "claim_control" })).await;
+    let granted = next_json(&mut c).await;
+    assert_eq!(granted["type"], "control_granted");
+
+    let revoked_a = next_json(&mut a).await;
+    assert_eq!(revoked_a["type"], "control_revoked");
+    assert_eq!(revoked_a["client_id"], "c", "the actual loser must still be told");
+
+    let revoked_bystander = next_json(&mut bystander).await;
+    assert_eq!(revoked_bystander["type"], "control_revoked");
+    assert_eq!(
+        revoked_bystander["client_id"], "c",
+        "a connection that never held the lease must learn the new controller too"
+    );
+}
+
+/// Same as above, but for the case `claim_control_preempts_and_notifies_the_loser`
+/// doesn't cover: the lease was free (nobody to preempt) when it was
+/// claimed. `ControlRevoked` used to only fire when there was a previous
+/// holder, so an idle bystander watching a session with no controller yet
+/// never found out one had been claimed until it reconnected.
+#[tokio::test]
+async fn claiming_a_free_lease_notifies_bystanders() {
+    let daemon = support::spawn(support::default_config()).await;
+    let id = support::create_shell_session(&daemon, &[]);
+
+    let mut bystander = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=bystander")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect bystander");
+    let ready = next_json(&mut bystander).await;
+    assert_eq!(ready["control"], false, "lease starts free");
+
+    let mut claimer = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=claimer")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect claimer");
+    let _ = next_json(&mut claimer).await; // ready, observer
+
+    send_text(&mut claimer, json!({ "type": "claim_control" })).await;
+    let granted = next_json(&mut claimer).await;
+    assert_eq!(granted["type"], "control_granted");
+
+    let revoked_bystander = next_json(&mut bystander).await;
+    assert_eq!(revoked_bystander["type"], "control_revoked");
+    assert_eq!(revoked_bystander["client_id"], "claimer");
+}
+
 /// M4 review: the control lease used to be keyed purely on `client_id`, with
 /// no way to tell apart two simultaneous connections that happen to share
 /// one -- e.g. a reloaded tab racing its own not-yet-closed old socket. Both

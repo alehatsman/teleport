@@ -195,15 +195,22 @@ pub enum SessionEvent {
         /// The new size.
         rows: u16,
     },
-    /// `lost_by` addresses the notification -- only the connection whose
-    /// `client_id` matches acts on it. `new_controller_id`/`_name` are the
-    /// wire message's content: who control was given *to*
+    /// Fires on every successful `claim_control`, free lease or preemption
+    /// alike. `ws.rs` forwards it to every connection *except* the new
+    /// controller -- the previous holder (if any) and every other observer,
+    /// so a bystander who never held the lease still learns who controls it
+    /// now instead of only on their next reconnect. `new_controller_id`/
+    /// `_name` are the wire message's content: who control was given *to*
     /// (docs/04-api-protocol.md#control-messages:
     /// `{"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}`
-    /// -- both fields describe the new holder, not the one losing it).
+    /// -- both fields describe the new holder, not the recipient).
     ControlRevoked {
-        /// `client_id` of the connection that just lost control.
-        lost_by: String,
+        /// `client_id` of the connection that held the lease immediately
+        /// before this claim, if any -- `None` when the lease was free
+        /// (nothing to preempt). Not used for wire routing (every non-new-
+        /// controller connection gets the frame regardless); kept for
+        /// observability/logging.
+        lost_by: Option<String>,
         /// `client_id` of the connection control was given to.
         new_controller_id: String,
         /// Display name of the connection control was given to.

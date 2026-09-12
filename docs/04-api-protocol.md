@@ -556,6 +556,15 @@ immediately. The previous controller receives `control_revoked` and silently bec
 observer. No negotiation, no confirmation dialog: grabbing a runaway agent from a phone
 has to be one tap.
 
+`control_revoked` isn't only for the connection actually losing the lease — every other
+connection attached to the session gets it too (the new controller itself is the one
+exception), including one that never held it and a lease claimed from free rather than
+preempted. A bystander's own UI stays correct live instead of only refreshing on its
+next reconnect — the [client identity](#client-identity) section's "naming the current
+controller in the UI" is a promise to every attached client, not just the one just
+preempted (found live 2026-09-13: an idle observer's "Take control (from X)" label sat
+stale until the page was reloaded, before this was widened).
+
 Attaching is **not** a human action. Clients reconnect on their own, constantly, after
 every sleep and tunnel drop. If `mode=control` preempted, this would happen:
 
