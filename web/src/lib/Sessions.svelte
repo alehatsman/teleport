@@ -10,6 +10,13 @@
   let presets: Preset[] = $state([]);
   let loading = $state(true);
   let loadError: string | null = $state(null);
+  // Which machine this daemon is actually running on -- juggling more than
+  // one teleportd (a dev box, a laptop, a work machine) otherwise looks
+  // identical from this title alone; GET /api/v1/health already returns it
+  // (daemon/src/device.rs: defaults to the hostname), this just displays
+  // it. null while loading and left null on failure -- the plain "teleport"
+  // title is a fine fallback, not worth a banner over.
+  let deviceName: string | null = $state(null);
 
   let showLauncher = $state(false);
   let launching = $state(false);
@@ -62,7 +69,7 @@
   });
 
   onMount(async () => {
-    await Promise.all([refresh(), loadPresets()]);
+    await Promise.all([refresh(), loadPresets(), loadDeviceName()]);
     loading = false;
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
     // open decision -- polling is the pragmatic interim answer for M5, not
@@ -97,6 +104,17 @@
       else if (presets.length > 0) selectedPreset = presets[0].id;
     } catch {
       // Presets are a convenience; the shell-command fallback still works.
+    }
+  }
+
+  async function loadDeviceName() {
+    try {
+      const res = await api.health();
+      deviceName = res.device_name ?? null;
+    } catch {
+      // Same call the app already makes for other things; if it's failing
+      // there's a bigger problem than the title, and that surfaces
+      // elsewhere (loadError from refresh()). Not worth a second banner.
     }
   }
 
@@ -189,9 +207,12 @@
 
 <div class="sessions">
   <header class="sessions__header">
-    <h1 class="sessions__title"><span class="sessions__prompt" aria-hidden="true">&rsaquo;</span>teleport</h1>
+    <h1 class="sessions__title">
+      <span class="sessions__prompt" aria-hidden="true">&rsaquo;</span>teleport{#if deviceName}<span
+          class="sessions__host">&nbsp;(host: {deviceName})</span>{/if}
+    </h1>
     <button
-      class="btn btn--primary"
+      class="btn btn--primary sessions__new-btn"
       onclick={openLauncher}
       aria-expanded={showLauncher}
       aria-controls="launcher-panel"
@@ -346,10 +367,27 @@
     letter-spacing: 0.01em;
     margin: 0;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    /* The host suffix is a real hostname -- unbounded length -- unlike the
+       literal "teleport" this used to be alone. overflow:hidden gives this
+       flex item an automatic min-width of 0 (Session.svelte's control-btn
+       fix hit the same flexbox rule), so a long one ellipsizes instead of
+       pushing "New session" off the header or wrapping to a second line. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sessions__prompt {
     color: var(--accent);
     margin-right: 0.3rem;
+  }
+  .sessions__host {
+    font-weight: 400;
+    opacity: 0.6;
+  }
+  .sessions__new-btn {
+    /* Fixed, short label -- let the title (unbounded host name) be the one
+       that shrinks; this never should. */
+    flex-shrink: 0;
   }
   .sessions__loading {
     opacity: 0.6;
