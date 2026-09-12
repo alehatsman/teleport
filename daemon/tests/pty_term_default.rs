@@ -82,7 +82,11 @@ fn spawn_sh(script: &str, env: &[(String, String)]) -> (pty::SpawnedSession, Rec
     (spawned, out_rx)
 }
 
-fn recv_until(rx: &Receiver<Vec<u8>>, timeout: Duration, mut pred: impl FnMut(&[u8]) -> bool) -> Vec<u8> {
+fn recv_until(
+    rx: &Receiver<Vec<u8>>,
+    timeout: Duration,
+    mut pred: impl FnMut(&[u8]) -> bool,
+) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     let mut acc = Vec::new();
     loop {

@@ -257,7 +257,10 @@ async fn preemption_notifies_bystanders_too_not_just_the_loser() {
 
     let revoked_a = next_json(&mut a).await;
     assert_eq!(revoked_a["type"], "control_revoked");
-    assert_eq!(revoked_a["client_id"], "c", "the actual loser must still be told");
+    assert_eq!(
+        revoked_a["client_id"], "c",
+        "the actual loser must still be told"
+    );
 
     let revoked_bystander = next_json(&mut bystander).await;
     assert_eq!(revoked_bystander["type"], "control_revoked");
