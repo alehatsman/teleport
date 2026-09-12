@@ -20,6 +20,7 @@ use crate::persistence;
 use crate::pty::{self, SpawnSpec};
 
 use super::fanout::Fanout;
+use super::osc;
 use super::types::{
     ControlLease, Runtime, SessionId, SessionLostReason, SessionMeta, SessionState,
     EVENT_CHANNEL_CAPACITY,
@@ -311,6 +312,11 @@ impl SessionManager {
         let last_bell_persist_ms = Arc::new(AtomicI64::new(0));
         let output_for_closure = Arc::clone(&last_output_at_ms);
         let bell_for_closure = Arc::clone(&last_bell_ms);
+        let title = Arc::new(Mutex::new(None));
+        let claude_resume_id = Arc::new(Mutex::new(None));
+        let title_for_closure = Arc::clone(&title);
+        let resume_id_for_closure = Arc::clone(&claude_resume_id);
+        let mut osc_scanner = osc::OscScanner::default();
         let spawned = pty::spawn(spec, move |bytes| {
             let (events, next_offset) = {
                 let mut fanout = publish_fanout.lock();
@@ -320,6 +326,17 @@ impl SessionManager {
             trace_log_events(id, &events);
             let now = now_ms();
             output_for_closure.store(now, Ordering::Relaxed);
+            // Terminal-title / Claude-resume-link scan (osc.rs) -- same
+            // "reader loop already scans every byte" reasoning as BEL
+            // detection just below. Every update replaces the previous one
+            // outright: only the most recent title/resume-link is ever
+            // useful, there's no history to preserve.
+            for update in osc_scanner.feed(bytes) {
+                match update {
+                    osc::OscUpdate::Title(t) => *title_for_closure.lock() = Some(t),
+                    osc::OscUpdate::ClaudeResumeId(resume_id) => *resume_id_for_closure.lock() = Some(resume_id),
+                }
+            }
             // BEL detection (docs/13-native-clients.md#detection-heuristics:
             // "the reader loop already scans every byte"). Every occurrence
             // updates the in-memory reading; the `session_events` write is
@@ -397,6 +414,8 @@ impl SessionManager {
             last_output_at_ms,
             last_bell_ms,
             idle_since_ms,
+            title,
+            claude_resume_id,
         });
         self.sessions.lock().insert(id, Arc::clone(&session));
         spawn_exit_listener(Arc::clone(&session), spawned.exit_rx);

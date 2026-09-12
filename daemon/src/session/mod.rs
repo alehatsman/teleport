@@ -76,6 +76,7 @@
 mod control;
 mod fanout;
 mod manager;
+mod osc;
 mod replay;
 mod types;
 
@@ -175,6 +176,25 @@ pub struct Session {
     /// output stopped (not "when the threshold was crossed" -- "since when
     /// has this been quiet" is the more useful number for a UI badge).
     idle_since_ms: Arc<AtomicI64>,
+    /// The agent's own terminal-title updates (`osc::OscScanner`), e.g.
+    /// Claude Code's "✳ Say hello" -- a short live summary of what the
+    /// session is actually doing, for the session list
+    /// (docs/04-api-protocol.md#get-apiv1sessions). `Mutex<Option<String>>`
+    /// rather than an atomic: this is a string, not a number, but it's the
+    /// same "touched from the reader thread, read from an API handler"
+    /// shape as `last_bell_ms` above, so the same `Arc`-built-before-
+    /// `Session`-exists reasoning applies. `None` until the agent sets one
+    /// (or if it never does -- a plain shell, an older Claude Code build).
+    title: Arc<Mutex<Option<String>>>,
+    /// A Claude Code resumable-conversation id (`session_<id>`), pulled
+    /// from an OSC 8 hyperlink in its own startup banner
+    /// (`osc::OscScanner`) -- lets a dead session's row offer "resume this
+    /// exact conversation" instead of only "start fresh"
+    /// (docs/04-api-protocol.md#get-apiv1sessions). Rests on Claude Code's
+    /// current output format, not a documented contract -- `None` if it
+    /// never appeared, same as any other agent/preset that isn't Claude
+    /// Code at all.
+    claude_resume_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Session {
@@ -391,6 +411,21 @@ impl Session {
             0 => None,
             ms => Some(ms),
         }
+    }
+
+    /// `GET /api/v1/sessions`'s `title` -- the agent's own most recent
+    /// terminal-title update (`osc.rs`), e.g. Claude Code's "✳ Say hello".
+    /// `None` if it never set one (a plain shell, an older CLI build).
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().clone()
+    }
+
+    /// `GET /api/v1/sessions`'s `claude_resume_id` -- pulled from a Claude
+    /// Code resumable-conversation link in this session's own output
+    /// (`osc.rs`). `None` for anything that isn't Claude Code, or if the
+    /// link never appeared.
+    pub fn claude_resume_id(&self) -> Option<String> {
+        self.claude_resume_id.lock().clone()
     }
 
     /// Called from `main.rs`'s idle-sweep task, once per session per tick

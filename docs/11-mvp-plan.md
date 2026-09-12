@@ -671,6 +671,45 @@ reusing M6's "independently re-verified" language for something narrower.
 > `GET /api/v1/sessions/{id}` showed `args: ["--resume", "fake-test-session-id-123"]`,
 > and watched the CLI's own picker render on-device.
 
+> **Terminal title + auto-detected resume id, 2026-09-13.** The resume field above still
+> needed the id typed or pasted in by hand. Investigated whether Claude Code exposes
+> anything usable for either a tmux-style "what is this session doing" summary or the
+> resume id itself, live against a real session's raw output
+> (`GET /api/v1/sessions/{id}/log`): it does, both via plain xterm OSC escape sequences
+> already in its startup banner -- `\x1b]0;✳ Claude Code\x07` (OSC 0, updates live to a
+> short summary of the current task, e.g. "✳ Say hello", confirmed by actually giving it
+> one) and `\x1b]8;id=...;https://claude.ai/code/session_<id>?from=cli\x07` (OSC 8, a
+> hyperlink whose URI carries its own resumable-conversation id).
+>
+> `session/osc.rs`: a small hand-rolled incremental scanner (no VT/ANSI-parsing
+> dependency added -- the actual need is narrow enough that pulling one in would be the
+> "reject complexity" call, not this) for exactly these two OSC codes, correct across PTY
+> read chunk boundaries (a title can arrive split across two `on_output` calls) and
+> bounded (a malformed/adversarial unterminated OSC sequence can't buffer forever). Wired
+> into `session/manager.rs`'s existing output closure right next to BEL detection --
+> same "the reader loop already scans every byte" reasoning. `Session::title`/
+> `claude_resume_id`, `GET /api/v1/sessions`' `title`/`claude_resume_id`
+> (docs/04-api-protocol.md#get-apiv1sessions) -- both live-only, same tradeoff
+> `last_bell_ms`/`idle_since_ms` already made, not a new one.
+>
+> **Explicitly not a documented contract**: both rest on Claude Code's own current
+> terminal output format, not a versioned API teleport controls. A future CLI build
+> changing or dropping either sequence degrades silently to `null` -- never a parse
+> error, never a broken session; called out in both `osc.rs`'s module doc and the API
+> doc rather than presented as a guarantee.
+>
+> Web: `Sessions.svelte` shows the title next to `command` when present ("claude
+> (Say hello)") and, on a closed session that has a `claude_resume_id`, a "Resume this"
+> action that opens the launcher pre-filled with it instead of requiring the id typed in
+> by hand.
+>
+> 9 new `session/osc.rs` unit tests (chunk-split titles, ST vs. BEL termination, an
+> unrelated OSC 8 hyperlink correctly ignored, the unterminated-sequence bound) plus 3
+> `daemon/tests/osc_title_and_resume.rs` end-to-end cases through a real spawned process
+> and `SessionManager`. `cargo test` (65 lib + all integration suites) and
+> `cargo clippy --all-targets` both clean. `svelte-check` + `vite build` clean; verified
+> live via `scripts/mobile-dev` against a real running `claude` session.
+
 ---
 
 ## M9 — Tailscale Serve

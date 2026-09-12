@@ -157,13 +157,30 @@ UI can show why.
       "controller": "aleh's laptop",
       "subscribers": 2,
       "last_bell_ms": null,
-      "idle_since_ms": null
+      "idle_since_ms": null,
+      "title": null,
+      "claude_resume_id": null
     }
   ]
 }
 ```
 
 Sort newest-first. `env` never appears.
+
+**`title` / `claude_resume_id`** (`session/osc.rs`): both `null` unless the agent's own
+output has actually carried one -- neither is a teleport concept, both are read out of
+escape sequences the agent chooses to emit, on a format teleport does not control or
+version. `title` is the agent's own most recent xterm "set window title" update (OSC 0 or
+2 — Claude Code's own startup banner sets one, then updates it as a short live summary of
+what it's doing, "✳ Say hello" style); a session list can show it next to `command` the
+way a tmux window name would. `claude_resume_id` is a Claude Code resumable-conversation
+id (`session_<id>`), pulled from an OSC 8 hyperlink in Claude Code's own banner —
+launching a *new* session with `args: ["--resume", claude_resume_id]` against the
+`claude` preset resumes that exact conversation (docs/11-mvp-plan.md#m8--agent-presets);
+most useful once the session that had it has gone `exited`/`lost` and can't itself be
+attached to anymore. Both are computed in memory only, same as `last_bell_ms`/
+`idle_since_ms` above, and are lost once a session falls out of the in-memory map (GC, or
+a daemon restart) — not persisted, not a `session_events` row, nothing to migrate.
 
 **`last_bell_ms` / `idle_since_ms`** (formerly docs/15-open-questions.md's D3;
 docs/13-native-clients.md#detection-heuristics): attention signals, both `null` unless

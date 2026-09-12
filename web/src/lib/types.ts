@@ -32,6 +32,10 @@ export interface Session {
   /** D3 (docs/04-api-protocol.md#get-apiv1sessions). */
   last_bell_ms: number | null;
   idle_since_ms: number | null;
+  /** The agent's own most recent terminal-title update, e.g. Claude Code's "✳ Say hello". */
+  title: string | null;
+  /** A Claude Code resumable-conversation id (`session_<id>`), if this session's output ever carried one. */
+  claude_resume_id: string | null;
 }
 
 export interface SessionsResponse {

@@ -519,6 +519,13 @@ struct SessionView {
     /// D3 (docs/04-api-protocol.md#get-apiv1sessions).
     last_bell_ms: Option<i64>,
     idle_since_ms: Option<i64>,
+    /// The agent's own most recent terminal-title update
+    /// (docs/04-api-protocol.md#get-apiv1sessions; `session/osc.rs`).
+    title: Option<String>,
+    /// A Claude Code resumable-conversation id, if this session's own
+    /// output ever carried one (docs/04-api-protocol.md#get-apiv1sessions;
+    /// `session/osc.rs`).
+    claude_resume_id: Option<String>,
 }
 
 impl SessionView {
@@ -545,6 +552,8 @@ impl SessionView {
             subscribers: session.subscriber_count(),
             last_bell_ms: session.last_bell_ms(),
             idle_since_ms: session.idle_since_ms(),
+            title: session.title(),
+            claude_resume_id: session.claude_resume_id(),
         }
     }
 
@@ -554,6 +563,11 @@ impl SessionView {
     /// recovered row is never a `Session`). Same reasoning for
     /// `last_bell_ms`/`idle_since_ms`: attention signals are "does this
     /// running session need you," which a closed session never does.
+    /// `title`/`claude_resume_id` are never persisted either (same
+    /// live-only tradeoff), so a session old enough to have fallen out of
+    /// the in-memory map -- GC, or a daemon restart -- loses them too; the
+    /// resume-id specifically is still visible for a while after a session
+    /// exits (GC's own delay, not this), just not forever.
     fn from_row(row: &persistence::SessionRow) -> Self {
         SessionView {
             id: row.id.clone(),
@@ -576,6 +590,8 @@ impl SessionView {
             subscribers: 0,
             last_bell_ms: None,
             idle_since_ms: None,
+            title: None,
+            claude_resume_id: None,
         }
     }
 }

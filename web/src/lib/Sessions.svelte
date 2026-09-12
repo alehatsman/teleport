@@ -12,15 +12,30 @@
   let loadError: string | null = $state(null);
   let searchQuery = $state("");
 
+  // Status toggle alongside the text search below. "Active" (the default --
+  // a finished session isn't what you're scanning for day to day) is
+  // running|closing; "closed" is exited|lost, i.e. isDeletable's own split
+  // further down. Not persisted, same as searchQuery -- reopening the page
+  // is a fresh look at what's live now, not a resumed filter session.
+  let statusFilter: "active" | "closed" = $state("active");
+
+  function isActiveStatus(s: Session): boolean {
+    return s.state === "running" || s.state === "closing";
+  }
+
+  let activeCount: number = $derived(sessions.filter(isActiveStatus).length);
+  let closedCount: number = $derived(sessions.length - activeCount);
+
   // Client-side only -- the full list is already on hand from polling, and
   // a session count that ever justified a server-side search endpoint
   // instead would justify pagination first. Matches command or cwd
   // (against the real absolute path, not the "~/..." display string --
   // typing the username you already know shouldn't be punished for it).
   let filteredSessions: Session[] = $derived.by(() => {
+    const byStatus = sessions.filter((s) => isActiveStatus(s) === (statusFilter === "active"));
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q));
+    if (!q) return byStatus;
+    return byStatus.filter((s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q));
   });
   // Which machine this daemon is actually running on -- juggling more than
   // one teleportd (a dev box, a laptop, a work machine) otherwise looks
@@ -159,6 +174,20 @@
     // launch is the friction this is meant to remove. Only when empty:
     // never clobber whatever the person is mid-typing across a reopen.
     if (!cwd && recentCwds.length > 0) cwd = recentCwds[0];
+    await tick();
+    firstFieldEl?.focus();
+  }
+
+  /** "Resume this" on a closed session with a known claude_resume_id -- opens the
+      launcher already set up to continue that exact conversation instead of making
+      the id be found, copied, and pasted in by hand. */
+  async function openResumeLauncher(session: Session) {
+    if (!session.claude_resume_id) return;
+    launchError = null;
+    showLauncher = true;
+    selectedPreset = "claude";
+    resumeSessionId = session.claude_resume_id;
+    cwd = session.cwd;
     await tick();
     firstFieldEl?.focus();
   }
@@ -426,6 +455,28 @@
         <button class="btn btn--primary" onclick={openLauncher}>New session</button>
       </div>
     {:else}
+      <div class="status-toggle" role="tablist" aria-label="Filter by status">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={statusFilter === "active"}
+          class="status-toggle__option"
+          class:status-toggle__option--active={statusFilter === "active"}
+          onclick={() => (statusFilter = "active")}
+        >
+          Active ({activeCount})
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={statusFilter === "closed"}
+          class="status-toggle__option"
+          class:status-toggle__option--active={statusFilter === "closed"}
+          onclick={() => (statusFilter = "closed")}
+        >
+          Closed ({closedCount})
+        </button>
+      </div>
       <input
         type="search"
         class="sessions__search"
@@ -437,7 +488,13 @@
         spellcheck="false"
       />
       {#if filteredSessions.length === 0}
-        <p class="sessions__loading">No sessions match "{searchQuery.trim()}".</p>
+        <p class="sessions__loading">
+          {#if searchQuery.trim()}
+            No {statusFilter} sessions match "{searchQuery.trim()}".
+          {:else}
+            No {statusFilter} sessions.
+          {/if}
+        </p>
       {/if}
       <ul class="session-list">
         {#each filteredSessions as session (session.id)}
@@ -482,11 +539,23 @@
                   <span class="sr-only">Needs attention.</span>
                 {/if}
                 <span class="session-row__command">{session.command}</span>
+                {#if session.title}
+                  <span class="session-row__title">({session.title})</span>
+                {/if}
                 <span class="session-row__cwd">{displayCwd(session.cwd)}</span>
                 {#if session.controller}
                   <span class="session-row__controller">controlled by {session.controller}</span>
                 {/if}
               </a>
+              {#if isDeletable && session.claude_resume_id}
+                <button
+                  type="button"
+                  class="session-row__resume"
+                  onclick={() => openResumeLauncher(session)}
+                >
+                  ↻ Resume
+                </button>
+              {/if}
             </div>
             <button
               class="session-row__action"
@@ -558,6 +627,29 @@
     width: 100%;
     margin-bottom: var(--space-3);
     font-size: 0.9rem;
+  }
+  .status-toggle {
+    display: flex;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+  .status-toggle__option {
+    background: var(--surface);
+    color: var(--muted);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.3rem 0.65rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .status-toggle__option:hover {
+    border-color: var(--muted);
+    color: var(--fg);
+  }
+  .status-toggle__option--active {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+    color: var(--fg);
   }
 
   /* Block: launcher -- the new-session form panel. */
@@ -757,6 +849,31 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .session-row__title {
+    /* The agent's own words, not teleport's -- distinct from .session-row__command
+       (what's running) and .session-row__cwd (where), so it reads as neither. */
+    font-style: italic;
+    opacity: 0.7;
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .session-row__resume {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+    color: var(--accent);
+    background: none;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .session-row__resume:hover {
+    background: var(--surface-hover);
   }
   .session-row__controller {
     margin-left: auto;
