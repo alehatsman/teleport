@@ -224,6 +224,84 @@
       loadError = e instanceof Error ? e.message : String(e);
     }
   }
+
+  // -- iOS-style swipe-to-reveal on a session row ----------------------
+  //
+  // The action button (terminate/delete) is a real element in the DOM at
+  // all times, not conjured up by the gesture -- a mouse has no touch
+  // events to swipe with at all, so on a device with a fine pointer
+  // (`@media (hover: hover) and (pointer: fine)` below) the row leaves
+  // permanent room for it and it's just... a button, always visible, no
+  // gesture required. Touch devices additionally get the swipe: the front
+  // layer covers the action button by default (plain DOM paint order, no
+  // z-index needed) and dragging it left slides it out of the way.
+  //
+  // Only one row open at a time; REVEAL_PX must match .session-row__action's
+  // width below (kept as plain numbers, not a shared CSS custom property --
+  // it's one value, every use next to a comment pointing at the other).
+  const REVEAL_PX = 72;
+  const OPEN_THRESHOLD_PX = REVEAL_PX / 2;
+
+  let openRowId: string | null = $state(null);
+  let dragRowId: string | null = $state(null);
+  let dragOffsetPx = $state(0);
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchDirection: "horizontal" | "vertical" | null = null;
+
+  function closeSwipe() {
+    openRowId = null;
+  }
+
+  /** The live transform for one row's front layer -- mid-drag, snapped open, or resting closed. */
+  function rowOffset(sessionId: string): number {
+    if (dragRowId === sessionId) return dragOffsetPx;
+    return openRowId === sessionId ? -REVEAL_PX : 0;
+  }
+
+  function onRowTouchStart(e: TouchEvent, sessionId: string) {
+    const touch = e.touches[0];
+    if (!touch) return;
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchDirection = null;
+    dragRowId = sessionId;
+    // Start from wherever this row already sits -- swiping an open row
+    // shut feels continuous instead of jumping back to 0 first.
+    dragOffsetPx = openRowId === sessionId ? -REVEAL_PX : 0;
+  }
+
+  function onRowTouchMove(e: TouchEvent, sessionId: string) {
+    if (dragRowId !== sessionId) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    const dx = touch.clientX - touchStartX;
+    const dy = touch.clientY - touchStartY;
+    if (touchDirection === null) {
+      // A few px of wobble right at touchdown is normal on any gesture --
+      // don't commit to horizontal (swipe) vs vertical (scroll) before the
+      // direction is actually clear.
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      touchDirection = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+      if (touchDirection === "vertical") {
+        // This is a page scroll, not a swipe -- let go and let the browser's
+        // own native scrolling handle it from here (touch-action: pan-y
+        // below keeps that native path unblocked while we're undecided).
+        dragRowId = null;
+        return;
+      }
+    }
+    if (touchDirection !== "horizontal") return;
+    e.preventDefault(); // committed to a horizontal swipe now -- stop the page scrolling along with it
+    const base = openRowId === sessionId ? -REVEAL_PX : 0;
+    dragOffsetPx = Math.min(0, Math.max(-REVEAL_PX, base + dx));
+  }
+
+  function onRowTouchEnd(sessionId: string) {
+    if (dragRowId !== sessionId) return;
+    dragRowId = null;
+    openRowId = dragOffsetPx <= -OPEN_THRESHOLD_PX ? sessionId : null;
+  }
 </script>
 
 <div class="sessions">
@@ -338,30 +416,67 @@
     {:else}
       <ul class="session-list">
         {#each sessions as session (session.id)}
+          {@const isDeletable = session.state === "exited" || session.state === "lost"}
           <li class="session-row">
-            <a class="session-row__link" href={`#/sessions/${session.id}`} onclick={() => onOpen(session.id)}>
-              <span
-                class="dot"
-                aria-hidden="true"
-                class:dot--success={session.state === "running"}
-                class:dot--warning={session.state === "lost"}
-              ></span>
-              <span class="sr-only">{STATE_LABELS[session.state]}.</span>
-              {#if needsAttention(session)}
-                <span class="session-row__attention" aria-hidden="true">●</span>
-                <span class="sr-only">Needs attention.</span>
-              {/if}
-              <span class="session-row__command">{session.command}</span>
-              <span class="session-row__cwd">{displayCwd(session.cwd)}</span>
-              {#if session.controller}
-                <span class="session-row__controller">controlled by {session.controller}</span>
-              {/if}
-            </a>
-            {#if session.state === "exited" || session.state === "lost"}
-              <button class="btn btn--danger" onclick={() => purge(session.id)}>Delete</button>
-            {:else}
-              <button class="btn" onclick={() => terminate(session.id)}>Terminate</button>
-            {/if}
+            <!-- svelte-ignore a11y_no_static_element_interactions -- a pure swipe-gesture
+                 surface, not itself a control: the actual interactive elements are the <a>
+                 link inside it and the .session-row__action button beside it, both fully
+                 operable by keyboard/AT with no dependency on these touch handlers. -->
+            <div
+              class="session-row__front"
+              style="transform: translateX({rowOffset(session.id)}px)"
+              ontouchstart={(e) => onRowTouchStart(e, session.id)}
+              ontouchmove={(e) => onRowTouchMove(e, session.id)}
+              ontouchend={() => onRowTouchEnd(session.id)}
+              ontouchcancel={() => onRowTouchEnd(session.id)}
+            >
+              <a
+                class="session-row__link"
+                href={`#/sessions/${session.id}`}
+                onclick={(e) => {
+                  if (openRowId === session.id) {
+                    // Swiped open -- the tap dismisses the reveal instead of
+                    // also navigating, same as tapping the content of an
+                    // open iOS swipe action does.
+                    e.preventDefault();
+                    closeSwipe();
+                    return;
+                  }
+                  onOpen(session.id);
+                }}
+              >
+                <span
+                  class="dot"
+                  aria-hidden="true"
+                  class:dot--success={session.state === "running"}
+                  class:dot--warning={session.state === "lost"}
+                ></span>
+                <span class="sr-only">{STATE_LABELS[session.state]}.</span>
+                {#if needsAttention(session)}
+                  <span class="session-row__attention" aria-hidden="true">●</span>
+                  <span class="sr-only">Needs attention.</span>
+                {/if}
+                <span class="session-row__command">{session.command}</span>
+                <span class="session-row__cwd">{displayCwd(session.cwd)}</span>
+                {#if session.controller}
+                  <span class="session-row__controller">controlled by {session.controller}</span>
+                {/if}
+              </a>
+            </div>
+            <button
+              class="session-row__action"
+              class:session-row__action--danger={isDeletable}
+              aria-label={isDeletable ? "Delete session" : "Terminate session"}
+              onclick={() => {
+                closeSwipe();
+                if (isDeletable) purge(session.id);
+                else terminate(session.id);
+              }}
+            >
+              <svg class="session-row__action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" fill="none" />
+              </svg>
+            </button>
           </li>
         {/each}
       </ul>
@@ -507,26 +622,77 @@
     gap: var(--space-2);
   }
 
-  /* Block: session-row -- one row in the session list. */
+  /* Block: session-row -- one row in the session list. Two layers: a
+     trailing action button that's always in the DOM (position: absolute,
+     first in source order) and a front layer on top of it at full width by
+     default -- plain paint order hides the action with zero z-index rules,
+     no JS needed to "reveal" it, just a transform to slide the front layer
+     out of the way (touch) or narrow it to leave room (pointer:fine below). */
   .session-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    background: var(--surface);
+    position: relative;
+    overflow: hidden; /* clips the front layer's slide + the action button to this row's own rounded corners */
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 0.7rem var(--space-3);
     transition:
       border-color var(--transition-fast),
-      background-color var(--transition-fast),
-      transform var(--transition-fast),
       box-shadow var(--transition-fast);
   }
   .session-row:hover {
     border-color: var(--border-strong);
-    background: var(--surface-hover);
-    transform: translateY(-1px);
     box-shadow: var(--shadow-raised);
+  }
+  /* REVEAL_PX in the script block must match this width. */
+  .session-row__action {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: 72px;
+    /* .session-row__link needs to come before this button in DOM order for
+       correct tab order (content before the destructive action), but that
+       makes this button the *later* of the two positioned siblings --
+       painted on top by default under plain DOM-order stacking, which is
+       backwards from what a hidden-until-swiped action needs. Explicit
+       z-index (below), not source order, decides paint order here. */
+    z-index: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    color: var(--fg);
+    background: var(--surface-hover);
+  }
+  .session-row__action--danger {
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+  }
+  .session-row__action-icon {
+    width: 18px;
+    height: 18px;
+  }
+  .session-row__front {
+    position: relative; /* enters the same explicit stacking order as .session-row__action -- see its z-index comment */
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    background: var(--surface);
+    padding: 0.7rem var(--space-3);
+    transition: transform var(--transition-fast);
+    /* Let the browser's native scroller own vertical panning; our touch
+       handlers only ever act on a horizontal drag (and preventDefault()
+       there once it's clearly one), so this keeps page scroll from
+       stuttering while a gesture is still ambiguous. */
+    touch-action: pan-y;
+  }
+  /* A mouse has no swipe to reveal the action with -- leave it permanently
+     visible instead of hiding a destructive action behind a gesture that
+     doesn't exist on this input type (matches .key-bar's own
+     touch-only/pointer-fine split in Session.svelte). */
+  @media (hover: hover) and (pointer: fine) {
+    .session-row__front {
+      width: calc(100% - 72px);
+    }
   }
   .session-row__link {
     flex: 1;
@@ -541,6 +707,7 @@
     cursor: pointer;
     padding: 0;
     overflow: hidden;
+    min-width: 0;
   }
   .session-row__attention {
     color: var(--attention);
