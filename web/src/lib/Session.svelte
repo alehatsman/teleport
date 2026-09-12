@@ -237,10 +237,20 @@
        squeezed .session__title down to a couple of characters. overflow:
        hidden gives this flex item an automatic min-width of 0 (flexbox:
        the automatic minimum size of a flex item with non-visible overflow
-       is 0), so it can actually shrink instead of forcing the wrap. */
+       is 0), so it can actually shrink instead of forcing the wrap.
+       overflow:hidden alone stops the wrap but doesn't stop the squeeze:
+       two equally-shrinkable flex items split the deficit in proportion to
+       their own natural width, so this button (much longer, once a real
+       name is in it) still claimed the lion's share of the header and left
+       .session__title unreadable -- caught live with a real controller
+       name ("Take control (from Chrome on macOS)" crushed "claude" down to
+       "clau…"), not just the short/nameless label this was first written
+       against. A max-width caps this button's own claim so .session__title
+       keeps a usable share regardless of how long the name is. */
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    max-width: 50%;
   }
   .session__main {
     flex: 1;
