@@ -17,6 +17,10 @@
   let selectedPreset = $state("");
   let customCommand = $state("/bin/sh");
   let cwd = $state("");
+  // claude-preset-only, and deliberately not persisted/prefilled like cwd
+  // is -- resuming is a one-off action on a specific launch, not a habit
+  // worth remembering for the next one.
+  let resumeSessionId = $state("");
   let firstFieldEl: HTMLSelectElement | undefined = $state();
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -98,6 +102,7 @@
 
   async function openLauncher() {
     launchError = null;
+    resumeSessionId = "";
     showLauncher = true;
     // Prefill with the last-used directory -- typing the same path every
     // launch is the friction this is meant to remove. Only when empty:
@@ -124,8 +129,20 @@
     launching = true;
     launchError = null;
     try {
+      // Only claude actually understands `--resume`; the field itself is
+      // hidden for any other preset, but the trim-and-check happens here
+      // too so a stale value left over from switching presets mid-launcher
+      // session can never leak into an unrelated command's argv.
+      const resumeId = selectedPreset === "claude" ? resumeSessionId.trim() : "";
       const body: CreateSessionRequest = selectedPreset
-        ? { kind: "agent", preset: selectedPreset, cwd: cwd || "/", cols: 120, rows: 36 }
+        ? {
+            kind: "agent",
+            preset: selectedPreset,
+            cwd: cwd || "/",
+            cols: 120,
+            rows: 36,
+            ...(resumeId ? { args: ["--resume", resumeId] } : {}),
+          }
         : { kind: "shell", command: customCommand, cwd: cwd || "/", cols: 120, rows: 36 };
       const created = await api.createSession(body);
       // The creator is the only client that could possibly be attached to a
@@ -206,6 +223,23 @@
           <label class="launcher__field">
             Command
             <input type="text" bind:value={customCommand} autocapitalize="none" autocorrect="off" spellcheck="false" />
+          </label>
+        {/if}
+        {#if selectedPreset === "claude"}
+          <label class="launcher__field">
+            Resume session ID (optional)
+            <!-- No format validation -- this is Claude Code's own opaque
+                 conversation id, not something teleport has any business
+                 parsing. A bad id surfaces as `claude --resume`'s own error,
+                 same as any other agent CLI failure, right in the terminal. -->
+            <input
+              type="text"
+              bind:value={resumeSessionId}
+              placeholder="leave blank to start fresh"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            />
           </label>
         {/if}
         <label class="launcher__field">

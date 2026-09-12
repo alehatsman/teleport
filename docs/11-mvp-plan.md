@@ -636,6 +636,41 @@ UI-only and were verified via `svelte-check` + `vite build` plus the automated s
 above, not exercised in a live browser this session — noted rather than implied by
 reusing M6's "independently re-verified" language for something narrower.
 
+> **Resume support added, 2026-09-13.** Goal: launch Claude Code against a previous
+> conversation instead of always starting fresh. Zero daemon changes needed --
+> `create_session` (`daemon/src/api.rs`) already lets an explicit request `args` override
+> a preset's own, so this is UI-only: `Sessions.svelte`'s launcher grows a "Resume
+> session ID (optional)" text field, shown only when `selectedPreset === "claude"`, and
+> `launch()` sends `args: ["--resume", id]` (`id` trimmed) instead of omitting `args`
+> when it's filled.
+>
+> **Scope cuts, deliberate:** no discovery/listing of Claude's own resumable session
+> ids -- that's Claude Code's own storage format, not teleport's to read, and its
+> `--resume` (no id) already opens an interactive picker in the terminal itself, which
+> the field's placeholder points at ("leave blank to start fresh"). No generalizing this
+> into a per-preset `presets.toml` schema field for other agents' equivalent flags
+> (codex may have one) -- not asked for, and one real preset needing this doesn't
+> justify a new data shape yet.
+>
+> **No id format validation** -- it's Claude Code's own opaque conversation id;
+> teleport has no business parsing it. A bad id is Claude Code's own error, surfaced in
+> the terminal exactly like any other agent CLI failure. Verified live via a fake id:
+> `claude --resume fake-test-session-id-123` still launched clean and dropped into
+> Claude Code's own "Resume session" fuzzy-picker pre-filled with that string ("No
+> sessions match"), same as running it by hand would.
+>
+> **Not persisted or prefilled**, unlike the recent-cwd datalist -- resuming is a
+> one-off action for a specific launch, not a habit worth remembering for the next one;
+> the field resets to empty every time the launcher opens, and a value left over from
+> switching *away* from the Claude preset mid-launcher-session can't leak into another
+> command's argv (`launch()` re-checks `selectedPreset === "claude"` at submit time, not
+> just the field's visibility).
+>
+> Verified: `svelte-check` + `vite build` both clean; live end-to-end on a real iPhone
+> via `scripts/mobile-dev` (`phone.mjs`) -- filled the field, launched, confirmed
+> `GET /api/v1/sessions/{id}` showed `args: ["--resume", "fake-test-session-id-123"]`,
+> and watched the CLI's own picker render on-device.
+
 ---
 
 ## M9 — Tailscale Serve
