@@ -111,7 +111,7 @@
     {#if hasControl}
       <span class="badge badge--controlling">Controlling</span>
     {:else}
-      <button class="btn btn--primary" onclick={takeControl}>
+      <button class="btn btn--primary session__control-btn" onclick={takeControl}>
         Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
       </button>
     {/if}
@@ -215,6 +215,18 @@
   }
   .session__spacer {
     flex: 1;
+  }
+  .session__control-btn {
+    /* Long controller names ("Take control (from Chrome on Linux)") must
+       lose to a narrow header gracefully -- plain <button> text wraps by
+       default, which on a phone-width header ballooned it to two lines and
+       squeezed .session__title down to a couple of characters. overflow:
+       hidden gives this flex item an automatic min-width of 0 (flexbox:
+       the automatic minimum size of a flex item with non-visible overflow
+       is 0), so it can actually shrink instead of forcing the wrap. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .session__main {
     flex: 1;
