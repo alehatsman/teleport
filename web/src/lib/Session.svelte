@@ -115,6 +115,9 @@
         Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
       </button>
     {/if}
+    {#if toast}
+      <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
+    {/if}
   </header>
 
   {#if truncatedNotice}
@@ -125,10 +128,6 @@
       </a>
       <button class="notice__dismiss" onclick={() => (truncatedNotice = false)} aria-label="Dismiss">&times;</button>
     </div>
-  {/if}
-
-  {#if toast}
-    <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
   {/if}
 
   <main class="session__main" class:session__main--dimmed={!hasControl}>
@@ -180,6 +179,21 @@
     padding: 0.6rem var(--space-3);
     border-bottom: 1px solid var(--border);
     background: var(--surface);
+    /* .toast (app.css) anchors to this, not .session -- see the override
+       below. */
+    position: relative;
+  }
+  /* .toast is shared (app.css) and normally a `top: 3.25rem` guess at the
+     header's height -- wrong by however much the real header differs from
+     that guess (font size, safe-area inset, a long controller name),
+     eating further into the terminal than intended. Anchored to the header
+     itself, it tracks the header's *actual* rendered height exactly instead
+     of guessing. It still overlaps the terminal's first line or two for
+     its ~4s lifetime -- full-bleed terminal plus a non-reflowing overlay
+     leaves nowhere content-free to put it; that part is unchanged. */
+  .toast {
+    top: 100%;
+    margin-top: 0.4rem;
   }
   .session__back {
     background: none;
@@ -259,6 +273,11 @@
     border-radius: var(--radius-md);
     padding: 0.3rem 0;
     font-size: 0.8rem;
+    /* These are built for a burst of rapid taps (arrows, Ctrl-C). Without
+       this, two taps close together anywhere near the same spot are a
+       double-tap-to-zoom gesture to the browser first -- the key never
+       reaches the PTY and the page zooms instead. */
+    touch-action: manipulation;
   }
   .key-bar__button:active {
     background: var(--surface-hover);
