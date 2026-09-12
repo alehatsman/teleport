@@ -3,7 +3,7 @@
 // (docs/09-frontend.md#dev-workflow) -- so this never needs a base URL.
 
 import { getToken } from "./identity";
-import { ApiError, type ApiErrorBody, type CreateSessionRequest, type CreateSessionResponse, type HealthResponse, type PresetsResponse, type Session, type SessionsResponse, type WsTicketResponse } from "./types";
+import { ApiError, type ApiErrorBody, type BrowseResponse, type CreateSessionRequest, type CreateSessionResponse, type HealthResponse, type PresetsResponse, type Session, type SessionsResponse, type WsTicketResponse } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -63,6 +63,10 @@ export async function getLog(id: string, range?: { from?: number; to?: number })
 
 export function listPresets(): Promise<PresetsResponse> {
   return request("/presets");
+}
+
+export function browse(path?: string): Promise<BrowseResponse> {
+  return request(`/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`);
 }
 
 /**

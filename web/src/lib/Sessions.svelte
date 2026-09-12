@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import * as api from "./api";
   import { setControlling } from "./identity";
-  import type { CreateSessionRequest, Preset, Session, SessionState } from "./types";
+  import type { BrowseEntry, CreateSessionRequest, Preset, Session, SessionState } from "./types";
 
   let { onOpen }: { onOpen: (id: string) => void } = $props();
 
@@ -61,6 +61,17 @@
   // worth remembering for the next one.
   let resumeSessionId = $state("");
   let firstFieldEl: HTMLSelectElement | undefined = $state();
+
+  // Directory browser -- GET /api/v1/browse, an inline panel rather than a
+  // separate route/modal component: it only ever matters while the
+  // launcher itself is open, and closing the launcher already needs to
+  // reset it (see closeLauncher below).
+  let showBrowser = $state(false);
+  let browsePath: string | null = $state(null);
+  let browseParent: string | null = $state(null);
+  let browseEntries: BrowseEntry[] = $state([]);
+  let browseError: string | null = $state(null);
+  let browseLoading = $state(false);
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -194,10 +205,46 @@
 
   function closeLauncher() {
     showLauncher = false;
+    showBrowser = false;
   }
 
   function onLauncherKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") closeLauncher();
+    if (e.key !== "Escape") return;
+    if (showBrowser) closeBrowser();
+    else closeLauncher();
+  }
+
+  async function loadBrowse(path?: string) {
+    browseLoading = true;
+    browseError = null;
+    try {
+      const res = await api.browse(path);
+      browsePath = res.path;
+      browseParent = res.parent;
+      browseEntries = res.entries;
+    } catch (e) {
+      browseError = e instanceof Error ? e.message : String(e);
+    } finally {
+      browseLoading = false;
+    }
+  }
+
+  function openBrowser() {
+    showBrowser = true;
+    // Start from whatever's already typed -- browsing is for refining a
+    // starting point (recent cwd, hand-typed guess), not always starting
+    // over from home. loadBrowse() itself falls back to the daemon's home
+    // directory when given nothing.
+    loadBrowse(cwd || undefined);
+  }
+
+  function closeBrowser() {
+    showBrowser = false;
+  }
+
+  function useBrowsedFolder() {
+    if (browsePath) cwd = browsePath;
+    showBrowser = false;
   }
 
   function onLauncherSubmit(e: SubmitEvent) {
@@ -236,6 +283,7 @@
       // filling it.
       setControlling(created.id, true);
       showLauncher = false;
+      showBrowser = false;
       onOpen(created.id);
     } catch (e) {
       launchError = e instanceof Error ? e.message : String(e);
@@ -405,15 +453,18 @@
         {/if}
         <label class="launcher__field">
           Working directory
-          <input
-            type="text"
-            bind:value={cwd}
-            placeholder="/home/me/project"
-            list="recent-cwds"
-            autocapitalize="none"
-            autocorrect="off"
-            spellcheck="false"
-          />
+          <div class="launcher__cwd-row">
+            <input
+              type="text"
+              bind:value={cwd}
+              placeholder="/home/me/project"
+              list="recent-cwds"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+            />
+            <button type="button" class="btn launcher__browse-btn" onclick={openBrowser}>Browse…</button>
+          </div>
           {#if recentCwds.length > 0}
             <datalist id="recent-cwds">
               {#each recentCwds as dir (dir)}
@@ -422,6 +473,45 @@
             </datalist>
           {/if}
         </label>
+        {#if showBrowser}
+          <!-- No keydown handler of its own -- it's inside the launcher <form>, so Escape
+               already bubbles up to that form's own onLauncherKeydown, which checks
+               showBrowser first. -->
+          <div class="browser">
+            <div class="browser__path">
+              {#if browseLoading}
+                Loading…
+              {:else}
+                {browsePath ?? "…"}
+              {/if}
+            </div>
+            {#if browseError}
+              <div class="banner banner--error" role="alert">{browseError}</div>
+            {:else}
+              <div class="browser__list">
+                {#if browseParent}
+                  <button type="button" class="browser__entry browser__entry--up" onclick={() => loadBrowse(browseParent ?? undefined)}>
+                    .. (up)
+                  </button>
+                {/if}
+                {#each browseEntries as entry (entry.path)}
+                  <button type="button" class="browser__entry" onclick={() => loadBrowse(entry.path)}>
+                    {entry.name}
+                  </button>
+                {/each}
+                {#if !browseLoading && browseEntries.length === 0 && !browseParent}
+                  <p class="browser__empty">No subdirectories here.</p>
+                {/if}
+              </div>
+            {/if}
+            <div class="launcher__actions">
+              <button type="button" class="btn" onclick={closeBrowser}>Cancel</button>
+              <button type="button" class="btn btn--primary" disabled={!browsePath} onclick={useBrowsedFolder}>
+                Use this folder
+              </button>
+            </div>
+          </div>
+        {/if}
         {#if recentCwds.length > 0}
           <!-- datalist above covers typing; these are for tapping -- a
                datalist's dropdown affordance is inconsistent on mobile
@@ -576,12 +666,34 @@
       </ul>
     {/if}
   </main>
+
+  {#if !showLauncher}
+    <!-- Fixed, thumb-reachable twin of .sessions__new-btn -- same openLauncher(),
+         just easier to hit one-handed on a phone than the header. Hidden while
+         the launcher panel is open: no point stacking two "add" affordances,
+         and it would otherwise sit on top of the panel's own buttons on a
+         short mobile viewport. -->
+    <button
+      class="fab"
+      onclick={openLauncher}
+      aria-expanded={showLauncher}
+      aria-controls="launcher-panel"
+      aria-label="New session"
+    >
+      <svg class="fab__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" fill="none" />
+      </svg>
+    </button>
+  {/if}
 </div>
 
 <style>
   /* Block: sessions -- the session-list view (root). */
   .sessions {
     padding: var(--space-4);
+    /* Room for .fab (56px + its own bottom offset) so it never sits on top
+       of the last session row. */
+    padding-bottom: calc(56px + var(--space-4) * 2);
     max-width: 720px;
     margin: 0 auto;
   }
@@ -685,6 +797,74 @@
     flex-wrap: wrap;
     gap: 0.4rem;
     margin-top: -0.4rem;
+  }
+  .launcher__cwd-row {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .launcher__cwd-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .launcher__browse-btn {
+    flex-shrink: 0;
+    font-size: 0.85rem;
+  }
+
+  /* Block: browser -- the inline GET /api/v1/browse directory picker,
+     opened from .launcher__browse-btn. Sibling of launcher, not nested
+     under it (it's a whole separate panel, not one of launcher's own
+     fields), the same reasoning session-row is its own block rather than
+     session-list's. */
+  .browser {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-deep);
+  }
+  .browser__path {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .browser__list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+  .browser__entry {
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.6rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    color: var(--fg);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .browser__entry:hover {
+    background: var(--surface-hover);
+  }
+  .browser__entry--up {
+    color: var(--muted);
+  }
+  .browser__empty {
+    margin: 0;
+    padding: 0.45rem 0.6rem;
+    color: var(--muted);
+    font-size: 0.85rem;
   }
 
   /* Block: cwd-chip -- a tap-to-fill recent working directory (sibling of
@@ -894,6 +1074,46 @@
   @media (max-width: 600px) {
     .sessions {
       padding: 0.5rem;
+      padding-bottom: calc(56px + var(--space-4) * 2);
     }
+  }
+
+  /* Block: fab -- fixed, always-reachable "new session" button; a thumb-zone
+     twin of .sessions__new-btn, not a replacement (mouse users keep the
+     header button; this is for one-handed phone use). Round, gradient +
+     shadow borrowed straight from .btn--primary / --shadow-panel rather than
+     inventing a second visual language for "primary action". */
+  .fab {
+    position: fixed;
+    right: var(--space-4);
+    /* env() falls back to 0 with no viewport-fit=cover meta, same as not
+       being there at all -- safe to always include. */
+    bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    background: linear-gradient(180deg, var(--accent-hover), var(--accent));
+    color: var(--accent-fg);
+    box-shadow: var(--shadow-panel);
+    z-index: 5; /* above list content, below .toast's 10 */
+    transition:
+      transform var(--transition-fast),
+      box-shadow var(--transition-fast);
+  }
+  .fab:hover {
+    box-shadow: var(--shadow-glow);
+    transform: translateY(-2px);
+  }
+  .fab:active {
+    transform: translateY(0) scale(0.94);
+  }
+  .fab__icon {
+    width: 26px;
+    height: 26px;
   }
 </style>

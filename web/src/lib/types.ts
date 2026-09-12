@@ -72,6 +72,20 @@ export interface PresetsResponse {
   presets: Preset[];
 }
 
+/** `GET /api/v1/browse` (docs/04-api-protocol.md#get-apiv1browse). Subdirectories only. */
+export interface BrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseResponse {
+  /** The resolved path actually listed -- not necessarily identical to the request's `path`. */
+  path: string;
+  /** `null` only at an actual filesystem root. */
+  parent: string | null;
+  entries: BrowseEntry[];
+}
+
 /** `POST /api/v1/ws-ticket` (docs/06-security.md#token-on-the-websocket-upgrade). */
 export interface WsTicketResponse {
   ticket: string;

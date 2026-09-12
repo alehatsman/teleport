@@ -26,6 +26,7 @@ GET    /api/v1/sessions/{id}/log
 GET    /api/v1/sessions/{id}/stream   # WebSocket upgrade
 
 GET    /api/v1/presets
+GET    /api/v1/browse
 
 POST   /api/v1/shutdown
 POST   /api/v1/ws-ticket
@@ -47,7 +48,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket"]
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket", "browse"]
 }
 ```
 
@@ -58,7 +59,7 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "status": "ok",
   "version": "0.1.0",
   "api_versions": ["v1"],
-  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket"],
+  "capabilities": ["sessions", "presets", "tail_attach", "remote_shutdown", "ws_ticket", "browse"],
   "device_id": "01K4N4ZP6C5GJ17G6X47K0VJX3",
   "device_name": "aleh-macbook",
   "platform": "macos-aarch64",
@@ -234,6 +235,43 @@ commands. See [06-security.md](06-security.md).
 Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
 and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
 needed to spawn the first Claude/Codex CLI.**
+
+### `GET /api/v1/browse`
+
+Lists a directory's subdirectories, for the launcher's working-directory picker.
+
+```
+GET /api/v1/browse?path=/Users/aleh/projects
+```
+
+```json
+{
+  "path": "/Users/aleh/projects",
+  "parent": "/Users/aleh",
+  "entries": [
+    { "name": "codeintel", "path": "/Users/aleh/projects/codeintel" },
+    { "name": "teleport", "path": "/Users/aleh/projects/teleport" }
+  ]
+}
+```
+
+`path` omitted (or empty) defaults to the daemon's own home directory — same default
+`GET /api/v1/health`'s `home_dir` already gives the launcher's cwd field. The response's
+own `path` is the *resolved* path actually listed (symlinks and `.`/`..` followed), not
+necessarily identical byte-for-byte to the query string. `parent` is `null` only at an
+actual filesystem root. `entries` is subdirectories only — dotfiles excluded (keeps the
+list scannable, matches Finder/Explorer's own default), symlinks-to-directories followed
+and included, plain files never listed at all; this exists to pick a directory to launch
+a session in, not to browse file contents. A path that doesn't exist, or exists but isn't
+a directory, is `400`.
+
+**No new privilege.** Any authenticated client can already launch a session with `cwd`
+set to any path the daemon process can read — `POST /api/v1/sessions` has never
+restricted it — so this is strictly weaker: read-only, directory names only, never file
+contents. Deliberately not scoped to under the home directory or any other root; that
+would be a false sense of security (the free-text `cwd` field already lets someone type
+their way anywhere) while genuinely blocking legitimate uses (`/srv`, `/opt`, an external
+mount).
 
 ### `POST /api/v1/shutdown`
 

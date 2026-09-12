@@ -336,6 +336,146 @@ async fn purging_an_exited_session_frees_a_max_sessions_slot() {
     );
 }
 
+fn browse_test_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "teleportd-browse-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before 1970")
+            .as_nanos()
+    ))
+}
+
+#[tokio::test]
+async fn browse_without_a_credential_is_rejected() {
+    let daemon = support::spawn(support::default_config()).await;
+    let (status, _) = request(&daemon, get("/api/v1/browse", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn browse_lists_subdirectories_only_dotfiles_and_plain_files_excluded() {
+    let daemon = support::spawn(support::default_config()).await;
+    let root = browse_test_dir("listing");
+    std::fs::create_dir_all(root.join("project-a")).unwrap();
+    std::fs::create_dir_all(root.join("project-b")).unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("README.md"), "not a directory").unwrap();
+
+    let (status, body) = request(
+        &daemon,
+        get(
+            &format!("/api/v1/browse?path={}", root.display()),
+            Some(support::TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .map(|e| e["name"].as_str().expect("entry name"))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["project-a", "project-b"],
+        "only real subdirectories, sorted, no dotfiles or files"
+    );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn browse_reports_the_resolved_path_and_its_parent() {
+    let daemon = support::spawn(support::default_config()).await;
+    let root = browse_test_dir("parent");
+    std::fs::create_dir_all(&root).unwrap();
+    let canonical_root = root.canonicalize().expect("canonicalize");
+
+    let (status, body) = request(
+        &daemon,
+        get(
+            &format!("/api/v1/browse?path={}", root.display()),
+            Some(support::TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["path"], canonical_root.display().to_string());
+    assert_eq!(
+        body["parent"],
+        canonical_root.parent().unwrap().display().to_string()
+    );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn browse_with_no_path_defaults_to_the_daemon_s_home_directory() {
+    let daemon = support::spawn(support::default_config()).await;
+    let (status, body) = request(&daemon, get("/api/v1/browse", Some(support::TOKEN))).await;
+    assert_eq!(status, StatusCode::OK);
+    let expected_home = directories::BaseDirs::new()
+        .expect("this test machine has a home directory")
+        .home_dir()
+        .canonicalize()
+        .expect("canonicalize")
+        .display()
+        .to_string();
+    assert_eq!(body["path"], expected_home);
+}
+
+#[tokio::test]
+async fn browse_of_a_nonexistent_path_is_a_400_not_a_500() {
+    let daemon = support::spawn(support::default_config()).await;
+    let root = browse_test_dir("missing");
+    let (status, _) = request(
+        &daemon,
+        get(
+            &format!("/api/v1/browse?path={}", root.display()),
+            Some(support::TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn browse_of_a_plain_file_not_a_directory_is_a_400() {
+    let daemon = support::spawn(support::default_config()).await;
+    let root = browse_test_dir("not-a-dir");
+    std::fs::create_dir_all(&root).unwrap();
+    let file_path = root.join("plain-file.txt");
+    std::fs::write(&file_path, "hello").unwrap();
+
+    let (status, _) = request(
+        &daemon,
+        get(
+            &format!("/api/v1/browse?path={}", file_path.display()),
+            Some(support::TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn bad_origin_on_a_mutating_request_is_rejected() {
     let daemon = support::spawn(support::default_config()).await;

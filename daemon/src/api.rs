@@ -267,6 +267,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}/log", get(get_log))
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
+        .route("/api/v1/browse", get(browse))
         .route("/api/v1/shutdown", post(shutdown))
         .route("/api/v1/ws-ticket", post(create_ws_ticket))
         .fallback(spa_fallback)
@@ -339,6 +340,7 @@ const CAPABILITIES: &[&str] = &[
     "tail_attach",
     "remote_shutdown",
     "ws_ticket",
+    "browse",
 ];
 
 /// `GET /api/v1/health` -- the one route reachable without a credential
@@ -857,6 +859,106 @@ async fn list_presets(
     _principal: Principal,
 ) -> impl IntoResponse {
     Json(serde_json::json!({ "presets": state.presets }))
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowseQuery {
+    /// Directory to list; omitted or empty defaults to the daemon's own
+    /// home directory -- the same default `POST /api/v1/health`'s
+    /// `home_dir` already gives the launcher's cwd field.
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowseEntry {
+    name: String,
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowseResponse {
+    /// The resolved, canonical path actually listed -- not necessarily
+    /// identical to the request's `path` (symlinks/`.`/`..` resolved).
+    path: String,
+    /// `None` only at an actual filesystem root -- nothing above it to go
+    /// up to.
+    parent: Option<String>,
+    /// Subdirectories only, dotfiles excluded, sorted case-insensitively.
+    /// Never file entries -- this exists to pick a working directory to
+    /// launch a session in, not to browse file contents.
+    entries: Vec<BrowseEntry>,
+}
+
+/// `GET /api/v1/browse` -- lists a directory's subdirectories, for the
+/// launcher's working-directory picker (docs/04-api-protocol.md#get-apiv1browse).
+///
+/// No new privilege: any authenticated client can already launch a session
+/// with `cwd` set to any path the daemon process can read (`POST
+/// /api/v1/sessions` has never restricted it), so this is strictly weaker
+/// -- read-only, directory names only, never file contents. Deliberately
+/// not scoped to under the home directory or any other root; that would be
+/// a false sense of security (the free-text `cwd` field already lets
+/// someone type their way anywhere) while genuinely blocking legitimate
+/// uses (`/srv`, `/opt`, an external mount).
+async fn browse(
+    _principal: Principal,
+    Query(q): Query<BrowseQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let requested = match q.path.filter(|p| !p.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => directories::BaseDirs::new()
+            .map(|b| b.home_dir().to_path_buf())
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "no path given, and no home directory to default to".to_string(),
+                )
+            })?,
+    };
+
+    // canonicalize() resolves symlinks/"."/".." to the real path a session
+    // would actually launch in, and doubles as the existence check --
+    // there's no separate "does this exist" step to race against it.
+    let resolved = requested
+        .canonicalize()
+        .map_err(|e| ApiError::BadRequest(format!("{}: {e}", requested.display())))?;
+    if !resolved.is_dir() {
+        return Err(ApiError::BadRequest(format!(
+            "{}: not a directory",
+            resolved.display()
+        )));
+    }
+
+    let read_dir = std::fs::read_dir(&resolved)
+        .map_err(|e| ApiError::BadRequest(format!("{}: {e}", resolved.display())))?;
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        // A single unreadable entry (permissions, a race with something
+        // deleting it) shouldn't fail the whole listing -- skip it, same as
+        // a real file manager would.
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue; // dotfiles excluded -- keeps the list scannable, matches Finder/Explorer's own default
+        }
+        // metadata() follows symlinks, so a symlinked project directory is
+        // still offered -- file_type() (no syscall) would not see through one.
+        let is_dir = entry.metadata().is_ok_and(|m| m.is_dir());
+        if !is_dir {
+            continue;
+        }
+        entries.push(BrowseEntry {
+            name: name.into_owned(),
+            path: entry.path().display().to_string(),
+        });
+    }
+    entries.sort_by_key(|e| e.name.to_lowercase());
+
+    Ok(Json(BrowseResponse {
+        parent: resolved.parent().map(|p| p.display().to_string()),
+        path: resolved.display().to_string(),
+        entries,
+    }))
 }
 
 /// `POST /api/v1/shutdown` (docs/04-api-protocol.md#post-apiv1shutdown) --
