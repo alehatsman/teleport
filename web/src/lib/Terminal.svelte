@@ -24,7 +24,21 @@
   let writeQueue: Promise<void> = Promise.resolve();
 
   onMount(() => {
-    term = new XTerm({ scrollback: 10000, cursorBlink: true });
+    term = new XTerm({
+      scrollback: 10000,
+      cursorBlink: true,
+      // xterm.js applies this as an *inline* style on .xterm-viewport (not
+      // just a CSS default), so no stylesheet rule can override it, however
+      // specific -- has to be set here. Left at xterm's own #000 default,
+      // it's one shade off .terminal's --surface-deep (#0a0a0d) behind it:
+      // invisible at full opacity, but the observer's dimmed
+      // .session__main (opacity: 0.85) composites both against the page
+      // background at once, and wherever .xterm-viewport's box doesn't
+      // land on an exact pixel boundary the mismatch shows as a faint
+      // seam. Matching it here removes the mismatch instead of fighting
+      // xterm's inline style from CSS.
+      theme: { background: "#0a0a0d" },
+    });
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerEl);
