@@ -110,7 +110,7 @@
     <span class="session__spacer"></span>
     {#if hasControl}
       <span class="badge badge--controlling">Controlling</span>
-    {:else}
+    {:else if connectionState !== "closed"}
       <button class="btn btn--primary session__control-btn" onclick={takeControl}>
         Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
       </button>
