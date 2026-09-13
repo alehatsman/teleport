@@ -173,14 +173,20 @@
         <span class="session-row__attention" aria-hidden="true">●</span>
         <span class="sr-only">Needs attention.</span>
       {/if}
-      <span class="session-row__command">{session.command}</span>
+      <!-- One primary label, not two competing ones: `title` is the agent's
+           own live terminal-title update (e.g. "✳ Fix login bug") -- once it
+           exists it's strictly more informative than the bare executable
+           name repeated on every "claude"/"codex" row, so it replaces
+           `command` here instead of sitting beside it in dim parentheses.
+           The raw command is still one hover away, and still the header
+           once you open the session. -->
+      <span class="session-row__command" title={session.title ? session.command : undefined}>
+        {session.title || session.command}
+      </span>
       {#if session.args.length > 0}
         <!-- The command alone is "sh" or "claude" on every row; the
              args are what made this launch this launch. -->
         <span class="session-row__args">{session.args.join(" ")}</span>
-      {/if}
-      {#if session.title}
-        <span class="session-row__title">({session.title})</span>
       {/if}
       <!-- <bdi> keeps the path itself left-to-right inside the
            rtl-ellipsis trick on .session-row__cwd below. -->
@@ -379,17 +385,6 @@
   .session-row__cwd > bdi {
     direction: ltr;
     unicode-bidi: isolate;
-  }
-  .session-row__title {
-    /* The agent's own words, not teleport's -- distinct from .session-row__command
-       (what's running) and .session-row__cwd (where), so it reads as neither. */
-    font-style: italic;
-    opacity: 0.7;
-    font-size: 0.85rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
   }
   .session-row__resume {
     flex-shrink: 0;
