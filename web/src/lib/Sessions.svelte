@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import * as api from "./api";
   import { setControlling } from "./identity";
-  import type { BrowseEntry, CreateSessionRequest, Preset, Session, SessionState } from "./types";
+  import { ApiError, type BrowseEntry, type CreateSessionRequest, type Preset, type Session, type SessionState } from "./types";
 
   let { onOpen }: { onOpen: (id: string) => void } = $props();
 
@@ -28,6 +28,21 @@
   // further down. Not persisted, same as searchQuery -- reopening the page
   // is a fresh look at what's live now, not a resumed filter session.
   let statusFilter: "active" | "closed" = $state("active");
+
+  // The daemon's two setup failures each have one fix, and the raw message
+  // ("Origin or Host rejected") gave no clue what it was. Say the fix.
+  function describeError(e: unknown): string {
+    if (e instanceof ApiError) {
+      if (e.code === "unauthorized") {
+        return `${e.message}. Open the ?token=… link teleportd printed at startup to sign this browser in.`;
+      }
+      if (e.code === "bad_origin") {
+        return `${e.message}. Add ${window.location.origin} to allowed_origins in teleportd's config.toml and restart it.`;
+      }
+      return e.message;
+    }
+    return e instanceof Error ? e.message : String(e);
+  }
 
   function isActiveStatus(s: Session): boolean {
     return s.state === "running" || s.state === "closing";
@@ -186,7 +201,7 @@
       loadedOnce = true;
       if (!healthLoaded) void loadHealthInfo();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = describeError(e);
     }
   }
 
@@ -336,7 +351,7 @@
       showBrowser = false;
       onOpen(created.id);
     } catch (e) {
-      launchError = e instanceof Error ? e.message : String(e);
+      launchError = describeError(e);
     } finally {
       launching = false;
     }
@@ -352,7 +367,7 @@
       await api.deleteSession(id);
       await refresh();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = describeError(e);
     }
   }
 
@@ -365,7 +380,7 @@
       await api.deleteSession(id, true);
       await refresh();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = describeError(e);
     }
   }
 
