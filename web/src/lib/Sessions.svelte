@@ -7,6 +7,10 @@
   let { onOpen }: { onOpen: (id: string) => void } = $props();
 
   let sessions: Session[] = $state([]);
+  // Refreshed on every poll so the per-row age ticks over without each
+  // row re-reading Date.now() (a $derived over a non-reactive clock never
+  // re-runs). Coarse on purpose -- ages are shown at minute granularity.
+  let now = $state(Date.now());
   let presets: Preset[] = $state([]);
   let loading = $state(true);
   let loadError: string | null = $state(null);
@@ -113,6 +117,26 @@
   // wrong, just less pretty). Matches only a real path-segment boundary
   // (homeDir itself, or homeDir + "/"), not an unrelated sibling directory
   // that merely starts with the same characters (e.g. "/Users/aleh-test").
+  // "3m", "2h", "5d" -- the one glance that separates six identical "sh"
+  // rows. Deliberately coarse: this is for telling rows apart, not auditing.
+  function displayAge(sinceMs: number, nowMs: number): string {
+    const s = Math.max(0, Math.floor((nowMs - sinceMs) / 1000));
+    if (s < 60) return "now";
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h`;
+    return `${Math.floor(h / 24)}d`;
+  }
+
+  // What a closed row ended as. "exit 0" is as informative as "exit 3":
+  // silence here made every closed row look the same.
+  function displayOutcome(s: Session): string | null {
+    if (s.state === "exited") return s.exit_code === null ? "exited" : `exit ${s.exit_code}`;
+    if (s.state === "lost") return "lost";
+    return null;
+  }
+
   function displayCwd(cwd: string): string {
     if (!homeDir) return cwd;
     if (cwd === homeDir) return "~";
@@ -153,6 +177,7 @@
     try {
       const res = await api.listSessions();
       sessions = res.sessions;
+      now = Date.now();
       loadError = null;
       loadedOnce = true;
       if (!healthLoaded) void loadHealthInfo();
@@ -655,6 +680,11 @@
                   <span class="sr-only">Needs attention.</span>
                 {/if}
                 <span class="session-row__command">{session.command}</span>
+                {#if session.args.length > 0}
+                  <!-- The command alone is "sh" or "claude" on every row; the
+                       args are what made this launch this launch. -->
+                  <span class="session-row__args">{session.args.join(" ")}</span>
+                {/if}
                 {#if session.title}
                   <span class="session-row__title">({session.title})</span>
                 {/if}
@@ -662,6 +692,10 @@
                 {#if session.controller}
                   <span class="session-row__controller">controlled by {session.controller}</span>
                 {/if}
+                {#if displayOutcome(session)}
+                  <span class="session-row__outcome" class:session-row__outcome--failed={session.state === "lost" || (session.exit_code ?? 0) !== 0}>{displayOutcome(session)}</span>
+                {/if}
+                <span class="session-row__age" title={new Date(session.created_at_ms).toLocaleString()}>{displayAge(session.created_at_ms, now)}</span>
               </a>
               {#if isDeletable && session.claude_resume_id}
                 <button
@@ -1047,6 +1081,41 @@
     font-weight: 600;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 0.9rem;
+  }
+  .session-row__args {
+    opacity: 0.8;
+    font-size: 0.85rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    /* Args and cwd both ellipsize; args carry more identity, so they get
+       first claim on the row's width and cwd gives way first. */
+    flex-shrink: 0.5;
+  }
+  .session-row__age {
+    margin-left: auto;
+    flex-shrink: 0;
+    opacity: 0.55;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .session-row__outcome {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    opacity: 0.7;
+  }
+  .session-row__outcome--failed {
+    color: var(--danger-fg);
+    opacity: 0.9;
+  }
+  /* Both right-aligned; when the outcome is present the age sits after it
+     without a second auto margin pushing them apart. */
+  .session-row__outcome + .session-row__age {
+    margin-left: 0;
   }
   .session-row__cwd {
     opacity: 0.55;
