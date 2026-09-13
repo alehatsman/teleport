@@ -180,7 +180,7 @@
 
   <main class="session__main" class:session__main--dimmed={!hasControl}>
     {#if stream}
-      <Terminal bind:this={terminalRef} {stream} isController={hasControl} {onObserverInput} />
+      <Terminal bind:this={terminalRef} {stream} isController={hasControl} {ended} {onObserverInput} />
     {/if}
   </main>
 

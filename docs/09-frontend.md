@@ -161,6 +161,7 @@ must render *that* size, not their own viewport:
 |---|---|
 | Controller | `fitAddon.fit()` to the viewport, then send `resize`, debounced 150 ms |
 | Observer | **do not fit.** Set the terminal to `ready`'s `cols`/`rows` and scale/letterbox the container to fit |
+| Anyone, session `exited`/`lost` | `fitAddon.fit()` to the viewport, send nothing. No PTY is left to disagree with, and a letterboxed 120-column replay on a phone is unreadable; xterm reflows the old output |
 
 `ready` carries the current `cols`/`rows`, and `resized` carries every change. An
 observer that fits to its own viewport renders output that was wrapped for a different

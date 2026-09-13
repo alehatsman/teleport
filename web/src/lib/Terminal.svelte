@@ -10,10 +10,13 @@
   let {
     stream,
     isController,
+    ended = false,
     onObserverInput,
   }: {
     stream: SessionStream;
     isController: boolean;
+    /** The process is gone: no PTY size left to respect, so fit to this viewport and let xterm reflow. */
+    ended?: boolean;
     /** Fired when keystrokes land while observing -- the parent decides how to say "read-only". */
     onObserverInput?: () => void;
   } = $props();
@@ -91,6 +94,14 @@
       containerEl.style.transform = "";
       fitAddon.fit();
       stream.sendResize(term.cols, term.rows);
+    } else if (ended) {
+      // The observer rule (render the PTY's size, never re-wrap) exists so
+      // two live clients agree on what the process sees. Once the process
+      // is gone there is no size to disagree with -- a 120-column replay
+      // letterboxed onto a phone was 4px text hugging the left edge. Fit,
+      // and let xterm's reflow wrap the old output; nothing to send.
+      containerEl.style.transform = "";
+      fitAddon.fit();
     } else {
       term.resize(ptyCols, ptyRows);
       letterbox();
@@ -149,7 +160,7 @@
   export function setGeometry(cols: number, rows: number) {
     ptyCols = cols;
     ptyRows = rows;
-    if (term && !isController) {
+    if (term && !isController && !ended) {
       term.resize(cols, rows);
       letterboxRaf = requestAnimationFrame(letterbox);
     }
@@ -159,6 +170,7 @@
   // waiting for the next resize event.
   $effect(() => {
     isController; // dependency
+    ended; // dependency
     if (term) applyGeometryPolicy();
   });
 </script>

@@ -326,6 +326,8 @@ select:focus-visible {
   position: absolute;
   top: 3.25rem;
   right: 1rem;
+  /* Phone width: "Process exited (code 3)" ran off the right edge. */
+  max-width: calc(100% - 2rem);
   background: var(--surface-raised);
   border: 1px solid var(--border-strong);
   padding: 0.55rem 0.85rem;
