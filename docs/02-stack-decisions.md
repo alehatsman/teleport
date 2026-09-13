@@ -122,8 +122,9 @@ libc             = "0.2"
 - **axum 0.8** uses `/{id}` path syntax, not `/:id`.
 - **axum 0.8** `Message::Text` carries `Utf8Bytes` and `Message::Binary` carries
   `Bytes` — not `String`/`Vec<u8>`.
-- **portable-pty** `Child::kill()` is a *hard* kill on Unix. Graceful termination is
-  implemented separately; see [03-pty-layer.md](03-pty-layer.md#termination).
+- **portable-pty 0.9** `ChildKiller::kill()` is *not* a hard kill on Unix: a
+  `clone_killer()` handle sends only `SIGHUP`. teleportd sends `SIGKILL` itself; see
+  [03-pty-layer.md](03-pty-layer.md#termination).
 
 Verify these against the versions actually resolved in `Cargo.lock` before writing
 handler code — do not trust this table over the compiler.
