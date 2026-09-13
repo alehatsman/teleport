@@ -35,35 +35,53 @@
 </script>
 
 <header class="session-header">
-  <button class="session-header__back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
-  <h1 class="session-header__title">{title}</h1>
-  <StatusDot {tone} {pulse} label={statusLabel} showLabel />
-  <span class="session-header__spacer"></span>
-  {#if ended}
-    <!-- The badge/button would be a lie either way. -->
-  {:else if hasControl}
-    <span class="badge badge--controlling">Controlling</span>
-  {:else if !closed}
-    <button class="btn btn--primary session-header__control-btn" onclick={onTakeControl}>
-      Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
-    </button>
-  {/if}
-  {#if toast}
-    <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
-  {/if}
+  <div class="session-header__inner">
+    <button class="session-header__back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
+    <h1 class="session-header__title">{title}</h1>
+    <StatusDot {tone} {pulse} label={statusLabel} showLabel />
+    <span class="session-header__spacer"></span>
+    {#if ended}
+      <!-- The badge/button would be a lie either way. -->
+    {:else if hasControl}
+      <span class="badge badge--controlling">Controlling</span>
+    {:else if !closed}
+      <button class="btn btn--primary session-header__control-btn" onclick={onTakeControl}>
+        Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
+      </button>
+    {/if}
+    {#if toast}
+      <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
+    {/if}
+  </div>
 </header>
 
 <style>
   /* Block: session-header -- the one session view's top bar. */
   .session-header {
+    /* Full-bleed strip: .session itself is deliberately full-width (the
+       terminal below wants it, docs/09-frontend.md#mobile), and this bar's
+       background/border-bottom should read as one continuous toolbar
+       across the whole screen, not a floating box. Only .session-header__inner
+       below caps its *content* width. */
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .session-header__inner {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    /* Caps the row's content to the same comfortable column .sessions (the
+       list view) reads in, instead of "Back" and "Take control" chasing the
+       real window edges on a wide desktop -- .session-header above stays a
+       full-width strip regardless. */
+    max-width: var(--content-max-width);
+    margin: 0 auto;
     padding: 0.6rem var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
     /* .toast (app.css) is position:absolute; this is its containing block
-       -- see the override below. */
+       -- see the override below. Living on the padded inner row (not the
+       outer strip) keeps the toast's height math identical to before this
+       split: the strip carries no padding of its own, so its total height
+       still equals this row's padded height exactly. */
     position: relative;
   }
   /* .toast is shared (app.css) and normally a `top: 3.25rem` guess at the

@@ -371,7 +371,7 @@
     /* Room for .fab (56px + its own bottom offset) so it never sits on top
        of the last session row. */
     padding-bottom: calc(56px + var(--space-4) * 2);
-    max-width: 720px;
+    max-width: var(--content-max-width);
     margin: 0 auto;
   }
   .sessions__header {

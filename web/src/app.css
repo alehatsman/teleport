@@ -56,6 +56,14 @@
   --radius-md: 8px;
   --radius-lg: 14px;
 
+  /* The centered-column width shared by .sessions (Sessions.svelte) and
+     .session-header (SessionHeader.svelte) -- one number instead of two
+     independent hardcoded ones, so a comfortable reading width for header
+     chrome doesn't silently drift between the two views. Not applied to
+     .session itself: the terminal is deliberately full-bleed
+     (docs/09-frontend.md#mobile), only its header bar gets the cap. */
+  --content-max-width: 720px;
+
   /* Depth. */
   --shadow-raised: 0 4px 10px rgb(0 0 0 / 35%);
   --shadow-panel: 0 12px 32px rgb(0 0 0 / 45%);
