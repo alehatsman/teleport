@@ -55,6 +55,10 @@
   // collapsing, cwd shown in full) while loading, on failure, or if the
   // daemon couldn't resolve its own home directory.
   let homeDir: string | null = $state(null);
+  // Set once health() has answered. Until then every poll tick retries it:
+  // a single failed fetch at mount otherwise left the host name blank and
+  // every cwd un-collapsed until a full reload.
+  let healthLoaded = $state(false);
 
   let showLauncher = $state(false);
   let launching = $state(false);
@@ -151,6 +155,7 @@
       sessions = res.sessions;
       loadError = null;
       loadedOnce = true;
+      if (!healthLoaded) void loadHealthInfo();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
@@ -177,10 +182,12 @@
       const res = await api.health();
       deviceName = res.device_name ?? null;
       homeDir = res.home_dir ?? null;
+      healthLoaded = true;
     } catch {
       // Same call the app already makes for other things; if it's failing
       // there's a bigger problem than the title, and that surfaces
-      // elsewhere (loadError from refresh()). Not worth a second banner.
+      // elsewhere (loadError from refresh()). Not worth a second banner --
+      // the next successful poll retries this instead.
     }
   }
 
