@@ -1,0 +1,66 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+  // biome.jsonc, not biome.json: Biome reads the latter as strict JSON and,
+  // on a parse error, runs with defaults (no excludes) instead of failing.
+  // ts-quality's baseline, copied in by tasks/ui-sync-config.yml. Extended,
+  // never edited; tasks/ui-config-check.yml reports drift.
+  "extends": ["./biome.base.json"],
+  "files": {
+    // Negations only: with no positive pattern everything is included, and
+    // Biome's own config lint (noBiomeFirstException) objects to a leading
+    // "**". `includes` replaces the base list rather than merging, so the
+    // base's excludes are restated. `!**/dir` (not `!**/dir/**`) is the
+    // spelling that also stops traversal.
+    "includes": [
+      "!**/node_modules",
+      "!**/dist",
+      "!**/build",
+      "!**/coverage",
+      "!**/.gate",
+      "!**/*.min.js",
+      "!**/*.gen.ts",
+      "!biome.base.json",
+      "!tsconfig.base.json",
+      "!*.tsbuildinfo",
+      // Static assets (favicon.svg): not source, and the a11y rules do not
+      // apply to a browser-tab icon.
+      "!public"
+    ]
+  },
+  "html": {
+    "formatter": {
+      // Keep the conventional two-space indent inside <script> and <style>
+      // in .svelte files instead of flushing them to column 0.
+      "indentScriptAndStyle": true
+    }
+  },
+  "linter": {
+    "rules": {
+      "correctness": {
+        // Biome's resolver cannot follow the `exports` maps of svelte, vite
+        // and @xterm, so every package import reports as unresolved. tsc and
+        // svelte-check resolve them. codefort switches this off for the
+        // same reason.
+        "noUnresolvedImports": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      // Biome lints only the <script> block of a .svelte file. Anything
+      // referenced from the template alone looks unused to it, and imports
+      // resolve against the wrong package group. svelte-check covers all
+      // three.
+      "includes": ["**/*.svelte"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedVariables": "off",
+            "noUnusedImports": "off",
+            "noUndeclaredDependencies": "off"
+          }
+        }
+      }
+    }
+  ]
+}

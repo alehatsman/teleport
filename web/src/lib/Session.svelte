@@ -1,28 +1,48 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
-  import Terminal from "./Terminal.svelte";
-  import { SessionStream } from "./stream";
-  import { setControlling, wasControlling } from "./identity";
-  import * as api from "./api";
-  import type { Session as SessionData, StreamState } from "./types";
+  import { onMount } from "svelte"
+  import { getSession } from "./api"
+  import { setControlling, wasControlling } from "./identity"
+  import { SessionStream } from "./stream"
+  import Terminal from "./Terminal.svelte"
+  import { ApiError, type Session as SessionData, type StreamState } from "./types"
 
-  let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props();
+  let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
-  let terminalRef: Terminal | undefined = $state();
-  let stream: SessionStream | undefined = $state();
+  let terminalRef: Terminal | undefined = $state()
+  let stream: SessionStream | undefined = $state()
 
-  let connectionState: StreamState = $state("connecting");
-  let hasControl = $state(false);
-  let controllerName: string | null = $state(null);
-  let session: SessionData | null = $state(null);
-  let toast: string | null = $state(null);
-  let truncatedNotice = $state(false);
-  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  let connectionState: StreamState = $state("connecting")
+  let hasControl = $state(false)
+  let controllerName: string | null = $state(null)
+  let session: SessionData | null = $state(null)
+  let toast: string | null = $state(null)
+  let truncatedNotice = $state(false)
+  // Why the session record couldn't be read. A bogus id (a stale link, a
+  // purged session) used to render the id as the title, a "Closed" dot and
+  // a black canvas -- indistinguishable from a session that simply ended.
+  let sessionError: string | null = $state(null)
+  // A process that ended is a fact about the session, not about our socket.
+  // The header used to say "Closed" (the connection) after the 4s exit
+  // toast faded, and the exit code was gone with it. Derive the visible
+  // status from the session record first, the connection second.
+  // $derived.by, not $derived: TS narrows `session` to its `null` initializer
+  // at this point in the script (it's only ever reassigned inside callbacks),
+  // so an inline expression here types `session?.state` as never.
+  let ended: boolean = $derived.by(() => session?.state === "exited" || session?.state === "lost")
+  let statusLabel: string = $derived.by(() => {
+    if (session?.state === "exited")
+      return session.exit_code === null ? "Exited" : `Exited (code ${session.exit_code})`
+    if (session?.state === "lost") return "Lost"
+    // Capitalized here, not via CSS text-transform: that capitalized every
+    // word and turned "Exited (code 3)" into "Exited (Code 3)".
+    return connectionState.charAt(0).toUpperCase() + connectionState.slice(1)
+  })
+  let toastTimer: ReturnType<typeof setTimeout> | null = null
 
   function showToast(message: string) {
-    toast = message;
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = null), 4000);
+    toast = message
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => (toast = null), 4000)
   }
 
   onMount(() => {
@@ -33,63 +53,92 @@
         onOutput: (bytes) => terminalRef?.write(bytes),
         onGeometry: (cols, rows) => terminalRef?.setGeometry(cols, rows),
         onControlChange: (has, name) => {
-          const wasHolding = hasControl;
-          hasControl = has;
-          controllerName = name;
-          setControlling(sessionId, has);
-          if (wasHolding && !has && name) showToast(`Control taken by ${name}`);
+          const wasHolding = hasControl
+          hasControl = has
+          controllerName = name
+          setControlling(sessionId, has)
+          if (wasHolding && !has && name) showToast(`Control taken by ${name}`)
         },
         onTruncated: () => {
-          terminalRef?.reset();
-          truncatedNotice = true;
+          terminalRef?.reset()
+          truncatedNotice = true
         },
         onExit: (code) => {
-          showToast(code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`);
+          showToast(
+            code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`
+          )
+          // Re-read the record so the header's verdict outlives the toast.
+          void loadSession()
         },
         onError: (code, message) => {
-          if (code === "not_controller") return; // expected when input races a lease change
-          showToast(message ?? code);
+          if (code === "not_controller") return // expected when input races a lease change
+          showToast(message ?? code)
         },
       },
       // A reopened tab (or a WS drop) resumes control instead of silently
       // dropping to observer -- mode=control never preempts, so this is
       // always safe even if someone else took over in the meantime (the
       // `ready` frame would then just come back control:false).
-      { requestControl: wasControlling(sessionId) },
-    );
-    stream = s;
-    s.connect();
+      { requestControl: wasControlling(sessionId) }
+    )
+    stream = s
+    s.connect()
 
-    api
-      .getSession(sessionId)
-      .then((data) => (session = data))
-      .catch(() => {
-        // Non-fatal -- the header falls back to the raw session id.
-      });
+    void loadSession()
 
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("visibilitychange", onVisibilityChange)
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (toastTimer) clearTimeout(toastTimer);
-      s.disconnect();
-    };
-  });
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+      if (toastTimer) clearTimeout(toastTimer)
+      s.disconnect()
+    }
+  })
+
+  async function loadSession() {
+    try {
+      session = await getSession(sessionId)
+      sessionError = null
+    } catch (e) {
+      // The header still falls back to the raw id; the banner says why.
+      if (e instanceof ApiError && e.status === 404)
+        sessionError = "Session not found. It may have been deleted."
+      else sessionError = e instanceof Error ? e.message : String(e)
+    }
+  }
 
   function onVisibilityChange() {
     // Mobile: the socket is likely dead on resume -- reconnect immediately
     // with the tracked offset instead of waiting for the backoff timer
     // (docs/09-frontend.md#mobile).
-    if (document.visibilityState === "visible" && connectionState !== "live" && connectionState !== "connecting") {
-      stream?.connect();
+    if (
+      document.visibilityState === "visible" &&
+      connectionState !== "live" &&
+      connectionState !== "connecting"
+    ) {
+      stream?.connect()
     }
   }
 
   function takeControl() {
-    stream?.takeControl();
+    stream?.takeControl()
   }
 
   function sendKey(bytes: string) {
-    if (hasControl) stream?.sendInput(bytes);
+    if (hasControl) stream?.sendInput(bytes)
+    else onObserverInput()
+  }
+
+  const OBSERVER_HINT = "Read-only. Take control to type."
+
+  function onObserverInput() {
+    // Repeated keystrokes just keep the same toast alive; don't re-trigger
+    // its entrance animation on every key.
+    if (toast === OBSERVER_HINT) {
+      if (toastTimer) clearTimeout(toastTimer)
+      toastTimer = setTimeout(() => (toast = null), 4000)
+      return
+    }
+    showToast(OBSERVER_HINT)
   }
 </script>
 
@@ -101,14 +150,17 @@
       <span
         class="dot"
         aria-hidden="true"
-        class:dot--success={connectionState === "live"}
-        class:dot--warning-strong={connectionState === "reconnecting" || connectionState === "connecting"}
-        class:dot--pulse={connectionState === "reconnecting" || connectionState === "connecting"}
+        class:dot--success={!ended && connectionState === "live"}
+        class:dot--warning={session?.state === "lost"}
+        class:dot--warning-strong={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
+        class:dot--pulse={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
       ></span>
-      <span class="session__status-label">{connectionState}</span>
+      <span class="session__status-label">{statusLabel}</span>
     </span>
     <span class="session__spacer"></span>
-    {#if hasControl}
+    {#if ended}
+      <!-- Nothing to control any more; the badge/button would be a lie either way. -->
+    {:else if hasControl}
       <span class="badge badge--controlling">Controlling</span>
     {:else if connectionState !== "closed"}
       <button class="btn btn--primary session__control-btn" onclick={takeControl}>
@@ -119,6 +171,10 @@
       <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
     {/if}
   </header>
+
+  {#if sessionError}
+    <div class="banner banner--error session__banner" role="alert">{sessionError}</div>
+  {/if}
 
   {#if truncatedNotice}
     <div class="notice">
@@ -132,7 +188,7 @@
 
   <main class="session__main" class:session__main--dimmed={!hasControl}>
     {#if stream}
-      <Terminal bind:this={terminalRef} {stream} isController={hasControl} />
+      <Terminal bind:this={terminalRef} {stream} isController={hasControl} {ended} {onObserverInput} />
     {/if}
   </main>
 
@@ -225,7 +281,6 @@
   .session__status-label {
     font-size: 0.75rem;
     opacity: 0.7;
-    text-transform: capitalize;
   }
   .session__spacer {
     flex: 1;
@@ -251,6 +306,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 50%;
+  }
+  .session__banner {
+    /* .banner's own margin is for stacked page content; here it's a strip
+       between header and terminal and should sit flush. */
+    margin: var(--space-2) var(--space-3);
   }
   .session__main {
     flex: 1;

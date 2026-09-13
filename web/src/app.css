@@ -4,7 +4,10 @@
   color-scheme: dark;
   --bg: #101014;
   --fg: #e8e6f0;
-  --muted: #6b6878;
+  /* #8a8798 clears WCAG AA (~5.0:1) on --surface at the 12.8px sizes it's
+     used at (inactive tabs, labels, placeholders); the previous #6b6878
+     sat at ~3.3:1. */
+  --muted: #8a8798;
 
   /* Surfaces, darkest to lightest. */
   --surface-deep: #0a0a0d; /* terminal canvas */
@@ -73,15 +76,9 @@ body {
   /* A faint accent-tinted vignette off the top -- flat black reads as an
      unstyled page; this reads as an app without costing any contrast. */
   background:
-    radial-gradient(ellipse 900px 500px at 50% -10%, rgb(124 108 240 / 8%), transparent),
-    var(--bg);
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgb(124 108 240 / 8%), transparent), var(--bg);
   color: var(--fg);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* Fine antialiasing keeps the small, low-contrast label text (0.75-0.85rem,
      opacity-dimmed) legible instead of fuzzy on this dark surface. */
   -webkit-font-smoothing: antialiased;
@@ -158,9 +155,11 @@ select:focus-visible {
   *,
   *::before,
   *::after {
+    /* biome-ignore-start lint/complexity/noImportantStyles: the kill switch must beat every component-scoped duration; that is its whole job */
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    /* biome-ignore-end lint/complexity/noImportantStyles: reduced-motion kill switch */
   }
 }
 
@@ -326,6 +325,8 @@ select:focus-visible {
   position: absolute;
   top: 3.25rem;
   right: 1rem;
+  /* Phone width: "Process exited (code 3)" ran off the right edge. */
+  max-width: calc(100% - 2rem);
   background: var(--surface-raised);
   border: 1px solid var(--border-strong);
   padding: 0.55rem 0.85rem;

@@ -103,7 +103,7 @@ job check-version (ubuntu):
 job build (matrix: the four targets above, needs: check-version):
     checkout
     setup rust (stable + target)
-    setup node 22, npm ci, npm run build   (in web/)
+    setup node 24, npm ci, npm run build   (in web/)
     cargo build --release --features embedded-web --target <triple>  (in daemon/)
     cargo build --release --target <triple>                          (in cli/)
     package: teleport-<target>/{teleportd,teleport}[.exe] → .tar.gz / .zip

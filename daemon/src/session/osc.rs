@@ -70,11 +70,22 @@ impl OscScanner {
                     }
                 }
                 State::Esc => {
-                    self.state = if b == b']' { State::Param(0) } else { State::Ground };
+                    self.state = if b == b']' {
+                        State::Param(0)
+                    } else {
+                        State::Ground
+                    };
                 }
                 State::Param(code) => match b {
-                    b'0'..=b'9' => *code = code.saturating_mul(10).saturating_add(u16::from(b - b'0')),
-                    b';' => self.state = State::Payload { code: *code, buf: Vec::new() },
+                    b'0'..=b'9' => {
+                        *code = code.saturating_mul(10).saturating_add(u16::from(b - b'0'));
+                    }
+                    b';' => {
+                        self.state = State::Payload {
+                            code: *code,
+                            buf: Vec::new(),
+                        }
+                    }
                     // No ';' before something else entirely (including
                     // another ESC, a BEL with no param, ...) -- malformed
                     // as far as this scanner's concerned; bail to Ground
@@ -86,7 +97,12 @@ impl OscScanner {
                         updates.extend(Self::finish(*code, buf));
                         self.state = State::Ground;
                     }
-                    0x1b => self.state = State::PayloadEsc { code: *code, buf: mem::take(buf) },
+                    0x1b => {
+                        self.state = State::PayloadEsc {
+                            code: *code,
+                            buf: mem::take(buf),
+                        }
+                    }
                     _ if buf.len() < MAX_PAYLOAD_BYTES => buf.push(b),
                     // Cap hit -- this sequence has gone on far longer than
                     // any real title or URL would; abandon it rather than
@@ -149,7 +165,10 @@ mod tests {
         // land anywhere, including mid-escape-sequence.
         let mut s = OscScanner::default();
         assert_eq!(s.feed(b"\x1b]2;Say "), vec![]);
-        assert_eq!(s.feed(b"hello\x07"), vec![OscUpdate::Title("Say hello".to_string())]);
+        assert_eq!(
+            s.feed(b"hello\x07"),
+            vec![OscUpdate::Title("Say hello".to_string())]
+        );
     }
 
     #[test]
@@ -167,7 +186,9 @@ mod tests {
         );
         assert_eq!(
             updates,
-            vec![OscUpdate::ClaudeResumeId("session_013YMNvvZ2U1fUjQsxAbqRjj".to_string())]
+            vec![OscUpdate::ClaudeResumeId(
+                "session_013YMNvvZ2U1fUjQsxAbqRjj".to_string()
+            )]
         );
     }
 

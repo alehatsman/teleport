@@ -1,0 +1,37 @@
+---
+description: check out ts-quality and install the web gate's tools (npm ci)
+
+# The web half of tasks/tools.yml. Same shape: the pin lives here and nowhere
+# else in this repo, and the checkout is a `git` step so a bump is one line
+# and an offline machine still converges.
+#
+# No tag past v0.1.0 exists upstream, and v0.1.0 predates the provision
+# migration (mooncake-only, and provision rejects its `name:` key outright).
+# Pinned to a commit until a tag lands; re-pin to the tag then. This one is
+# ts-quality#4: docs/UI.md and the ui-lint step. #3 before it is what lets
+# svelte-check run inside the gate.
+steps:
+  - vars:
+      tq_ref: 90f45feeb8d4939ba826182f101124e3d567591d
+      tq_dir: "{{ home }}/.cache/provision/tools/ts-quality"
+
+  - name: "ts-quality at {{ tq_ref }}"
+    git:
+      repo: https://github.com/alehatsman/ts-quality.git
+      dest: "{{ tq_dir }}"
+      ref: "{{ tq_ref }}"
+
+  # Not a `use:` of tq/tools for the same reason tasks/tools.yml calls
+  # rust-quality's scripts.sh directly: a `use:` target is resolved when the
+  # plan is parsed, before the git step above has run.
+  #
+  # tools.sh also downloads Playwright browsers when @playwright/test is a
+  # devDependency. It is not one here, so this is `npm ci` and nothing else.
+  - name: install (npm ci)
+    shell: cd web && bash "{{ tq_dir }}/scripts/tools.sh" install
+    creates: web/node_modules/.package-lock.json
+    timeout: 30m
+
+  - name: verify
+    shell: cd web && bash "{{ tq_dir }}/scripts/tools.sh" check
+    changed_when: "false"

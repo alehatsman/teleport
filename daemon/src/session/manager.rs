@@ -334,7 +334,9 @@ impl SessionManager {
             for update in osc_scanner.feed(bytes) {
                 match update {
                     osc::OscUpdate::Title(t) => *title_for_closure.lock() = Some(t),
-                    osc::OscUpdate::ClaudeResumeId(resume_id) => *resume_id_for_closure.lock() = Some(resume_id),
+                    osc::OscUpdate::ClaudeResumeId(resume_id) => {
+                        *resume_id_for_closure.lock() = Some(resume_id);
+                    }
                 }
             }
             // BEL detection (docs/13-native-clients.md#detection-heuristics:

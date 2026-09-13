@@ -1,28 +1,41 @@
 <script lang="ts">
   // The only file that imports xterm.js (docs/09-frontend.md#structure).
   // Everything else deals in session ids and connection state.
-  import { onMount } from "svelte";
-  import { Terminal as XTerm } from "@xterm/xterm";
-  import { FitAddon } from "@xterm/addon-fit";
-  import "@xterm/xterm/css/xterm.css";
-  import type { SessionStream } from "./stream";
 
-  let { stream, isController }: { stream: SessionStream; isController: boolean } = $props();
+  import { FitAddon } from "@xterm/addon-fit"
+  import { Terminal as XTerm } from "@xterm/xterm"
+  import { onMount } from "svelte"
+  import "@xterm/xterm/css/xterm.css"
+  import type { SessionStream } from "./stream"
 
-  let wrapperEl: HTMLDivElement;
-  let containerEl: HTMLDivElement;
-  let term: XTerm;
-  let fitAddon: FitAddon;
-  let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
-  let letterboxRaf: number | null = null;
-  let ptyCols = 80;
-  let ptyRows = 24;
+  let {
+    stream,
+    isController,
+    ended = false,
+    onObserverInput,
+  }: {
+    stream: SessionStream
+    isController: boolean
+    /** The process is gone: no PTY size left to respect, so fit to this viewport and let xterm reflow. */
+    ended?: boolean
+    /** Fired when keystrokes land while observing -- the parent decides how to say "read-only". */
+    onObserverInput?: () => void
+  } = $props()
+
+  let wrapperEl: HTMLDivElement
+  let containerEl: HTMLDivElement
+  let term: XTerm
+  let fitAddon: FitAddon
+  let resizeDebounce: ReturnType<typeof setTimeout> | null = null
+  let letterboxRaf: number | null = null
+  let ptyCols = 80
+  let ptyRows = 24
   // N3 (docs/15-open-questions.md#n3--xtermjs-write-pacing-on-reattach): a
   // replay round can be up to 1 MiB; writing that in one call stalls the
   // render thread right when the app is supposed to feel instant. Chaining
   // through `write`'s own callback serializes writes one paint apart instead
   // of firing them all synchronously back to back.
-  let writeQueue: Promise<void> = Promise.resolve();
+  let writeQueue: Promise<void> = Promise.resolve()
 
   onMount(() => {
     term = new XTerm({
@@ -39,49 +52,67 @@
       // seam. Matching it here removes the mismatch instead of fighting
       // xterm's inline style from CSS.
       theme: { background: "#0a0a0d" },
-    });
-    fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerEl);
+      // Agent prompts (powerlevel10k, starship) lean on Nerd Font glyphs;
+      // xterm's default "courier-new, courier, monospace" has none and drew
+      // the branch icon as a box. Prefer any installed Nerd Font, then the
+      // platform's own monospace. Cell metrics come from whichever lands.
+      fontFamily:
+        '"MesloLGS NF", "JetBrainsMono Nerd Font", "FiraCode Nerd Font", "Hack Nerd Font", ' +
+        '"Symbols Nerd Font Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    })
+    fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(containerEl)
 
     // Only forwarded when this client holds the lease -- an observer's
     // keystrokes must never reach the PTY (docs/09-frontend.md#terminalsvelte).
     term.onData((data) => {
-      if (isController) stream.sendInput(data);
-    });
+      if (isController) stream.sendInput(data)
+      // Typing into an observer view used to do nothing at all -- no echo,
+      // no hint, the only clue a button in the far corner. Say so.
+      else onObserverInput?.()
+    })
 
-    const resizeObserver = new ResizeObserver(() => scheduleGeometryUpdate());
-    resizeObserver.observe(wrapperEl);
-    scheduleGeometryUpdate();
+    const resizeObserver = new ResizeObserver(() => scheduleGeometryUpdate())
+    resizeObserver.observe(wrapperEl)
+    scheduleGeometryUpdate()
 
     return () => {
-      resizeObserver.disconnect();
-      if (resizeDebounce) clearTimeout(resizeDebounce);
+      resizeObserver.disconnect()
+      if (resizeDebounce) clearTimeout(resizeDebounce)
       // setGeometry's rAF (below) outlives a teardown that lands between it
       // being scheduled and the next paint -- a `resized` frame arriving
       // right as the observer navigates away otherwise fires letterbox()
       // after wrapperEl is unbound, throwing on wrapperEl.clientWidth.
-      if (letterboxRaf !== null) cancelAnimationFrame(letterboxRaf);
-      term.dispose();
-    };
-  });
+      if (letterboxRaf !== null) cancelAnimationFrame(letterboxRaf)
+      term.dispose()
+    }
+  })
 
   // Debounced 150ms per docs/09-frontend.md#terminalsvelte, for both the
   // controller's fit-to-viewport and the observer's letterbox recompute.
   function scheduleGeometryUpdate() {
-    if (resizeDebounce) clearTimeout(resizeDebounce);
-    resizeDebounce = setTimeout(applyGeometryPolicy, 150);
+    if (resizeDebounce) clearTimeout(resizeDebounce)
+    resizeDebounce = setTimeout(applyGeometryPolicy, 150)
   }
 
   function applyGeometryPolicy() {
-    if (!term) return;
+    if (!term) return
     if (isController) {
-      containerEl.style.transform = "";
-      fitAddon.fit();
-      stream.sendResize(term.cols, term.rows);
+      containerEl.style.transform = ""
+      fitAddon.fit()
+      stream.sendResize(term.cols, term.rows)
+    } else if (ended) {
+      // The observer rule (render the PTY's size, never re-wrap) exists so
+      // two live clients agree on what the process sees. Once the process
+      // is gone there is no size to disagree with -- a 120-column replay
+      // letterboxed onto a phone was 4px text hugging the left edge. Fit,
+      // and let xterm's reflow wrap the old output; nothing to send.
+      containerEl.style.transform = ""
+      fitAddon.fit()
     } else {
-      term.resize(ptyCols, ptyRows);
-      letterbox();
+      term.resize(ptyCols, ptyRows)
+      letterbox()
     }
   }
 
@@ -92,10 +123,10 @@
   // result is what makes that read as an intentional letterbox instead of a
   // terminal glued into the corner with the rest of the screen looking broken.
   function letterbox() {
-    if (!term?.element || !wrapperEl) return;
-    const scaleX = wrapperEl.clientWidth / term.element.scrollWidth;
-    const scaleY = wrapperEl.clientHeight / term.element.scrollHeight;
-    const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1);
+    if (!term?.element || !wrapperEl) return
+    const scaleX = wrapperEl.clientWidth / term.element.scrollWidth
+    const scaleY = wrapperEl.clientHeight / term.element.scrollHeight
+    const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1)
     // .terminal__surface (containerEl) is itself a flex container that
     // centers term.element inside its own *unscaled* box (see that block's
     // comment below) -- so term.element already sits pre-offset by
@@ -108,47 +139,48 @@
     // term.element's own size. Using the naive (wrapper - element*scale)/2
     // here instead double-counts the flex pre-centering and clips
     // term.element's edges once scale gets anywhere close to 1.
-    const offsetX = (wrapperEl.clientWidth * (1 - scale)) / 2;
-    const offsetY = (wrapperEl.clientHeight * (1 - scale)) / 2;
-    containerEl.style.transformOrigin = "top left";
+    const offsetX = (wrapperEl.clientWidth * (1 - scale)) / 2
+    const offsetY = (wrapperEl.clientHeight * (1 - scale)) / 2
+    containerEl.style.transformOrigin = "top left"
     // translate() composes after scale() here, so the offset is in final
     // (post-scale) screen pixels -- exactly the centering slack computed above.
-    containerEl.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    containerEl.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`
   }
 
   export function write(bytes: Uint8Array) {
-    if (!term) return;
-    const t = term;
-    writeQueue = writeQueue.then(() => new Promise<void>((resolve) => t.write(bytes, resolve)));
+    if (!term) return
+    const t = term
+    writeQueue = writeQueue.then(() => new Promise<void>((resolve) => t.write(bytes, resolve)))
   }
 
   export function reset() {
     // Routed through the same queue as `write` so it lands in order --
     // `onTruncated` fires right after `ready`, before any replay bytes, but
     // queuing keeps that true even if a caller's timing ever changes.
-    if (!term) return;
-    const t = term;
+    if (!term) return
+    const t = term
     writeQueue = writeQueue.then(() => {
-      t.reset();
-    });
+      t.reset()
+    })
   }
 
   /** `ready`'s or `resized`'s cols/rows -- the one PTY geometry every client renders. */
   export function setGeometry(cols: number, rows: number) {
-    ptyCols = cols;
-    ptyRows = rows;
-    if (term && !isController) {
-      term.resize(cols, rows);
-      letterboxRaf = requestAnimationFrame(letterbox);
+    ptyCols = cols
+    ptyRows = rows
+    if (term && !isController && !ended) {
+      term.resize(cols, rows)
+      letterboxRaf = requestAnimationFrame(letterbox)
     }
   }
 
   // Re-apply the right policy the moment the lease changes hands, without
   // waiting for the next resize event.
   $effect(() => {
-    isController; // dependency
-    if (term) applyGeometryPolicy();
-  });
+    isController // dependency
+    ended // dependency
+    if (term) applyGeometryPolicy()
+  })
 </script>
 
 <div class="terminal" bind:this={wrapperEl}>

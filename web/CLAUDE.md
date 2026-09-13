@@ -2,32 +2,38 @@
 
 Read [../docs/09-frontend.md](../docs/09-frontend.md) first — architecture, the offset
 contract, control-lease UI, geometry, mobile rules. That file says what the code does.
-This file says how to write and style it.
 
-## Before touching anything
+How it is split into pieces and styled is the fleet's
+[ts-quality docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md):
+BEM strictly, shared blocks in one base stylesheet, tokens on `:root`, motion and
+a11y rules, no UI framework / component library / CSS-in-JS / state or router library.
+This file is only the teleport delta: where things live here, and the gate.
 
-- No UI framework, no component library, no CSS-in-JS. Plain CSS only
-  ([docs/09-frontend.md#explicitly-not-in-the-frontend](../docs/09-frontend.md#explicitly-not-in-the-frontend)).
-  If a task seems to need one, it doesn't — ask, don't add a dependency.
-- No state-management library, no router library, no SSR/SvelteKit.
-- `npm run build && npm run check` before calling anything done. Both must come back
-  clean — 0 errors, 0 warnings. `svelte-check` also flags unused CSS selectors, which
-  is the cheapest signal that a rename missed a template reference.
-- For a visual change, look at it: run `npm run dev` and screenshot the affected views
-  (headless Chromium works fine — `chromium-browser --headless=new --screenshot=out.png
+## Gate
+
+- `npm run lint && npm run typecheck && npm run build && npm test` before calling
+  anything done, or `provision apply tasks/ui-ci.yml` from the repo root for the full
+  gate. All must come back clean — 0 errors, 0 warnings. `svelte-check` also flags
+  unused CSS selectors, which is the cheapest signal that a rename missed a template
+  reference.
+- Lint and format are Biome (`biome.jsonc`, extending ts-quality's `biome.base.json`).
+  `npm run lint:fix` applies the safe fixes and the formatter; don't hand-sort imports
+  or hand-format. Style: no semicolons, double quotes, 100 columns. A deliberate
+  exception gets an inline `// biome-ignore lint/<group>/<rule>: <reason>`; never demote
+  a rule in `biome.jsonc` without a comment saying why.
+- Biome sees only the `<script>` block of a `.svelte` file, so three rules that need
+  the template are off for `**/*.svelte` (unused variables/imports, undeclared deps).
+  `svelte-check` covers those. Biome does not read a `<style>` block at all; the
+  gate's ui-lint step does (BEM class names, raw color/radius/duration literals),
+  and it is what checks the UI.md rules in component CSS.
+- For a visual change, look at it: `npm run dev` and screenshot the affected views
+  (headless Chromium works — `chromium-browser --headless=new --screenshot=out.png
   '<url>'`). A clean build proves the CSS parses, not that it looks right.
 
-## CSS: BEM, strictly
-
-Every class is `block`, `block__element`, or a modifier —
-`block--modifier` / `block__element--modifier`. No bare utility classes beyond
-`.sr-only`. Don't nest elements inside elements — `block__element__sub-element` isn't
-BEM; if a part has its own sub-parts, it's its own block (e.g. `session-row` is a
-sibling block of `session-list`, not `session-list__row`).
+## Where a block lives here
 
 **Shared blocks live in `src/app.css`.** Anything that appears in more than one
-component — buttons, status dots, badges, banners, notices, toasts — is a block there,
-not duplicated per component:
+component is a block there, not duplicated per component:
 
 | Block | Modifiers | Used for |
 |---|---|---|
@@ -41,34 +47,16 @@ not duplicated per component:
 Before adding a new button/badge/dot color, check this table first — reuse a modifier
 or add one here rather than hand-rolling colors in a component's `<style>`.
 
-**Component-scoped blocks stay in that component's `<style>`.** A block used by only
-one `.svelte` file (`.sessions`, `.launcher`, `.empty`, `.session-list`,
-`.session-row`, `.session`, `.key-bar`, `.terminal`, …) is styled where it's used,
-scoped by Svelte automatically. Don't promote something to `app.css` until a second
-component actually needs it.
+**Component-scoped blocks stay in that component's `<style>`**, scoped by Svelte
+automatically (`.sessions`, `.launcher`, `.empty`, `.session-list`, `.session-row`,
+`.session`, `.key-bar`, `.terminal`, …). Don't promote to `app.css` until a second
+component actually needs it. Conditional classes use Svelte's `class:` directive.
 
-**Compose, don't wrap.** Apply a shared block directly on the element —
-`<span class="dot dot--success">` — rather than adding a component element class that
-just forwards to it. Plain CSS has no `@extend`, so a wrapper class would mean
-duplicating the rule, not reusing it.
+## Tokens
 
-## Design tokens
-
-Colors, spacing, radii, shadows, and the one transition duration are custom properties
-on `:root` in `app.css`. Never hardcode a hex color, an ad hoc `border-radius: Npx`, or
-a bespoke transition duration inside a component — add or reuse a token instead.
-Spacing scale is `--space-1` (0.25rem) through `--space-4` (1rem); radii are
-`--radius-sm`/`-md`/`-lg`.
-
-## Motion and accessibility
-
-- Every transition and `@keyframes` animation must go inert under
-  `prefers-reduced-motion: reduce` — already handled globally in `app.css`. Don't
-  bypass it with an inline `!important` duration.
-- `:focus-visible` gets a ring globally (`app.css`); don't add `outline: none`
-  anywhere.
-- A color- or icon-only indicator (a `.dot`, an attention marker) needs a `.sr-only`
-  text twin next to it — see `Sessions.svelte`'s session-state dot for the pattern.
+On `:root` in `app.css`. Spacing scale is `--space-1` (0.25rem) through `--space-4`
+(1rem); radii are `--radius-sm`/`-md`/`-lg`; one transition duration. The
+reduced-motion kill switch and the global `:focus-visible` ring are in `app.css` too.
 
 ## Dark-only
 

@@ -123,8 +123,10 @@ Rules:
 ## Client identity and token
 
 ```ts
-// generated once, persisted forever
-const CLIENT_ID   = localStorage.getItem("client_id") ?? newClientId();
+// generated once per tab (sessionStorage): survives a reload, not a closed tab.
+// localStorage would make every tab of one browser the same client, and two
+// tabs on one session would both hold "control".
+const CLIENT_ID   = sessionStorage.getItem("client_id") ?? newClientId();
 
 // `crypto` is exposed only in a secure context (HTTPS, or a localhost origin).
 // Over plain http:// on a LAN IP — the --i-know-what-im-doing path — it is
@@ -159,6 +161,7 @@ must render *that* size, not their own viewport:
 |---|---|
 | Controller | `fitAddon.fit()` to the viewport, then send `resize`, debounced 150 ms |
 | Observer | **do not fit.** Set the terminal to `ready`'s `cols`/`rows` and scale/letterbox the container to fit |
+| Anyone, session `exited`/`lost` | `fitAddon.fit()` to the viewport, send nothing. No PTY is left to disagree with, and a letterboxed 120-column replay on a phone is unreadable; xterm reflows the old output |
 
 `ready` carries the current `cols`/`rows`, and `resized` carries every change. An
 observer that fits to its own viewport renders output that was wrapped for a different
