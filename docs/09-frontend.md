@@ -8,23 +8,100 @@ second server, and no SSR.
 
 ## Structure
 
+Same split as the fleet's other web app (codefort): a data layer (`api/`), a shared
+primitive vocabulary (`ui/`, promoted on a second consumer — see
+[ts-quality/docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md)
+rule 11), and everything else. Teleport has one real feature (sessions/terminal), not
+several, so there's no `features/` layer yet — `Sessions.svelte`, `Session.svelte` and
+`Terminal.svelte` stay at `src/` top level until a second feature exists to justify one.
+
 ```text
-web/src/
-├── main.ts
-├── App.svelte              # routing between list and session views
-├── lib/
-│   ├── api.ts              # typed HTTP client for /api/v1
-│   ├── stream.ts           # WebSocket client: framing, offsets, reconnect
-│   ├── types.ts            # shared types mirroring the API doc
-│   ├── Sessions.svelte     # session list, new-session/preset launcher
-│   ├── Session.svelte      # one session: header, status, control lease UI
-│   └── Terminal.svelte     # xterm.js, isolated
-└── vite.config.ts
+web/
+├── vite.config.ts
+└── src/
+    ├── main.ts
+    ├── App.svelte              # routing between list and session views
+    ├── api/
+    │   ├── api.ts              # typed HTTP client for /api/v1 + describeError()
+    │   ├── stream.ts           # WebSocket client: framing, offsets, reconnect
+    │   ├── stream.test.ts
+    │   ├── identity.ts         # client id / token / display name
+    │   └── types.ts            # shared types mirroring the API doc
+    ├── ui/                     # promoted primitives — empty until a second consumer exists
+    ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
+    ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
+    ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
+    ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
+    ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
+    ├── Session.svelte          # one session: header, status, control lease UI
+    └── Terminal.svelte         # xterm.js, isolated
 ```
+
+Imports use the `@/` alias for `src/` (`tsconfig.app.json` paths + `vite.config.ts`
+resolve.alias), matching codefort — e.g. `@/api/api`, `@/SessionRow.svelte`. No relative
+`../` imports across these top-level files; only a component's own same-directory files
+(none, today) would use `./`.
 
 `Terminal.svelte` is the **only** file that imports xterm.js. Everything else deals in
 session IDs and connection state. If a second component reaches into the xterm API, the
 boundary has leaked.
+
+Each component owns its own markup and `<style>` block; a parent composes children via
+props and callbacks, never by reaching into a child's internals. `Sessions.svelte` used
+to be a single 1269-line file with the session list, the row markup, the swipe gesture,
+the launcher form and the directory browser all in one `<script>`/`<style>` — it's now
+five components composed together, each small enough to read in one sitting:
+
+- **`SessionLauncher.svelte`** — mounted only while `showLauncher` is true. Props:
+  `cwd`/`selectedPreset`/`customCommand` (`bind:`, two-way — see below), `presets:
+  Preset[]`, `recentCwds: string[]`, `homeDir: string | null` (cwd placeholder + submit
+  fallback), `resumeSession: Session | null` (set right before opening via "Resume",
+  prefills and locks the preset/resume-id/cwd fields), `onLaunch: (req:
+  CreateSessionRequest) => Promise<void>` (does the `createSession` call and closes the
+  panel on success — stays in `Sessions.svelte`, which owns `sessions`; a thrown error
+  surfaces as `launchError` here without closing), `onClose: () => void`. Owns:
+  `resumeSessionId`/`launching`/`launchError`/browser-open state, the Escape-to-close
+  handler, first-field autofocus.
+  - `cwd`, `selectedPreset` and `customCommand` are **bindable, not local** — they must
+    outlive this component's own mount/unmount cycle (it exists only while the panel is
+    open) so a value already typed or chosen is never lost on a close+reopen. That
+    persistence is deliberate in the original single-file version (`cwd`'s prefill logic
+    is explicitly "never clobber a mid-typed value... across a reopen") — losing it would
+    have been a silent behavior change from splitting the file, not a simplification.
+- **`DirectoryBrowser.svelte`** — mounted only while the launcher's browser panel is
+  open (a fresh instance each time; the original's `openBrowser()` always re-fetched on
+  open anyway, so nothing relied on its browse state surviving a close). Props:
+  `initialPath: string | null`, `onSelect: (path: string) => void`, `onClose: () =>
+  void`. Owns: the `GET /api/v1/browse` call, its own loading/error state.
+- **`SessionList.svelte`** — owns `openRowId`, the one-row-open-at-a-time swipe
+  exclusivity (a list-level concern: opening one row must close whichever other row was
+  open). Props: `sessions: Session[]`, `now: number`, `homeDir: string | null`, and the
+  row action callbacks (below), passed straight through to each `SessionRow`.
+- **`SessionRow.svelte`** — one list item: state dot, command/args/title/cwd/controller/
+  outcome/age, the resume button, the swipe-to-reveal drag gesture (now purely local —
+  "is *this* row dragging", no cross-row id comparison needed once each row is its own
+  component instance), and the terminate/delete action button. Props: `session: Session`,
+  `now: number`, `homeDir: string | null`, `isOpen: boolean` + `onOpenChange: (open:
+  boolean) => void` (the swipe-reveal state, owned by `SessionList`), `onOpen: (id:
+  string) => void`, `onResume: (session: Session) => void`, `onTerminate: (id: string) =>
+  void`, `onPurge: (id: string) => void`.
+
+`describeError()` (interpreting an `ApiError` into an actionable message) moved from a
+local function into `api/api.ts` and is exported — `Sessions.svelte` (list/refresh
+errors) and `SessionLauncher.svelte` (launch errors) both need it now, so it's promoted
+per UI.md rule 11 rather than duplicated.
+
+`SessionLauncher`'s `.launcher__actions` (Cancel/Launch button row) and
+`DirectoryBrowser`'s equivalent `.browser__actions` (Cancel/Use-this-folder) are the same
+three CSS properties — duplicated rather than promoted to `app.css`. Svelte scopes styles
+per component, so reusing one class across the two would need the shared block
+promotion anyway; three properties used by exactly two sibling components in one feature
+isn't worth that indirection.
+
+The list-row swipe-to-delete gesture handlers (`rowOffset`, `onRowTouchStart/Move/End`,
+`closeSwipe`) stay in `Sessions.svelte` — they're tightly coupled to the row DOM and
+`sessions` array, not reusable, so nothing promotes them per UI.md rule 11 ("promote on
+a second consumer").
 
 ## `stream.ts` — the part that must be right
 

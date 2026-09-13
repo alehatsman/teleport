@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url"
 import { svelte } from "@sveltejs/vite-plugin-svelte"
 import { defineConfig } from "vite"
 
@@ -21,6 +22,11 @@ const tailnetHost = TELEPORT_TAILNET_HOST
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [svelte()],
+  resolve: {
+    // "@/..." resolves to src/... -- see tsconfig.app.json paths. Matches
+    // codefort's web app.
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+  },
   server: {
     // docs/09-frontend.md#dev-workflow: forward both /api HTTP and the
     // WebSocket upgrade to teleportd. Same-origin from the browser's point

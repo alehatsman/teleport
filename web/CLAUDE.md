@@ -9,6 +9,14 @@ BEM strictly, shared blocks in one base stylesheet, tokens on `:root`, motion an
 a11y rules, no UI framework / component library / CSS-in-JS / state or router library.
 This file is only the teleport delta: where things live here, and the gate.
 
+## Structure
+
+[09-frontend.md#structure](../docs/09-frontend.md#structure) has the file tree and the
+`SessionLauncher`/`DirectoryBrowser` interfaces — same `api/` / `ui/` split as codefort's
+web app, without a `features/` layer (teleport has one feature, not several). Imports
+use the `@/` alias for `src/` (`@/api/api`, `@/Session.svelte`) — no relative `../`
+across top-level files.
+
 ## Gate
 
 - `npm run lint && npm run typecheck && npm run build && npm test` before calling

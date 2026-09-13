@@ -40,6 +40,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
+// The daemon's two setup failures each have one fix, and the raw message
+// ("Origin or Host rejected") gave no clue what it was. Say the fix. Shared
+// by Sessions.svelte (list/refresh errors) and SessionLauncher.svelte
+// (launch errors) -- promoted here rather than duplicated per UI.md rule 11
+// once a second consumer needed it.
+export function describeError(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.code === "unauthorized") {
+      return `${e.message}. Open the ?token=… link teleportd printed at startup to sign this browser in.`
+    }
+    if (e.code === "bad_origin") {
+      return `${e.message}. Add ${window.location.origin} to allowed_origins in teleportd's config.toml and restart it.`
+    }
+    return e.message
+  }
+  return e instanceof Error ? e.message : String(e)
+}
+
 export function health(): Promise<HealthResponse> {
   return request("/health")
 }

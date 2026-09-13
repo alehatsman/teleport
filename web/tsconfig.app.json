@@ -9,6 +9,17 @@
     "types": ["svelte", "vite/client"],
     "allowArbitraryExtensions": true,
     "noEmit": true,
+    // "@/..." resolves to src/... -- matching vite.config.ts resolve.alias.
+    // Keeps imports flat and move-proof (codefort's web app does the same).
+    // `baseUrl` is required for non-relative `paths` entries pre-TS 7;
+    // `ignoreDeprecations` silences 6.0's warning about its eventual
+    // removal (https://aka.ms/ts6) until this project moves to TS 7's
+    // replacement (an import map, per that migration guide).
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
     /**
      * Typecheck JS in `.svelte` and `.js` files by default.
      * Disable checkJs if you'd like to use dynamic types in JS.
