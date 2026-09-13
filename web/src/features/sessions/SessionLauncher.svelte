@@ -123,7 +123,14 @@
   {#if !selectedPreset}
     <label class="launcher__field">
       Command
-      <input type="text" bind:value={customCommand} autocapitalize="none" autocorrect="off" spellcheck="false" />
+      <input
+        type="text"
+        bind:value={customCommand}
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+        required
+      />
     </label>
   {/if}
   {#if selectedPreset === "claude"}
