@@ -178,14 +178,19 @@
            exists it's strictly more informative than the bare executable
            name repeated on every "claude"/"codex" row, so it replaces
            `command` here instead of sitting beside it in dim parentheses.
-           The raw command is still one hover away, and still the header
-           once you open the session. -->
-      <span class="session-row__command" title={session.title ? session.command : undefined}>
+           The raw command (with its args folded in) is still one hover
+           away, and still the header once you open the session. -->
+      <span
+        class="session-row__command"
+        title={session.title ? `${session.command} ${session.args.join(" ")}`.trim() : undefined}
+      >
         {session.title || session.command}
       </span>
-      {#if session.args.length > 0}
-        <!-- The command alone is "sh" or "claude" on every row; the
-             args are what made this launch this launch. -->
+      {#if !session.title && session.args.length > 0}
+        <!-- Only next to the raw command: it reads as "claude --resume …",
+             but dangling off `title`'s human sentence ("✳ Fix login bug
+             --resume …") the flag belongs to a command that's no longer
+             shown here at all. -->
         <span class="session-row__args">{session.args.join(" ")}</span>
       {/if}
       <!-- <bdi> keeps the path itself left-to-right inside the
