@@ -1047,6 +1047,8 @@
     width: 100%;
     background: var(--surface);
     padding: 0.7rem var(--space-3);
+    /* Touch target floor. The text alone settles at ~41px. */
+    min-height: 44px;
     transition: transform var(--transition-fast);
     /* Let the browser's native scroller own vertical panning; our touch
        handlers only ever act on a horizontal drag (and preventDefault()
