@@ -4,7 +4,10 @@
   color-scheme: dark;
   --bg: #101014;
   --fg: #e8e6f0;
-  --muted: #6b6878;
+  /* #8a8798 clears WCAG AA (~5.0:1) on --surface at the 12.8px sizes it's
+     used at (inactive tabs, labels, placeholders); the previous #6b6878
+     sat at ~3.3:1. */
+  --muted: #8a8798;
 
   /* Surfaces, darkest to lightest. */
   --surface-deep: #0a0a0d; /* terminal canvas */
