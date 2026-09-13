@@ -30,17 +30,24 @@ web/
     │   └── types.ts            # shared types mirroring the API doc
     ├── shell/                  # app chrome — empty until two features share some
     ├── ui/
-    │   ├── StatusDot.svelte    # .dot + its text twin (SessionRow, Session)
+    │   ├── tones.ts            # tone vocabularies (plain .ts so feature helpers can import)
+    │   ├── StatusDot.svelte    # .dot + its text twin (SessionRow, SessionHeader)
     │   └── ErrorBanner.svelte  # .banner--error + role=alert (four call sites)
     └── features/
         └── sessions/
-            ├── Sessions.svelte         # orchestrator: fetch/poll, filtering, launcher trigger
+            ├── sessionDisplay.ts       # pure: labels, tones, age/cwd/outcome, filters, viewerStatus
+            ├── sessionDisplay.test.ts
+            ├── launchRequest.ts        # pure: launcher fields -> CreateSessionRequest
+            ├── launchRequest.test.ts
+            ├── Sessions.svelte         # container: fetch/poll, filtering, launcher state
             ├── SessionFilters.svelte   # status toggle + search box (bindable, no logic)
+            ├── NewSessionFab.svelte    # touch-only floating "New session" button
             ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
             ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
             ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
             ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
-            ├── Session.svelte          # one session: header, status, control lease UI
+            ├── Session.svelte          # container: the stream, lease state, toast
+            ├── SessionHeader.svelte    # viewer top bar: back, title, status, lease control
             ├── KeyBar.svelte           # touch-only key row; emits bytes, Session decides
             └── Terminal.svelte         # xterm.js, isolated
 ```
@@ -93,6 +100,20 @@ five components composed together, each small enough to read in one sitting:
   boolean) => void` (the swipe-reveal state, owned by `SessionList`), `onOpen: (id:
   string) => void`, `onResume: (session: Session) => void`, `onTerminate: (id: string) =>
   void`, `onPurge: (id: string) => void`.
+- **`SessionHeader.svelte`** — the viewer's top bar, pure presentation. Props: `title`,
+  `tone`/`pulse`/`statusLabel` (from `viewerStatus()`), `ended`, `hasControl`, `closed`,
+  `controllerName`, `toast`, `onBack`, `onTakeControl`. The toast renders inside it so
+  the `.toast` anchoring override lives with the header it anchors to.
+- **`NewSessionFab.svelte`** — the touch-only floating "New session" button. Props:
+  `expanded` (mirrors the launcher panel), `onclick`. Hidden on fine-pointer devices.
+
+Helpers with no reactive state are plain modules beside the components, unit-tested
+without mounting anything (UI.md rule 27): **`sessionDisplay.ts`** (state labels and
+tones, `displayAge`/`displayCwd`/`displayOutcome`, `needsAttention`, the list filter,
+`recentCwds`, and `viewerStatus()` — the record-first/socket-second rule for the viewer
+header) and **`launchRequest.ts`** (`buildLaunchRequest()`: launcher fields to a
+`CreateSessionRequest`, including the claude-only `--resume` rule). Every clock is
+passed in as `now`; nothing in these modules reads `Date.now()`.
 
 `describeError()` (interpreting an `ApiError` into an actionable message) moved from a
 local function into `api/api.ts` and is exported — `Sessions.svelte` (list/refresh

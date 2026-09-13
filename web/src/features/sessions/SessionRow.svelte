@@ -1,6 +1,15 @@
 <script lang="ts">
-  import type { Session, SessionState } from "@/api/types"
+  import type { Session } from "@/api/types"
   import StatusDot from "@/ui/StatusDot.svelte"
+  import {
+    displayAge,
+    displayCwd,
+    displayOutcome,
+    needsAttention,
+    outcomeFailed,
+    STATE_LABELS,
+    stateTone,
+  } from "./sessionDisplay"
 
   // -- iOS-style swipe-to-reveal ------------------------------------
   //
@@ -42,65 +51,6 @@
     onTerminate: (id: string) => void
     onPurge: (id: string) => void
   } = $props()
-
-  const STATE_LABELS: Record<SessionState, string> = {
-    running: "Running",
-    closing: "Closing",
-    exited: "Exited",
-    lost: "Lost",
-  }
-
-  // D3 (docs/04-api-protocol.md#get-apiv1sessions):
-  // idle_since_ms is already a live signal (the daemon clears it the moment
-  // output resumes), but last_bell_ms never clears server-side -- one bell
-  // three hours ago shouldn't glow forever. Bound it to a recency window
-  // here instead of teaching the daemon an "acknowledged" concept for M8.
-  const BELL_RECENCY_MS = 2 * 60 * 1000
-
-  function needsAttention(s: Session): boolean {
-    if (s.state !== "running") return false
-    // "Went quiet" only means "waiting on you" for an agent. A shell at its
-    // prompt is quiet by definition -- flagging every idle shell made the
-    // dot light up on every row and mean nothing. A bell still counts for
-    // any kind: a process that rang is asking, whatever it is.
-    if (s.idle_since_ms !== null && s.kind === "agent") return true
-    return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS
-  }
-
-  // "3m", "2h", "5d" -- the one glance that separates six identical "sh"
-  // rows. Deliberately coarse: this is for telling rows apart, not auditing.
-  function displayAge(sinceMs: number, nowMs: number): string {
-    const s = Math.max(0, Math.floor((nowMs - sinceMs) / 1000))
-    if (s < 60) return "now"
-    const m = Math.floor(s / 60)
-    if (m < 60) return `${m}m`
-    const h = Math.floor(m / 60)
-    if (h < 48) return `${h}h`
-    return `${Math.floor(h / 24)}d`
-  }
-
-  // What a closed row ended as. "exit 0" is as informative as "exit 3":
-  // silence here made every closed row look the same.
-  function displayOutcome(s: Session): string | null {
-    if (s.state === "exited") return s.exit_code === null ? "exited" : `exit ${s.exit_code}`
-    if (s.state === "lost") return "lost"
-    return null
-  }
-
-  // "/Users/aleh/projects/teleport" next to six other rows exactly like it
-  // is mostly noise -- collapse it to "~/projects/teleport" the way a
-  // shell prompt would, once we know the daemon's own home dir (homeDir is
-  // null while loading, on failure, or if the daemon couldn't resolve one --
-  // either way this is a no-op fallback, never wrong, just less pretty).
-  // Matches only a real path-segment boundary (homeDir itself, or homeDir +
-  // "/"), not an unrelated sibling directory that merely starts with the
-  // same characters (e.g. "/Users/aleh-test").
-  function displayCwd(path: string): string {
-    if (!homeDir) return path
-    if (path === homeDir) return "~"
-    if (path.startsWith(`${homeDir}/`)) return `~${path.slice(homeDir.length)}`
-    return path
-  }
 
   let isDeletable = $derived(session.state === "exited" || session.state === "lost")
 
@@ -192,11 +142,8 @@
         onOpen(session.id);
       }}
     >
-      <StatusDot
-        tone={session.state === "running" ? "success" : session.state === "lost" ? "warning" : null}
-        label={STATE_LABELS[session.state]}
-      />
-      {#if needsAttention(session)}
+      <StatusDot tone={stateTone(session.state)} label={STATE_LABELS[session.state]} />
+      {#if needsAttention(session, now)}
         <span class="session-row__attention" aria-hidden="true">●</span>
         <span class="sr-only">Needs attention.</span>
       {/if}
@@ -211,12 +158,12 @@
       {/if}
       <!-- <bdi> keeps the path itself left-to-right inside the
            rtl-ellipsis trick on .session-row__cwd below. -->
-      <span class="session-row__cwd"><bdi>{displayCwd(session.cwd)}</bdi></span>
+      <span class="session-row__cwd"><bdi>{displayCwd(session.cwd, homeDir)}</bdi></span>
       {#if session.controller}
         <span class="session-row__controller">controlled by {session.controller}</span>
       {/if}
       {#if displayOutcome(session)}
-        <span class="session-row__outcome" class:session-row__outcome--failed={session.state === "lost" || (session.exit_code ?? 0) !== 0}>{displayOutcome(session)}</span>
+        <span class="session-row__outcome" class:session-row__outcome--failed={outcomeFailed(session)}>{displayOutcome(session)}</span>
       {/if}
       <span class="session-row__age" title={new Date(session.created_at_ms).toLocaleString()}>{displayAge(session.created_at_ms, now)}</span>
     </a>

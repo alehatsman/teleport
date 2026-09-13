@@ -10,3 +10,7 @@ thing is *markup* -- an a11y twin, a required role -- not just a class. Each
 one gets a row in `web/CLAUDE.md`'s primitives table (UI.md rule 28). No
 `api/` import, no feature import, no domain enum: the feature maps its state
 to a `tone` at the call site (rule 12).
+
+`tones.ts` holds the primitives' prop vocabularies as a plain module, so a
+feature's `.ts` helpers can import them under `tsc` (which cannot see a type
+exported from a `.svelte` module script).

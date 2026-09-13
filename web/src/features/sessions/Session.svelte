@@ -5,9 +5,10 @@
   import { SessionStream } from "@/api/stream"
   import { ApiError, type Session as SessionData, type StreamState } from "@/api/types"
   import KeyBar from "@/features/sessions/KeyBar.svelte"
+  import SessionHeader from "@/features/sessions/SessionHeader.svelte"
   import Terminal from "@/features/sessions/Terminal.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
-  import StatusDot, { type DotTone } from "@/ui/StatusDot.svelte"
+  import { viewerStatus } from "./sessionDisplay"
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
@@ -24,32 +25,10 @@
   // purged session) used to render the id as the title, a "Closed" dot and
   // a black canvas -- indistinguishable from a session that simply ended.
   let sessionError: string | null = $state(null)
-  // A process that ended is a fact about the session, not about our socket.
-  // The header used to say "Closed" (the connection) after the 4s exit
-  // toast faded, and the exit code was gone with it. Derive the visible
-  // status from the session record first, the connection second.
-  // $derived.by, not $derived: TS narrows `session` to its `null` initializer
-  // at this point in the script (it's only ever reassigned inside callbacks),
-  // so an inline expression here types `session?.state` as never.
-  let ended: boolean = $derived.by(() => session?.state === "exited" || session?.state === "lost")
-  let statusLabel: string = $derived.by(() => {
-    if (session?.state === "exited")
-      return session.exit_code === null ? "Exited" : `Exited (code ${session.exit_code})`
-    if (session?.state === "lost") return "Lost"
-    // Capitalized here, not via CSS text-transform: that capitalized every
-    // word and turned "Exited (code 3)" into "Exited (Code 3)".
-    return connectionState.charAt(0).toUpperCase() + connectionState.slice(1)
-  })
-  // Connection is in flux while connecting or reconnecting: amber + pulse.
-  let unsettled: boolean = $derived.by(
-    () => !ended && (connectionState === "reconnecting" || connectionState === "connecting")
-  )
-  let statusTone: DotTone = $derived.by(() => {
-    if (session?.state === "lost") return "warning"
-    if (unsettled) return "warning-strong"
-    if (!ended && connectionState === "live") return "success"
-    return null
-  })
+  // Record first, socket second (sessionDisplay.ts#viewerStatus). $derived.by,
+  // not $derived: TS narrows `session` to its `null` initializer at this
+  // point in the script (it's only ever reassigned inside callbacks).
+  let status = $derived.by(() => viewerStatus(session, connectionState))
   let toastTimer: ReturnType<typeof setTimeout> | null = null
 
   function showToast(message: string) {
@@ -156,24 +135,19 @@
 </script>
 
 <div class="session">
-  <header class="session__header">
-    <button class="session__back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
-    <h1 class="session__title">{session?.command ?? sessionId}</h1>
-    <StatusDot tone={statusTone} pulse={unsettled} label={statusLabel} showLabel />
-    <span class="session__spacer"></span>
-    {#if ended}
-      <!-- Nothing to control any more; the badge/button would be a lie either way. -->
-    {:else if hasControl}
-      <span class="badge badge--controlling">Controlling</span>
-    {:else if connectionState !== "closed"}
-      <button class="btn btn--primary session__control-btn" onclick={takeControl}>
-        Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
-      </button>
-    {/if}
-    {#if toast}
-      <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
-    {/if}
-  </header>
+  <SessionHeader
+    title={session?.command ?? sessionId}
+    tone={status.tone}
+    pulse={status.unsettled}
+    statusLabel={status.label}
+    ended={status.ended}
+    {hasControl}
+    closed={connectionState === "closed"}
+    {controllerName}
+    {toast}
+    {onBack}
+    onTakeControl={takeControl}
+  />
 
   {#if sessionError}
     <div class="session__banner"><ErrorBanner message={sessionError} /></div>
@@ -191,7 +165,7 @@
 
   <main class="session__main" class:session__main--dimmed={!hasControl}>
     {#if stream}
-      <Terminal bind:this={terminalRef} {stream} isController={hasControl} {ended} {onObserverInput} />
+      <Terminal bind:this={terminalRef} {stream} isController={hasControl} ended={status.ended} {onObserverInput} />
     {/if}
   </main>
 
@@ -210,81 +184,6 @@
        opens, instead of leaving the key bar stranded below it. */
     height: 100vh;
     height: 100dvh;
-    /* .toast (app.css) is position:absolute and there's no other positioned
-       ancestor anywhere in the app -- without this it anchors to the
-       initial containing block instead of this view, which only happens to
-       look right today because .session fills the viewport with no page
-       scroll. Making the actual containing block explicit here. */
-    position: relative;
-  }
-  .session__header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 0.6rem var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    /* .toast (app.css) anchors to this, not .session -- see the override
-       below. */
-    position: relative;
-  }
-  /* .toast is shared (app.css) and normally a `top: 3.25rem` guess at the
-     header's height -- wrong by however much the real header differs from
-     that guess (font size, safe-area inset, a long controller name),
-     eating further into the terminal than intended. Anchored to the header
-     itself, it tracks the header's *actual* rendered height exactly instead
-     of guessing. It still overlaps the terminal's first line or two for
-     its ~4s lifetime -- full-bleed terminal plus a non-reflowing overlay
-     leaves nowhere content-free to put it; that part is unchanged. */
-  .toast {
-    top: 100%;
-    margin-top: 0.4rem;
-  }
-  .session__back {
-    background: none;
-    border: none;
-    color: inherit;
-    font-size: 1.1rem;
-    cursor: pointer;
-    flex-shrink: 0;
-    opacity: 0.8;
-  }
-  .session__back:hover {
-    opacity: 1;
-  }
-  .session__title {
-    font-size: 0.95rem;
-    font-weight: 600;
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-  }
-  .session__spacer {
-    flex: 1;
-  }
-  .session__control-btn {
-    /* Long controller names ("Take control (from Chrome on Linux)") must
-       lose to a narrow header gracefully -- plain <button> text wraps by
-       default, which on a phone-width header ballooned it to two lines and
-       squeezed .session__title down to a couple of characters. overflow:
-       hidden gives this flex item an automatic min-width of 0 (flexbox:
-       the automatic minimum size of a flex item with non-visible overflow
-       is 0), so it can actually shrink instead of forcing the wrap.
-       overflow:hidden alone stops the wrap but doesn't stop the squeeze:
-       two equally-shrinkable flex items split the deficit in proportion to
-       their own natural width, so this button (much longer, once a real
-       name is in it) still claimed the lion's share of the header and left
-       .session__title unreadable -- caught live with a real controller
-       name ("Take control (from Chrome on macOS)" crushed "claude" down to
-       "clau…"), not just the short/nameless label this was first written
-       against. A max-width caps this button's own claim so .session__title
-       keeps a usable share regardless of how long the name is. */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 50%;
   }
   .session__banner {
     /* .banner's own margin is for stacked page content; here it's a strip
@@ -303,5 +202,4 @@
   .session__main--dimmed {
     opacity: 0.85;
   }
-
 </style>

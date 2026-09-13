@@ -2,7 +2,7 @@
   // A status dot with its text twin (UI.md rule 18): the dot is aria-hidden,
   // the label is either visible beside it or screen-reader-only. Knows no
   // domain -- the caller maps its state to a tone.
-  export type DotTone = "success" | "warning" | "warning-strong" | null
+  import type { DotTone } from "@/ui/tones"
 
   let {
     tone = null,

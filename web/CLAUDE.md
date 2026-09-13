@@ -41,6 +41,15 @@ third top-level layer, and do not put a component at `src/` root — `App.svelte
   (headless Chromium works — `chromium-browser --headless=new --screenshot=out.png
   '<url>'`). A clean build proves the CSS parses, not that it looks right.
 
+## Logic lives in plain modules
+
+Anything with no reactive state — formatting, filtering, request building — is a `.ts`
+file beside the component that uses it (`features/sessions/sessionDisplay.ts`,
+`launchRequest.ts`), with a `.test.ts` next to it (UI.md rule 27). A component's
+`<script>` holds state, effects and handlers; if a function in it takes plain values and
+returns plain values, it belongs in the module. Pass `now` in; never read `Date.now()`
+inside a helper.
+
 ## Where a block lives here
 
 **Shared blocks live in `src/app.css`.** Anything that appears in more than one
@@ -68,9 +77,15 @@ the element):
 | `StatusDot` | `tone`, `pulse`, `label`, `showLabel` | `.dot` + its text twin (visible or `.sr-only`) — never place a bare `.dot` |
 | `ErrorBanner` | `message` | `.banner--error` + `role="alert"`; placement is the caller's (wrap it) |
 
+A primitive's prop vocabulary (`DotTone`) lives in `src/ui/tones.ts`, a plain module:
+`tsc` cannot read a type exported from a `.svelte` module script, and feature helpers
+in `.ts` need it.
+
 **Component-scoped blocks stay in that component's `<style>`**, scoped by Svelte
-automatically (`.sessions`, `.session-filters`, `.launcher`, `.empty`, `.session-list`,
-`.session-row`, `.session`, `.key-bar`, `.terminal`, …). Don't promote to `app.css` until a second
+automatically (`.sessions`, `.session-filters`, `.fab`, `.launcher`, `.browser`,
+`.session-list`, `.session-row`, `.session`, `.session-header`, `.key-bar`,
+`.terminal`). One component, one block (UI.md rule 23) — a part with parts of its own
+gets its own file. Don't promote to `app.css` until a second
 component actually needs it. Conditional classes use Svelte's `class:` directive.
 
 ## Tokens

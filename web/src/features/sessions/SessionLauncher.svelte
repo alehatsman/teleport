@@ -4,6 +4,7 @@
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
   import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
+  import { buildLaunchRequest } from "./launchRequest"
 
   // The new-session form panel. `cwd`/`selectedPreset`/`customCommand` are
   // owned by Sessions.svelte and bound, not local state here -- they must
@@ -90,21 +91,13 @@
     launching = true
     launchError = null
     try {
-      // Only claude actually understands `--resume`; the field itself is
-      // hidden for any other preset, but the trim-and-check happens here
-      // too so a stale value left over from switching presets mid-launcher
-      // session can never leak into an unrelated command's argv.
-      const resumeId = selectedPreset === "claude" ? resumeSessionId.trim() : ""
-      const body: CreateSessionRequest = selectedPreset
-        ? {
-            kind: "agent",
-            preset: selectedPreset,
-            cwd: cwd || homeDir || "/",
-            cols: 120,
-            rows: 36,
-            ...(resumeId ? { args: ["--resume", resumeId] } : {}),
-          }
-        : { kind: "shell", command: customCommand, cwd: cwd || homeDir || "/", cols: 120, rows: 36 }
+      const body = buildLaunchRequest({
+        selectedPreset,
+        customCommand,
+        cwd,
+        homeDir,
+        resumeSessionId,
+      })
       await onLaunch(body)
     } catch (e) {
       launchError = describeError(e)
