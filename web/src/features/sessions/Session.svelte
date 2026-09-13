@@ -165,16 +165,22 @@
   }
 
   const OBSERVER_HINT = "Read-only. Take control to type."
+  const ENDED_HINT = "Session ended."
 
   function onObserverInput() {
+    // A session that has already ended shows neither the badge nor the
+    // "Take control" button (SessionHeader.svelte) -- telling the user to
+    // take control here would send them looking for a button that was
+    // deliberately hidden as a lie. Same toast plumbing, different copy.
+    const hint = status.ended ? ENDED_HINT : OBSERVER_HINT
     // Repeated keystrokes just keep the same toast alive; don't re-trigger
     // its entrance animation on every key.
-    if (toast === OBSERVER_HINT) {
+    if (toast === hint) {
       if (toastTimer) clearTimeout(toastTimer)
       toastTimer = setTimeout(() => (toast = null), 4000)
       return
     }
-    showToast(OBSERVER_HINT)
+    showToast(hint)
   }
 </script>
 
@@ -213,7 +219,7 @@
     {/if}
   </main>
 
-  <KeyBar onKey={sendKey} />
+  <KeyBar onKey={sendKey} dimmed={!hasControl} />
 </div>
 
 <style>

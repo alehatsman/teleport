@@ -2,10 +2,19 @@
   // Touch-only row of keys a soft keyboard can't send
   // (docs/09-frontend.md#mobile). Pure presentation: emits the raw bytes,
   // Session.svelte decides whether this client may send them.
-  let { onKey }: { onKey: (bytes: string) => void } = $props()
+  let {
+    onKey,
+    /** Mirrors .session__main--dimmed (Session.svelte): true whenever this
+        client doesn't hold control, so the one touch input surface doesn't
+        look equally tappable as the terminal it contradicts. Not `disabled`
+        on the buttons -- a tap must still reach onKey so sendKey's existing
+        "Read-only" toast fires; only the terminal's own visual signal is
+        being matched here, not its interactivity. */
+    dimmed = false,
+  }: { onKey: (bytes: string) => void; dimmed?: boolean } = $props()
 </script>
 
-<div class="key-bar">
+<div class="key-bar" class:key-bar--dimmed={dimmed}>
   <div class="key-bar__row">
     <button class="key-bar__button" onclick={() => onKey("\x1b")}>Esc</button>
     <button class="key-bar__button" onclick={() => onKey("\t")}>Tab</button>
@@ -51,6 +60,9 @@
   }
   .key-bar__button:active {
     background: var(--surface-hover);
+  }
+  .key-bar--dimmed {
+    opacity: 0.85;
   }
 
   @media (max-width: 700px), (pointer: coarse) {
