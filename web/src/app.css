@@ -73,15 +73,9 @@ body {
   /* A faint accent-tinted vignette off the top -- flat black reads as an
      unstyled page; this reads as an app without costing any contrast. */
   background:
-    radial-gradient(ellipse 900px 500px at 50% -10%, rgb(124 108 240 / 8%), transparent),
-    var(--bg);
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgb(124 108 240 / 8%), transparent), var(--bg);
   color: var(--fg);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* Fine antialiasing keeps the small, low-contrast label text (0.75-0.85rem,
      opacity-dimmed) legible instead of fuzzy on this dark surface. */
   -webkit-font-smoothing: antialiased;

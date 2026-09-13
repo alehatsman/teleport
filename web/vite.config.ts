@@ -1,11 +1,11 @@
-import { svelte } from '@sveltejs/vite-plugin-svelte'
-import { defineConfig } from 'vite'
+import { svelte } from "@sveltejs/vite-plugin-svelte"
+import { defineConfig } from "vite"
 
 // docs/09-frontend.md#dev-workflow default is teleportd's own default port,
 // 7337. Override when this machine already has a different teleportd
 // instance (e.g. a provisioned one) live on 7337 -- scripts/mobile-dev sets
 // this for you rather than hardcoding a second port here.
-const apiPort = process.env.TELEPORTD_DEV_PORT ?? '7337'
+const apiPort = process.env.TELEPORTD_DEV_PORT ?? "7337"
 
 // Set only when reaching this dev server through Tailscale Serve from a
 // phone (scripts/mobile-dev/README.md#why-this-exists). Vite rejects
