@@ -337,13 +337,13 @@
   }
   .session-row__command {
     font-weight: 600;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.9rem;
   }
   .session-row__args {
     opacity: 0.8;
     font-size: 0.85rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -366,7 +366,7 @@
     margin-left: auto;
     flex-shrink: 0;
     font-size: 0.75rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     opacity: 0.7;
   }
   .session-row__outcome--failed {
@@ -381,7 +381,7 @@
   .session-row__cwd {
     opacity: 0.55;
     font-size: 0.8rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

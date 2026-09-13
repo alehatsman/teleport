@@ -9,6 +9,10 @@
      sat at ~3.3:1. */
   --muted: #8a8798;
 
+  /* Monospace stack for commands, paths, ids. Terminal.svelte mirrors it
+     (xterm takes a string option, not a CSS var) with Nerd Fonts in front. */
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
   /* Surfaces, darkest to lightest. */
   --surface-deep: #0a0a0d; /* terminal canvas */
   --surface: #18181e; /* inputs */

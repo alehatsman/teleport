@@ -365,7 +365,7 @@
     font-weight: 700;
     letter-spacing: 0.01em;
     margin: 0;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     /* The host suffix is a real hostname -- unbounded length -- unlike the
        literal "teleport" this used to be alone. overflow:hidden gives this
        flex item an automatic min-width of 0 (Session.svelte's control-btn

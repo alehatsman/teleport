@@ -9,7 +9,8 @@ second server, and no SSR.
 ## Structure
 
 Same split as the fleet's other web app (codefort): a data layer (`api/`), a shared
-primitive vocabulary (`ui/`, promoted on a second consumer — see
+primitive vocabulary (`ui/` — it does not exist yet; the first primitive promoted on a
+second consumer creates it, see
 [ts-quality/docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md)
 rule 11), and everything else. Teleport has one real feature (sessions/terminal), not
 several, so there's no `features/` layer yet — `Sessions.svelte`, `Session.svelte` and
@@ -27,7 +28,6 @@ web/
     │   ├── stream.test.ts
     │   ├── identity.ts         # client id / token / display name
     │   └── types.ts            # shared types mirroring the API doc
-    ├── ui/                     # promoted primitives — empty until a second consumer exists
     ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
     ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
     ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
@@ -98,10 +98,10 @@ per component, so reusing one class across the two would need the shared block
 promotion anyway; three properties used by exactly two sibling components in one feature
 isn't worth that indirection.
 
-The list-row swipe-to-delete gesture handlers (`rowOffset`, `onRowTouchStart/Move/End`,
-`closeSwipe`) stay in `Sessions.svelte` — they're tightly coupled to the row DOM and
-`sessions` array, not reusable, so nothing promotes them per UI.md rule 11 ("promote on
-a second consumer").
+The list-row swipe-to-delete gesture handlers (`onTouchStart/Move/End`, the drag offset)
+live in `SessionRow.svelte` — they're tightly coupled to the row DOM, not reusable, so
+nothing promotes them per UI.md rule 11 ("promote on a second consumer"). Only the
+one-row-open-at-a-time rule sits one level up, in `SessionList.svelte`.
 
 ## `stream.ts` — the part that must be right
 

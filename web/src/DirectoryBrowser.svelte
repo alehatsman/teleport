@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte"
-  import { browse } from "@/api/api"
+  import { browse, describeError } from "@/api/api"
   import type { BrowseEntry } from "@/api/types"
 
   // Inline GET /api/v1/browse directory picker, opened from
@@ -34,7 +34,7 @@
       browseParent = res.parent
       browseEntries = res.entries
     } catch (e) {
-      browseError = e instanceof Error ? e.message : String(e)
+      browseError = describeError(e)
     } finally {
       browseLoading = false
     }
@@ -99,7 +99,7 @@
     background: var(--surface-deep);
   }
   .browser__path {
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.85rem;
     color: var(--muted);
     overflow: hidden;
@@ -119,7 +119,7 @@
     border: none;
     border-radius: var(--radius-sm);
     padding: 0.45rem 0.6rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.85rem;
     color: var(--fg);
     cursor: pointer;
