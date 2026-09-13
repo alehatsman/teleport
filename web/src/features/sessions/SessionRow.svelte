@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Session, SessionState } from "@/api/types"
+  import StatusDot from "@/ui/StatusDot.svelte"
 
   // -- iOS-style swipe-to-reveal ------------------------------------
   //
@@ -191,13 +192,10 @@
         onOpen(session.id);
       }}
     >
-      <span
-        class="dot"
-        aria-hidden="true"
-        class:dot--success={session.state === "running"}
-        class:dot--warning={session.state === "lost"}
-      ></span>
-      <span class="sr-only">{STATE_LABELS[session.state]}.</span>
+      <StatusDot
+        tone={session.state === "running" ? "success" : session.state === "lost" ? "warning" : null}
+        label={STATE_LABELS[session.state]}
+      />
       {#if needsAttention(session)}
         <span class="session-row__attention" aria-hidden="true">●</span>
         <span class="sr-only">Needs attention.</span>

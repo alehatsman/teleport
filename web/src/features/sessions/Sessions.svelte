@@ -10,8 +10,10 @@
   } from "@/api/api"
   import { setControlling } from "@/api/identity"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
+  import SessionFilters, { type StatusFilter } from "@/features/sessions/SessionFilters.svelte"
   import SessionLauncher from "@/features/sessions/SessionLauncher.svelte"
   import SessionList from "@/features/sessions/SessionList.svelte"
+  import ErrorBanner from "@/ui/ErrorBanner.svelte"
 
   let { onOpen }: { onOpen: (id: string) => void } = $props()
 
@@ -36,7 +38,7 @@
   // running|closing; "closed" is exited|lost. Not persisted, same as
   // searchQuery -- reopening the page is a fresh look at what's live now,
   // not a resumed filter session.
-  let statusFilter: "active" | "closed" = $state("active")
+  let statusFilter: StatusFilter = $state("active")
 
   function isActiveStatus(s: Session): boolean {
     return s.state === "running" || s.state === "closing"
@@ -246,7 +248,7 @@
 
   <main>
     {#if loadError}
-      <div class="banner banner--error" role="alert">{loadError}</div>
+      <ErrorBanner message={loadError} />
     {/if}
 
     {#if showLauncher}
@@ -271,38 +273,7 @@
         <button class="btn btn--primary" onclick={openLauncher}>New session</button>
       </div>
     {:else}
-      <div class="status-toggle" role="tablist" aria-label="Filter by status">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={statusFilter === "active"}
-          class="status-toggle__option"
-          class:status-toggle__option--active={statusFilter === "active"}
-          onclick={() => (statusFilter = "active")}
-        >
-          Active ({activeCount})
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={statusFilter === "closed"}
-          class="status-toggle__option"
-          class:status-toggle__option--active={statusFilter === "closed"}
-          onclick={() => (statusFilter = "closed")}
-        >
-          Closed ({closedCount})
-        </button>
-      </div>
-      <input
-        type="search"
-        class="sessions__search"
-        placeholder="Search sessions…"
-        aria-label="Search sessions"
-        bind:value={searchQuery}
-        autocapitalize="none"
-        autocorrect="off"
-        spellcheck="false"
-      />
+      <SessionFilters bind:statusFilter bind:searchQuery {activeCount} {closedCount} />
       {#if filteredSessions.length === 0}
         <p class="sessions__loading">
           {#if searchQuery.trim()}
@@ -390,35 +361,6 @@
   }
   .sessions__loading {
     opacity: 0.6;
-  }
-  .sessions__search {
-    display: block;
-    width: 100%;
-    margin-bottom: var(--space-3);
-    font-size: 0.9rem;
-  }
-  .status-toggle {
-    display: flex;
-    gap: var(--space-2);
-    margin-bottom: var(--space-3);
-  }
-  .status-toggle__option {
-    background: var(--surface);
-    color: var(--muted);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0.3rem 0.65rem;
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .status-toggle__option:hover {
-    border-color: var(--muted);
-    color: var(--fg);
-  }
-  .status-toggle__option--active {
-    background: var(--surface-hover);
-    border-color: var(--accent);
-    color: var(--fg);
   }
 
   /* Block: empty -- the no-sessions-yet placeholder. */

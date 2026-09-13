@@ -12,8 +12,8 @@ Same four layers as the fleet's other web app (codefort), per
 [ts-quality/docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md)
 rule 19: `api/` (data), `ui/` (domain-free primitives), `shell/` (app chrome),
 `features/<x>/` (one domain each). Teleport has one domain — sessions — so there is one
-feature directory holding both the list and the viewer. `shell/` and `ui/` exist but are
-empty; each carries a README saying what lands there and when.
+feature directory holding both the list and the viewer. `shell/` is empty with a README
+saying what lands there and when; `ui/` holds the two primitives promoted so far.
 
 ```text
 web/
@@ -29,15 +29,19 @@ web/
     │   ├── identity.ts         # client id / token / display name
     │   └── types.ts            # shared types mirroring the API doc
     ├── shell/                  # app chrome — empty until two features share some
-    ├── ui/                     # promoted primitives — empty until a second consumer exists
+    ├── ui/
+    │   ├── StatusDot.svelte    # .dot + its text twin (SessionRow, Session)
+    │   └── ErrorBanner.svelte  # .banner--error + role=alert (four call sites)
     └── features/
         └── sessions/
-            ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
+            ├── Sessions.svelte         # orchestrator: fetch/poll, filtering, launcher trigger
+            ├── SessionFilters.svelte   # status toggle + search box (bindable, no logic)
             ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
             ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
             ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
             ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
             ├── Session.svelte          # one session: header, status, control lease UI
+            ├── KeyBar.svelte           # touch-only key row; emits bytes, Session decides
             └── Terminal.svelte         # xterm.js, isolated
 ```
 

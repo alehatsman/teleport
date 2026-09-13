@@ -4,7 +4,10 @@
   import { setControlling, wasControlling } from "@/api/identity"
   import { SessionStream } from "@/api/stream"
   import { ApiError, type Session as SessionData, type StreamState } from "@/api/types"
+  import KeyBar from "@/features/sessions/KeyBar.svelte"
   import Terminal from "@/features/sessions/Terminal.svelte"
+  import ErrorBanner from "@/ui/ErrorBanner.svelte"
+  import StatusDot, { type DotTone } from "@/ui/StatusDot.svelte"
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
@@ -36,6 +39,16 @@
     // Capitalized here, not via CSS text-transform: that capitalized every
     // word and turned "Exited (code 3)" into "Exited (Code 3)".
     return connectionState.charAt(0).toUpperCase() + connectionState.slice(1)
+  })
+  // Connection is in flux while connecting or reconnecting: amber + pulse.
+  let unsettled: boolean = $derived.by(
+    () => !ended && (connectionState === "reconnecting" || connectionState === "connecting")
+  )
+  let statusTone: DotTone = $derived.by(() => {
+    if (session?.state === "lost") return "warning"
+    if (unsettled) return "warning-strong"
+    if (!ended && connectionState === "live") return "success"
+    return null
   })
   let toastTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -146,17 +159,7 @@
   <header class="session__header">
     <button class="session__back" onclick={onBack} aria-label="Back to sessions">&larr;</button>
     <h1 class="session__title">{session?.command ?? sessionId}</h1>
-    <span class="session__status">
-      <span
-        class="dot"
-        aria-hidden="true"
-        class:dot--success={!ended && connectionState === "live"}
-        class:dot--warning={session?.state === "lost"}
-        class:dot--warning-strong={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
-        class:dot--pulse={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
-      ></span>
-      <span class="session__status-label">{statusLabel}</span>
-    </span>
+    <StatusDot tone={statusTone} pulse={unsettled} label={statusLabel} showLabel />
     <span class="session__spacer"></span>
     {#if ended}
       <!-- Nothing to control any more; the badge/button would be a lie either way. -->
@@ -173,7 +176,7 @@
   </header>
 
   {#if sessionError}
-    <div class="banner banner--error session__banner" role="alert">{sessionError}</div>
+    <div class="session__banner"><ErrorBanner message={sessionError} /></div>
   {/if}
 
   {#if truncatedNotice}
@@ -192,21 +195,7 @@
     {/if}
   </main>
 
-  <div class="key-bar">
-    <div class="key-bar__row">
-      <button class="key-bar__button" onclick={() => sendKey("\x1b")}>Esc</button>
-      <button class="key-bar__button" onclick={() => sendKey("\t")}>Tab</button>
-      <button class="key-bar__button" onclick={() => sendKey("\x03")}>Ctrl-C</button>
-      <button class="key-bar__button" onclick={() => sendKey("\x1b[Z")}>Shift-Tab</button>
-    </div>
-    <div class="key-bar__row">
-      <button class="key-bar__button" onclick={() => sendKey("\x1b[D")} aria-label="Left">←</button>
-      <button class="key-bar__button" onclick={() => sendKey("\x1b[A")} aria-label="Up">↑</button>
-      <button class="key-bar__button" onclick={() => sendKey("\x1b[B")} aria-label="Down">↓</button>
-      <button class="key-bar__button" onclick={() => sendKey("\x1b[C")} aria-label="Right">→</button>
-      <button class="key-bar__button" onclick={() => sendKey("\r")}>Enter</button>
-    </div>
-  </div>
+  <KeyBar onKey={sendKey} />
 </div>
 
 <style>
@@ -272,16 +261,6 @@
     white-space: nowrap;
     font-family: var(--font-mono);
   }
-  .session__status {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    flex-shrink: 0;
-  }
-  .session__status-label {
-    font-size: 0.75rem;
-    opacity: 0.7;
-  }
   .session__spacer {
     flex: 1;
   }
@@ -309,8 +288,12 @@
   }
   .session__banner {
     /* .banner's own margin is for stacked page content; here it's a strip
-       between header and terminal and should sit flush. */
+       between header and terminal. Svelte scoping can't reach into
+       ErrorBanner's element, so the placement lives on this wrapper. */
     margin: var(--space-2) var(--space-3);
+  }
+  .session__banner > :global(.banner) {
+    margin-bottom: 0;
   }
   .session__main {
     flex: 1;
@@ -321,41 +304,4 @@
     opacity: 0.85;
   }
 
-  /* Block: key-bar -- touch-only row of keys a soft keyboard can't send
-     (docs/09-frontend.md#mobile). */
-  .key-bar {
-    display: none;
-    flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.3rem;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .key-bar__row {
-    display: flex;
-    gap: 0.25rem;
-  }
-  .key-bar__button {
-    flex: 1;
-    background: var(--surface-raised);
-    color: inherit;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-md);
-    padding: 0.3rem 0;
-    font-size: 0.8rem;
-    /* These are built for a burst of rapid taps (arrows, Ctrl-C). Without
-       this, two taps close together anywhere near the same spot are a
-       double-tap-to-zoom gesture to the browser first -- the key never
-       reaches the PTY and the page zooms instead. */
-    touch-action: manipulation;
-  }
-  .key-bar__button:active {
-    background: var(--surface-hover);
-  }
-
-  @media (max-width: 700px), (pointer: coarse) {
-    .key-bar {
-      display: flex;
-    }
-  }
 </style>

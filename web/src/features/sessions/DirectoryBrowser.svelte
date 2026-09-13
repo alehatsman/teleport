@@ -2,6 +2,7 @@
   import { onMount } from "svelte"
   import { browse, describeError } from "@/api/api"
   import type { BrowseEntry } from "@/api/types"
+  import ErrorBanner from "@/ui/ErrorBanner.svelte"
 
   // Inline GET /api/v1/browse directory picker, opened from
   // SessionLauncher's "Browse…" button. No keydown handler of its own --
@@ -58,7 +59,7 @@
     {/if}
   </div>
   {#if browseError}
-    <div class="banner banner--error" role="alert">{browseError}</div>
+    <ErrorBanner message={browseError} />
   {:else}
     <div class="browser__list">
       {#if browseParent}
