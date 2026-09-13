@@ -123,8 +123,10 @@ Rules:
 ## Client identity and token
 
 ```ts
-// generated once, persisted forever
-const CLIENT_ID   = localStorage.getItem("client_id") ?? newClientId();
+// generated once per tab (sessionStorage): survives a reload, not a closed tab.
+// localStorage would make every tab of one browser the same client, and two
+// tabs on one session would both hold "control".
+const CLIENT_ID   = sessionStorage.getItem("client_id") ?? newClientId();
 
 // `crypto` is exposed only in a secure context (HTTPS, or a localhost origin).
 // Over plain http:// on a LAN IP — the --i-know-what-im-doing path — it is
