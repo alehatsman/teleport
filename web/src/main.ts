@@ -7,8 +7,9 @@ import "./app.css"
 // (docs/06-security.md#token-on-the-websocket-upgrade).
 captureTokenFromUrl()
 
-const app = mount(App, {
-  target: document.getElementById("app")!,
-})
+const target = document.getElementById("app")
+if (!target) throw new Error("index.html has no #app element to mount into")
+
+const app = mount(App, { target })
 
 export default app

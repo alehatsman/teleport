@@ -152,9 +152,11 @@ select:focus-visible {
   *,
   *::before,
   *::after {
+    /* biome-ignore-start lint/complexity/noImportantStyles: the kill switch must beat every component-scoped duration; that is its whole job */
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    /* biome-ignore-end lint/complexity/noImportantStyles: reduced-motion kill switch */
   }
 }
 

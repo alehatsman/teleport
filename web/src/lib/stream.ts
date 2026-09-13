@@ -41,12 +41,12 @@ export interface SessionStreamCallbacks {
 export class SessionStream {
   private ws: WebSocket | null = null
   private nextOffset = 0
-  private hasCursor = false
+  private hasCursor: boolean = false
   private wantControl: boolean
   private backoff = BACKOFF_MIN_MS
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  private closedByCaller = false
-  private sawExit = false
+  private closedByCaller: boolean = false
+  private sawExit: boolean = false
   /**
    * Bumped on every `connect()`. `connectWithTicket()` captures its own
    * value and checks it again after the ticket-fetch `await` -- if a newer
@@ -59,12 +59,16 @@ export class SessionStream {
    * `onmessage`/`onclose` (code review, PR #22).
    */
   private connectGeneration = 0
+  private readonly sessionId: string
+  private readonly callbacks: SessionStreamCallbacks
 
   constructor(
-    private readonly sessionId: string,
-    private readonly callbacks: SessionStreamCallbacks,
+    sessionId: string,
+    callbacks: SessionStreamCallbacks,
     opts?: { requestControl?: boolean }
   ) {
+    this.sessionId = sessionId
+    this.callbacks = callbacks
     this.wantControl = opts?.requestControl ?? false
   }
 

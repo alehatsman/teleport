@@ -18,28 +18,30 @@ function newClientId(): string {
   )
 }
 
+// First match wins, so order matters: Edge also carries "Chrome/", Chrome
+// also carries "Safari/", and an iPhone UA also says "Mac OS X".
+const BROWSERS: ReadonlyArray<[RegExp, string]> = [
+  [/Edg\//, "Edge"],
+  [/Chrome\//, "Chrome"],
+  [/Firefox\//, "Firefox"],
+  [/Safari\//, "Safari"],
+]
+const PLATFORMS: ReadonlyArray<[RegExp, string]> = [
+  [/iPhone|iPad/, "iOS"],
+  [/Android/, "Android"],
+  [/Mac OS X/, "macOS"],
+  [/Windows/, "Windows"],
+  [/Linux/, "Linux"],
+]
+
+function firstMatch(ua: string, table: ReadonlyArray<[RegExp, string]>): string | undefined {
+  return table.find(([re]) => re.test(ua))?.[1]
+}
+
 function defaultClientName(): string {
   const ua = navigator.userAgent
-  const browser = /Edg\//.test(ua)
-    ? "Edge"
-    : /Chrome\//.test(ua)
-      ? "Chrome"
-      : /Firefox\//.test(ua)
-        ? "Firefox"
-        : /Safari\//.test(ua)
-          ? "Safari"
-          : "Browser"
-  const platform = /iPhone|iPad/.test(ua)
-    ? "iOS"
-    : /Android/.test(ua)
-      ? "Android"
-      : /Mac OS X/.test(ua)
-        ? "macOS"
-        : /Windows/.test(ua)
-          ? "Windows"
-          : /Linux/.test(ua)
-            ? "Linux"
-            : ""
+  const browser = firstMatch(ua, BROWSERS) ?? "Browser"
+  const platform = firstMatch(ua, PLATFORMS)
   return platform ? `${browser} on ${platform}` : browser
 }
 

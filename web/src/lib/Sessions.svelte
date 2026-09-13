@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte"
-  import * as api from "./api"
+  import { browse, createSession, deleteSession, health, listPresets, listSessions } from "./api"
   import { setControlling } from "./identity"
   import type { BrowseEntry, CreateSessionRequest, Preset, Session, SessionState } from "./types"
 
@@ -105,11 +105,11 @@
   // wrong, just less pretty). Matches only a real path-segment boundary
   // (homeDir itself, or homeDir + "/"), not an unrelated sibling directory
   // that merely starts with the same characters (e.g. "/Users/aleh-test").
-  function displayCwd(cwd: string): string {
-    if (!homeDir) return cwd
-    if (cwd === homeDir) return "~"
-    if (cwd.startsWith(`${homeDir}/`)) return `~${cwd.slice(homeDir.length)}`
-    return cwd
+  function displayCwd(path: string): string {
+    if (!homeDir) return path
+    if (path === homeDir) return "~"
+    if (path.startsWith(`${homeDir}/`)) return `~${path.slice(homeDir.length)}`
+    return path
   }
 
   // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
@@ -143,7 +143,7 @@
 
   async function refresh() {
     try {
-      const res = await api.listSessions()
+      const res = await listSessions()
       sessions = res.sessions
       loadError = null
     } catch (e) {
@@ -153,15 +153,16 @@
 
   async function loadPresets() {
     try {
-      const res = await api.listPresets()
+      const res = await listPresets()
       presets = res.presets
       // Claude Code is the common case -- default to it by id rather than
       // presets[0], so a reordered or hand-edited presets.toml (M8's
       // load_or_create writes the built-in default order, but nothing
       // pins it) can't silently change what a blank launcher submits to.
       const claude = presets.find((p) => p.id === "claude")
+      const first = presets[0]
       if (claude) selectedPreset = claude.id
-      else if (presets.length > 0) selectedPreset = presets[0].id
+      else if (first !== undefined) selectedPreset = first.id
     } catch {
       // Presets are a convenience; the shell-command fallback still works.
     }
@@ -169,7 +170,7 @@
 
   async function loadHealthInfo() {
     try {
-      const res = await api.health()
+      const res = await health()
       deviceName = res.device_name ?? null
       homeDir = res.home_dir ?? null
     } catch {
@@ -187,7 +188,8 @@
     // Prefill with the last-used directory -- typing the same path every
     // launch is the friction this is meant to remove. Only when empty:
     // never clobber whatever the person is mid-typing across a reopen.
-    if (!cwd && recentCwds.length > 0) cwd = recentCwds[0]
+    const last = recentCwds[0]
+    if (!cwd && last !== undefined) cwd = last
     await tick()
     firstFieldEl?.focus()
   }
@@ -227,7 +229,7 @@
     browseLoading = true
     browseError = null
     try {
-      const res = await api.browse(path)
+      const res = await browse(path)
       browsePath = res.path
       browseParent = res.parent
       browseEntries = res.entries
@@ -244,7 +246,7 @@
     // starting point (recent cwd, hand-typed guess), not always starting
     // over from home. loadBrowse() itself falls back to the daemon's home
     // directory when given nothing.
-    loadBrowse(cwd || undefined)
+    void loadBrowse(cwd || undefined)
   }
 
   function closeBrowser() {
@@ -258,7 +260,7 @@
 
   function onLauncherSubmit(e: SubmitEvent) {
     e.preventDefault()
-    launch()
+    void launch()
   }
 
   async function launch() {
@@ -280,7 +282,7 @@
             ...(resumeId ? { args: ["--resume", resumeId] } : {}),
           }
         : { kind: "shell", command: customCommand, cwd: cwd || "/", cols: 120, rows: 36 }
-      const created = await api.createSession(body)
+      const created = await createSession(body)
       // The creator is the only client that could possibly be attached to a
       // session that didn't exist a moment ago -- the lease is unheld by
       // construction, so `mode=control` on the very next connect is granted
@@ -303,7 +305,7 @@
 
   async function terminate(id: string) {
     try {
-      await api.deleteSession(id)
+      await deleteSession(id)
       await refresh()
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e)
@@ -316,7 +318,7 @@
     // still stops a mis-tap.
     if (!confirm("Delete this session and its log? This can't be undone.")) return
     try {
-      await api.deleteSession(id, true)
+      await deleteSession(id, true)
       await refresh()
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e)

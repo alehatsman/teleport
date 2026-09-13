@@ -32,7 +32,10 @@ class FakeWebSocket {
   sent: unknown[] = []
   closedWith: { code: number; reason: string } | null = null
 
-  constructor(public url: string) {
+  url: string
+
+  constructor(url: string) {
+    this.url = url
     FakeWebSocket.instances.push(this)
   }
 
@@ -90,6 +93,7 @@ function encodeFrame(offset: number, payload: Uint8Array): ArrayBuffer {
 function readyFrame(overrides: Partial<ReadyFrame> = {}): ReadyFrame {
   return {
     type: "ready",
+    // biome-ignore lint/security/noSecrets: a ULID fixture, not a credential
     session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     replay_from: 0,
     next_offset: 0,
@@ -103,6 +107,10 @@ function readyFrame(overrides: Partial<ReadyFrame> = {}): ReadyFrame {
   }
 }
 
+function ignore(): void {
+  // Callbacks a test does not observe.
+}
+
 /** Collects everything a SessionStream reports, for assertions. */
 function harness() {
   const states: StreamState[] = []
@@ -111,10 +119,10 @@ function harness() {
   const callbacks = {
     onState: (s: StreamState) => states.push(s),
     onOutput: (b: Uint8Array) => output.push(b),
-    onGeometry: () => {},
-    onControlChange: () => {},
-    onTruncated: () => {},
-    onExit: () => {},
+    onGeometry: ignore,
+    onControlChange: ignore,
+    onTruncated: ignore,
+    onExit: ignore,
     onError: (code: string, message: string | undefined) => errors.push({ code, message }),
   }
   return { states, output, errors, callbacks }
@@ -240,7 +248,7 @@ describe("protocol parser hardening (#19)", () => {
 
     expect(output).toHaveLength(0)
     expect(errors).toHaveLength(1)
-    expect(errors[0].code).toBe("protocol_violation")
+    expect(errors[0]?.code).toBe("protocol_violation")
     expect(ws.closedWith?.code).toBe(1002)
   })
 
@@ -270,7 +278,7 @@ describe("protocol parser hardening (#19)", () => {
     expect(() => ws.receiveText("{not json")).not.toThrow()
 
     expect(errors).toHaveLength(1)
-    expect(errors[0].code).toBe("protocol_violation")
+    expect(errors[0]?.code).toBe("protocol_violation")
     expect(ws.closedWith?.code).toBe(1002)
   })
 })
@@ -355,8 +363,9 @@ describe("replay/reconnect byte-offset invariant (#21)", () => {
     const withReplays: typeof chunks = []
     const delivered: (typeof chunks)[number][] = []
     for (const chunk of chunks) {
-      if (delivered.length > 0 && rand() < 0.2) {
-        withReplays.push(delivered[Math.floor(rand() * delivered.length)])
+      const replay = delivered[Math.floor(rand() * delivered.length)]
+      if (replay !== undefined && rand() < 0.2) {
+        withReplays.push(replay)
       }
       withReplays.push(chunk)
       delivered.push(chunk)

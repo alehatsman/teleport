@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte"
-  import * as api from "./api"
+  import { onMount } from "svelte"
+  import { getSession } from "./api"
   import { setControlling, wasControlling } from "./identity"
   import { SessionStream } from "./stream"
   import Terminal from "./Terminal.svelte"
@@ -62,8 +62,7 @@
     stream = s
     s.connect()
 
-    api
-      .getSession(sessionId)
+    getSession(sessionId)
       .then((data) => (session = data))
       .catch(() => {
         // Non-fatal -- the header falls back to the raw session id.
