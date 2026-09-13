@@ -6,12 +6,14 @@
   // never edited; tasks/ui-config-check.yml reports drift.
   "extends": ["./biome.base.json"],
   "files": {
-    // Negations only: with no positive pattern everything is included, and
-    // Biome's own config lint (noBiomeFirstException) objects to a leading
-    // "**". `includes` replaces the base list rather than merging, so the
-    // base's excludes are restated. `!**/dir` (not `!**/dir/**`) is the
-    // spelling that also stops traversal.
+    // Leading "**" is required: on Biome 2.5.12 a negation-only list
+    // matches nothing, so `biome check .` silently processed only this
+    // file and every source lint passed vacuously. `includes` replaces
+    // the base list rather than merging, so the base's excludes are
+    // restated. `!**/dir` (not `!**/dir/**`) is the spelling that also
+    // stops traversal.
     "includes": [
+      "**",
       "!**/node_modules",
       "!**/dist",
       "!**/build",

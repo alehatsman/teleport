@@ -311,7 +311,7 @@
     // starting point (recent cwd, hand-typed guess), not always starting
     // over from home. loadBrowse() itself falls back to the daemon's home
     // directory when given nothing.
-    loadBrowse(cwd || undefined)
+    void loadBrowse(cwd || undefined)
   }
 
   function closeBrowser() {
@@ -325,7 +325,7 @@
 
   function onLauncherSubmit(e: SubmitEvent) {
     e.preventDefault()
-    launch()
+    void launch()
   }
 
   async function launch() {
