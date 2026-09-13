@@ -5,9 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "check:svelte": "svelte-check --tsconfig ./tsconfig.app.json",
+    "build": "npm run check:svelte && vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "lint": "biome check --error-on-warnings --max-diagnostics=none .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "typecheck": "npm run check:svelte && tsc -b",
     "test": "vitest run"
   },
   "dependencies": {
@@ -15,6 +19,7 @@
     "@xterm/xterm": "^5.5.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^24.13.3",
@@ -23,5 +28,11 @@
     "typescript": "~6.0.2",
     "vite": "^8.2.2",
     "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": "^24.0.0 || >=26.0.0"
+  },
+  "allowScripts": {
+    "fsevents": false
   }
 }

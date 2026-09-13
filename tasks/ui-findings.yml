@@ -1,0 +1,8 @@
+---
+description: write every web gate finding to web/.gate/findings.jsonl for an agent to read
+
+# tq/findings over web/. The web half of tasks/findings.yml.
+steps:
+  - name: web
+    use: ~/.cache/provision/tools/ts-quality/findings.yml
+    props: { dir: web }
