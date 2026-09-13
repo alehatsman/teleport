@@ -112,7 +112,7 @@ export interface ApiErrorBody {
   message: string
 }
 
-/** Thrown by `lib/api.ts` for any non-2xx response. */
+/** Thrown by `api/api.ts` for any non-2xx response. */
 export class ApiError extends Error {
   status: number
   code: string

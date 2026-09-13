@@ -13,7 +13,8 @@ This file is only the teleport delta: where things live here, and the gate.
 
 [09-frontend.md#structure](../docs/09-frontend.md#structure) has the file tree and the
 `SessionLauncher`/`DirectoryBrowser` interfaces — same `api/` / `ui/` split as codefort's
-web app, without a `features/` layer (teleport has one feature, not several). Imports
+web app, without a `features/` layer (teleport has one feature, not several) and with
+`ui/` still unborn (first promoted primitive creates it). Imports
 use the `@/` alias for `src/` (`@/api/api`, `@/Session.svelte`) — no relative `../`
 across top-level files.
 
@@ -63,7 +64,8 @@ component actually needs it. Conditional classes use Svelte's `class:` directive
 ## Tokens
 
 On `:root` in `app.css`. Spacing scale is `--space-1` (0.25rem) through `--space-4`
-(1rem); radii are `--radius-sm`/`-md`/`-lg`; one transition duration. The
+(1rem); radii are `--radius-sm`/`-md`/`-lg`; one transition duration; `--font-mono`
+for commands, paths and ids (never spell the stack out in a component). The
 reduced-motion kill switch and the global `:focus-visible` ring are in `app.css` too.
 
 ## Dark-only

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte"
-  import { getSession } from "@/api/api"
+  import { describeError, getSession } from "@/api/api"
   import { setControlling, wasControlling } from "@/api/identity"
   import { SessionStream } from "@/api/stream"
   import { ApiError, type Session as SessionData, type StreamState } from "@/api/types"
@@ -102,7 +102,7 @@
       // The header still falls back to the raw id; the banner says why.
       if (e instanceof ApiError && e.status === 404)
         sessionError = "Session not found. It may have been deleted."
-      else sessionError = e instanceof Error ? e.message : String(e)
+      else sessionError = describeError(e)
     }
   }
 
@@ -270,7 +270,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
   }
   .session__status {
     display: flex;

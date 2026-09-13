@@ -255,7 +255,7 @@
     border-radius: var(--radius-sm);
     padding: 0.3rem 0.55rem;
     font-size: 0.78rem;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
