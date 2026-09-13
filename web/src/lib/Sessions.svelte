@@ -181,6 +181,7 @@
     launchError = null;
     resumeSessionId = "";
     showLauncher = true;
+    showBrowser = false;
     // Prefill with the last-used directory -- typing the same path every
     // launch is the friction this is meant to remove. Only when empty:
     // never clobber whatever the person is mid-typing across a reopen.
@@ -196,6 +197,12 @@
     if (!session.claude_resume_id) return;
     launchError = null;
     showLauncher = true;
+    // The launcher isn't a modal -- the list stays visible/tappable behind
+    // it, so "Resume this" on a different row is reachable while an
+    // earlier launcher session's browser panel is still open. Without
+    // this it would linger, showing a stale directory listing for the cwd
+    // this call is about to overwrite below.
+    showBrowser = false;
     selectedPreset = "claude";
     resumeSessionId = session.claude_resume_id;
     cwd = session.cwd;
