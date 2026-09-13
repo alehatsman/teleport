@@ -10,9 +10,9 @@
 // sessionStorage survives a reload (the reconnect-and-resume case this exists
 // for) but not a closed tab, which then starts as a fresh observer.
 
-const CLIENT_ID_KEY = "teleport.client_id";
-const CLIENT_NAME_KEY = "teleport.client_name";
-const TOKEN_KEY = "teleport.token";
+const CLIENT_ID_KEY = "teleport.client_id"
+const CLIENT_NAME_KEY = "teleport.client_name"
+const TOKEN_KEY = "teleport.token"
 
 // `crypto` is exposed only in a secure context (HTTPS, or a localhost
 // origin). Over plain http://<lan-ip> -- the --i-know-what-im-doing path --
@@ -20,39 +20,60 @@ const TOKEN_KEY = "teleport.token";
 // don't die.
 function newClientId(): string {
   return (
-    globalThis.crypto?.randomUUID?.() ?? `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-  );
+    globalThis.crypto?.randomUUID?.() ??
+    `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  )
+}
+
+// First match wins, so order matters: Edge also carries "Chrome/", Chrome
+// also carries "Safari/", and an iPhone UA also says "Mac OS X".
+const BROWSERS: ReadonlyArray<[RegExp, string]> = [
+  [/Edg\//, "Edge"],
+  [/Chrome\//, "Chrome"],
+  [/Firefox\//, "Firefox"],
+  [/Safari\//, "Safari"],
+]
+const PLATFORMS: ReadonlyArray<[RegExp, string]> = [
+  [/iPhone|iPad/, "iOS"],
+  [/Android/, "Android"],
+  [/Mac OS X/, "macOS"],
+  [/Windows/, "Windows"],
+  [/Linux/, "Linux"],
+]
+
+function firstMatch(ua: string, table: ReadonlyArray<[RegExp, string]>): string | undefined {
+  return table.find(([re]) => re.test(ua))?.[1]
 }
 
 function defaultClientName(): string {
-  const ua = navigator.userAgent;
-  const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser";
-  const platform = /iPhone|iPad/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "";
-  return platform ? `${browser} on ${platform}` : browser;
+  const ua = navigator.userAgent
+  const browser = firstMatch(ua, BROWSERS) ?? "Browser"
+  const platform = firstMatch(ua, PLATFORMS)
+  return platform ? `${browser} on ${platform}` : browser
 }
 
 function readOrCreate(store: Storage, key: string, create: () => string): string {
   try {
-    const existing = store.getItem(key);
-    if (existing) return existing;
-    const created = create();
-    store.setItem(key, created);
-    return created;
+    const existing = store.getItem(key)
+    if (existing) return existing
+    const created = create()
+    store.setItem(key, created)
+    return created
   } catch {
     // Private browsing / storage disabled: fall back to a per-load value
     // rather than crashing the app.
-    return create();
+    return create()
   }
 }
 
-export const CLIENT_ID = readOrCreate(sessionStorage, CLIENT_ID_KEY, newClientId);
-export const CLIENT_NAME = readOrCreate(localStorage, CLIENT_NAME_KEY, defaultClientName);
+export const CLIENT_ID = readOrCreate(sessionStorage, CLIENT_ID_KEY, newClientId)
+export const CLIENT_NAME = readOrCreate(localStorage, CLIENT_NAME_KEY, defaultClientName)
 
 export function getToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    return localStorage.getItem(TOKEN_KEY)
   } catch {
-    return null;
+    return null
   }
 }
 
@@ -67,16 +88,16 @@ export function getToken(): string | null {
  */
 export function wasControlling(sessionId: string): boolean {
   try {
-    return sessionStorage.getItem(`teleport.controlling.${sessionId}`) === "1";
+    return sessionStorage.getItem(`teleport.controlling.${sessionId}`) === "1"
   } catch {
-    return false;
+    return false
   }
 }
 
 export function setControlling(sessionId: string, controlling: boolean): void {
   try {
-    if (controlling) sessionStorage.setItem(`teleport.controlling.${sessionId}`, "1");
-    else sessionStorage.removeItem(`teleport.controlling.${sessionId}`);
+    if (controlling) sessionStorage.setItem(`teleport.controlling.${sessionId}`, "1")
+    else sessionStorage.removeItem(`teleport.controlling.${sessionId}`)
   } catch {
     // Best-effort only -- worst case a reopened tab asks to resume control
     // it no longer needs to, which is a harmless no-op server-side.
@@ -85,7 +106,7 @@ export function setControlling(sessionId: string, controlling: boolean): void {
 
 export function setToken(token: string): void {
   try {
-    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.setItem(TOKEN_KEY, token)
   } catch {
     // Nothing we can do without storage; the session will keep asking for
     // `?token=` on every load, which is degraded but not broken.
@@ -99,10 +120,10 @@ export function setToken(token: string): void {
  * Call once, from `main.ts`, before anything renders.
  */
 export function captureTokenFromUrl(): void {
-  const url = new URL(window.location.href);
-  const token = url.searchParams.get("token");
-  if (!token) return;
-  setToken(token);
-  url.searchParams.delete("token");
-  window.history.replaceState({}, "", url.pathname + (url.search || "") + url.hash);
+  const url = new URL(window.location.href)
+  const token = url.searchParams.get("token")
+  if (!token) return
+  setToken(token)
+  url.searchParams.delete("token")
+  window.history.replaceState({}, "", url.pathname + (url.search || "") + url.hash)
 }

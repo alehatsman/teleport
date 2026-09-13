@@ -1,0 +1,14 @@
+---
+description: copy ts-quality's config into web/ and print the npm scripts + .npmrc block
+
+# tq/sync-config over web/. biome.base.json and tsconfig.base.json land in
+# web/ and are extended, not edited: web/biome.json and the three tsconfigs
+# `extends` them, so the baseline stays upstream's and a re-sync is a file
+# copy. The scripts block and .npmrc cannot be copied -- npm has no include
+# mechanism for a manifest -- so the preset prints them and
+# tasks/ui-config-check.yml reports drift on the halves it can see. The web
+# half of tasks/sync-config.yml.
+steps:
+  - name: web
+    use: ~/.cache/provision/tools/ts-quality/sync-config.yml
+    props: { dir: web }

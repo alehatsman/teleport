@@ -1,4 +1,8 @@
 {
+  // Strictness policy comes from ts-quality (tasks/ui-sync-config.yml); the
+  // two referenced projects extend it too. tsq/config-check resolves THIS file
+  // and compares, so the stub must carry the baseline as well.
+  "extends": "./tsconfig.base.json",
   "files": [],
   "compilerOptions": {
     // This stub project has no files of its own, but svelte-check still
@@ -9,8 +13,5 @@
     // tsconfig.app.json).
     "moduleResolution": "bundler"
   },
-  "references": [
-    { "path": "./tsconfig.app.json" },
-    { "path": "./tsconfig.node.json" }
-  ]
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
 }

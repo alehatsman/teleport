@@ -1,55 +1,62 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
-  import * as api from "./api";
-  import { setControlling } from "./identity";
-  import { ApiError, type BrowseEntry, type CreateSessionRequest, type Preset, type Session, type SessionState } from "./types";
+  import { onDestroy, onMount, tick } from "svelte"
+  import { browse, createSession, deleteSession, health, listPresets, listSessions } from "./api"
+  import { setControlling } from "./identity"
+  import {
+    ApiError,
+    type BrowseEntry,
+    type CreateSessionRequest,
+    type Preset,
+    type Session,
+    type SessionState,
+  } from "./types"
 
-  let { onOpen }: { onOpen: (id: string) => void } = $props();
+  let { onOpen }: { onOpen: (id: string) => void } = $props()
 
-  let sessions: Session[] = $state([]);
+  let sessions: Session[] = $state([])
   // Refreshed on every poll so the per-row age ticks over without each
   // row re-reading Date.now() (a $derived over a non-reactive clock never
   // re-runs). Coarse on purpose -- ages are shown at minute granularity.
-  let now = $state(Date.now());
-  let presets: Preset[] = $state([]);
-  let loading = $state(true);
-  let loadError: string | null = $state(null);
+  let now = $state(Date.now())
+  let presets: Preset[] = $state([])
+  let loading = $state(true)
+  let loadError: string | null = $state(null)
   // Has any session-list fetch ever succeeded? Gates the "No sessions yet"
   // placeholder: until it has, an empty `sessions` means "unknown", not
   // "none" -- rendering the empty state under an error banner (bad token,
   // daemon down) told the reader there was nothing running when we simply
   // couldn't ask.
-  let loadedOnce = $state(false);
-  let searchQuery = $state("");
+  let loadedOnce = $state(false)
+  let searchQuery = $state("")
 
   // Status toggle alongside the text search below. "Active" (the default --
   // a finished session isn't what you're scanning for day to day) is
   // running|closing; "closed" is exited|lost, i.e. isDeletable's own split
   // further down. Not persisted, same as searchQuery -- reopening the page
   // is a fresh look at what's live now, not a resumed filter session.
-  let statusFilter: "active" | "closed" = $state("active");
+  let statusFilter: "active" | "closed" = $state("active")
 
   // The daemon's two setup failures each have one fix, and the raw message
   // ("Origin or Host rejected") gave no clue what it was. Say the fix.
   function describeError(e: unknown): string {
     if (e instanceof ApiError) {
       if (e.code === "unauthorized") {
-        return `${e.message}. Open the ?token=… link teleportd printed at startup to sign this browser in.`;
+        return `${e.message}. Open the ?token=… link teleportd printed at startup to sign this browser in.`
       }
       if (e.code === "bad_origin") {
-        return `${e.message}. Add ${window.location.origin} to allowed_origins in teleportd's config.toml and restart it.`;
+        return `${e.message}. Add ${window.location.origin} to allowed_origins in teleportd's config.toml and restart it.`
       }
-      return e.message;
+      return e.message
     }
-    return e instanceof Error ? e.message : String(e);
+    return e instanceof Error ? e.message : String(e)
   }
 
   function isActiveStatus(s: Session): boolean {
-    return s.state === "running" || s.state === "closing";
+    return s.state === "running" || s.state === "closing"
   }
 
-  let activeCount: number = $derived(sessions.filter(isActiveStatus).length);
-  let closedCount: number = $derived(sessions.length - activeCount);
+  let activeCount: number = $derived(sessions.filter(isActiveStatus).length)
+  let closedCount: number = $derived(sessions.length - activeCount)
 
   // Client-side only -- the full list is already on hand from polling, and
   // a session count that ever justified a server-side search endpoint
@@ -57,75 +64,77 @@
   // (against the real absolute path, not the "~/..." display string --
   // typing the username you already know shouldn't be punished for it).
   let filteredSessions: Session[] = $derived.by(() => {
-    const byStatus = sessions.filter((s) => isActiveStatus(s) === (statusFilter === "active"));
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return byStatus;
-    return byStatus.filter((s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q));
-  });
+    const byStatus = sessions.filter((s) => isActiveStatus(s) === (statusFilter === "active"))
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return byStatus
+    return byStatus.filter(
+      (s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q)
+    )
+  })
   // Which machine this daemon is actually running on -- juggling more than
   // one teleportd (a dev box, a laptop, a work machine) otherwise looks
   // identical from this title alone; GET /api/v1/health already returns it
   // (daemon/src/device.rs: defaults to the hostname), this just displays
   // it. null while loading and left null on failure -- the plain "teleport"
   // title is a fine fallback, not worth a banner over.
-  let deviceName: string | null = $state(null);
+  let deviceName: string | null = $state(null)
   // Same health() call as deviceName -- lets session-row cwds collapse back
   // to "~/..." instead of showing the full absolute path. null (no
   // collapsing, cwd shown in full) while loading, on failure, or if the
   // daemon couldn't resolve its own home directory.
-  let homeDir: string | null = $state(null);
+  let homeDir: string | null = $state(null)
   // Set once health() has answered. Until then every poll tick retries it:
   // a single failed fetch at mount otherwise left the host name blank and
   // every cwd un-collapsed until a full reload.
-  let healthLoaded = $state(false);
+  let healthLoaded = $state(false)
 
-  let showLauncher = $state(false);
-  let launching = $state(false);
-  let launchError: string | null = $state(null);
-  let selectedPreset = $state("");
-  let customCommand = $state("/bin/sh");
-  let cwd = $state("");
+  let showLauncher = $state(false)
+  let launching = $state(false)
+  let launchError: string | null = $state(null)
+  let selectedPreset = $state("")
+  let customCommand = $state("/bin/sh")
+  let cwd = $state("")
   // claude-preset-only, and deliberately not persisted/prefilled like cwd
   // is -- resuming is a one-off action on a specific launch, not a habit
   // worth remembering for the next one.
-  let resumeSessionId = $state("");
-  let firstFieldEl: HTMLSelectElement | undefined = $state();
+  let resumeSessionId = $state("")
+  let firstFieldEl: HTMLSelectElement | undefined = $state()
 
   // Directory browser -- GET /api/v1/browse, an inline panel rather than a
   // separate route/modal component: it only ever matters while the
   // launcher itself is open, and closing the launcher already needs to
   // reset it (see closeLauncher below).
-  let showBrowser = $state(false);
-  let browsePath: string | null = $state(null);
-  let browseParent: string | null = $state(null);
-  let browseEntries: BrowseEntry[] = $state([]);
-  let browseError: string | null = $state(null);
-  let browseLoading = $state(false);
+  let showBrowser = $state(false)
+  let browsePath: string | null = $state(null)
+  let browseParent: string | null = $state(null)
+  let browseEntries: BrowseEntry[] = $state([])
+  let browseError: string | null = $state(null)
+  let browseLoading = $state(false)
 
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null
 
   const STATE_LABELS: Record<SessionState, string> = {
     running: "Running",
     closing: "Closing",
     exited: "Exited",
     lost: "Lost",
-  };
+  }
 
   // D3 (docs/04-api-protocol.md#get-apiv1sessions):
   // idle_since_ms is already a live signal (the daemon clears it the moment
   // output resumes), but last_bell_ms never clears server-side -- one bell
   // three hours ago shouldn't glow forever. Bound it to a recency window
   // here instead of teaching the daemon an "acknowledged" concept for M8.
-  const BELL_RECENCY_MS = 2 * 60 * 1000;
+  const BELL_RECENCY_MS = 2 * 60 * 1000
 
   function needsAttention(s: Session): boolean {
-    if (s.state !== "running") return false;
+    if (s.state !== "running") return false
     // "Went quiet" only means "waiting on you" for an agent. A shell at its
     // prompt is quiet by definition -- flagging every idle shell made the
     // dot light up on every row and mean nothing. A bell still counts for
     // any kind: a process that rang is asking, whatever it is.
-    if (s.idle_since_ms !== null && s.kind === "agent") return true;
-    return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS;
+    if (s.idle_since_ms !== null && s.kind === "agent") return true
+    return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS
   }
 
   // "/Users/aleh/projects/teleport" next to six other rows exactly like it
@@ -139,83 +148,84 @@
   // "3m", "2h", "5d" -- the one glance that separates six identical "sh"
   // rows. Deliberately coarse: this is for telling rows apart, not auditing.
   function displayAge(sinceMs: number, nowMs: number): string {
-    const s = Math.max(0, Math.floor((nowMs - sinceMs) / 1000));
-    if (s < 60) return "now";
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    if (h < 48) return `${h}h`;
-    return `${Math.floor(h / 24)}d`;
+    const s = Math.max(0, Math.floor((nowMs - sinceMs) / 1000))
+    if (s < 60) return "now"
+    const m = Math.floor(s / 60)
+    if (m < 60) return `${m}m`
+    const h = Math.floor(m / 60)
+    if (h < 48) return `${h}h`
+    return `${Math.floor(h / 24)}d`
   }
 
   // What a closed row ended as. "exit 0" is as informative as "exit 3":
   // silence here made every closed row look the same.
   function displayOutcome(s: Session): string | null {
-    if (s.state === "exited") return s.exit_code === null ? "exited" : `exit ${s.exit_code}`;
-    if (s.state === "lost") return "lost";
-    return null;
+    if (s.state === "exited") return s.exit_code === null ? "exited" : `exit ${s.exit_code}`
+    if (s.state === "lost") return "lost"
+    return null
   }
 
-  function displayCwd(cwd: string): string {
-    if (!homeDir) return cwd;
-    if (cwd === homeDir) return "~";
-    if (cwd.startsWith(`${homeDir}/`)) return `~${cwd.slice(homeDir.length)}`;
-    return cwd;
+  function displayCwd(path: string): string {
+    if (!homeDir) return path
+    if (path === homeDir) return "~"
+    if (path.startsWith(`${homeDir}/`)) return `~${path.slice(homeDir.length)}`
+    return path
   }
 
   // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
   // derived from the session list already on hand -- no new storage/endpoint.
   // Most-recent-use-first, deduped, capped so the dropdown stays scannable.
   let recentCwds: string[] = $derived.by(() => {
-    const latest = new Map<string, number>();
+    const latest = new Map<string, number>()
     for (const s of sessions) {
-      if (!s.cwd) continue;
-      const prev = latest.get(s.cwd);
-      if (prev === undefined || s.created_at_ms > prev) latest.set(s.cwd, s.created_at_ms);
+      if (!s.cwd) continue
+      const prev = latest.get(s.cwd)
+      if (prev === undefined || s.created_at_ms > prev) latest.set(s.cwd, s.created_at_ms)
     }
     return [...latest.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
-      .map(([dir]) => dir);
-  });
+      .map(([dir]) => dir)
+  })
 
   onMount(async () => {
-    await Promise.all([refresh(), loadPresets(), loadHealthInfo()]);
-    loading = false;
+    await Promise.all([refresh(), loadPresets(), loadHealthInfo()])
+    loading = false
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
     // open decision -- polling is the pragmatic interim answer for M5, not
     // a considered final one. Flagged, not silently closed.
-    pollTimer = setInterval(refresh, 3000);
-  });
+    pollTimer = setInterval(refresh, 3000)
+  })
 
   onDestroy(() => {
-    if (pollTimer) clearInterval(pollTimer);
-  });
+    if (pollTimer) clearInterval(pollTimer)
+  })
 
   async function refresh() {
     try {
-      const res = await api.listSessions();
-      sessions = res.sessions;
-      now = Date.now();
-      loadError = null;
-      loadedOnce = true;
-      if (!healthLoaded) void loadHealthInfo();
+      const res = await listSessions()
+      sessions = res.sessions
+      now = Date.now()
+      loadError = null
+      loadedOnce = true
+      if (!healthLoaded) void loadHealthInfo()
     } catch (e) {
-      loadError = describeError(e);
+      loadError = describeError(e)
     }
   }
 
   async function loadPresets() {
     try {
-      const res = await api.listPresets();
-      presets = res.presets;
+      const res = await listPresets()
+      presets = res.presets
       // Claude Code is the common case -- default to it by id rather than
       // presets[0], so a reordered or hand-edited presets.toml (M8's
       // load_or_create writes the built-in default order, but nothing
       // pins it) can't silently change what a blank launcher submits to.
-      const claude = presets.find((p) => p.id === "claude");
-      if (claude) selectedPreset = claude.id;
-      else if (presets.length > 0) selectedPreset = presets[0].id;
+      const claude = presets.find((p) => p.id === "claude")
+      const first = presets[0]
+      if (claude) selectedPreset = claude.id
+      else if (first !== undefined) selectedPreset = first.id
     } catch {
       // Presets are a convenience; the shell-command fallback still works.
     }
@@ -223,10 +233,10 @@
 
   async function loadHealthInfo() {
     try {
-      const res = await api.health();
-      deviceName = res.device_name ?? null;
-      homeDir = res.home_dir ?? null;
-      healthLoaded = true;
+      const res = await health()
+      deviceName = res.device_name ?? null
+      homeDir = res.home_dir ?? null
+      healthLoaded = true
     } catch {
       // Same call the app already makes for other things; if it's failing
       // there's a bigger problem than the title, and that surfaces
@@ -236,96 +246,97 @@
   }
 
   async function openLauncher() {
-    launchError = null;
-    resumeSessionId = "";
-    showLauncher = true;
-    showBrowser = false;
+    launchError = null
+    resumeSessionId = ""
+    showLauncher = true
+    showBrowser = false
     // Prefill with the last-used directory -- typing the same path every
     // launch is the friction this is meant to remove. Only when empty:
     // never clobber whatever the person is mid-typing across a reopen.
-    if (!cwd && recentCwds.length > 0) cwd = recentCwds[0];
-    await tick();
-    firstFieldEl?.focus();
+    const last = recentCwds[0]
+    if (!cwd && last !== undefined) cwd = last
+    await tick()
+    firstFieldEl?.focus()
   }
 
   /** "Resume this" on a closed session with a known claude_resume_id -- opens the
       launcher already set up to continue that exact conversation instead of making
       the id be found, copied, and pasted in by hand. */
   async function openResumeLauncher(session: Session) {
-    if (!session.claude_resume_id) return;
-    launchError = null;
-    showLauncher = true;
+    if (!session.claude_resume_id) return
+    launchError = null
+    showLauncher = true
     // The launcher isn't a modal -- the list stays visible/tappable behind
     // it, so "Resume this" on a different row is reachable while an
     // earlier launcher session's browser panel is still open. Without
     // this it would linger, showing a stale directory listing for the cwd
     // this call is about to overwrite below.
-    showBrowser = false;
-    selectedPreset = "claude";
-    resumeSessionId = session.claude_resume_id;
-    cwd = session.cwd;
-    await tick();
-    firstFieldEl?.focus();
+    showBrowser = false
+    selectedPreset = "claude"
+    resumeSessionId = session.claude_resume_id
+    cwd = session.cwd
+    await tick()
+    firstFieldEl?.focus()
   }
 
   function closeLauncher() {
-    showLauncher = false;
-    showBrowser = false;
+    showLauncher = false
+    showBrowser = false
   }
 
   function onLauncherKeydown(e: KeyboardEvent) {
-    if (e.key !== "Escape") return;
-    if (showBrowser) closeBrowser();
-    else closeLauncher();
+    if (e.key !== "Escape") return
+    if (showBrowser) closeBrowser()
+    else closeLauncher()
   }
 
   async function loadBrowse(path?: string) {
-    browseLoading = true;
-    browseError = null;
+    browseLoading = true
+    browseError = null
     try {
-      const res = await api.browse(path);
-      browsePath = res.path;
-      browseParent = res.parent;
-      browseEntries = res.entries;
+      const res = await browse(path)
+      browsePath = res.path
+      browseParent = res.parent
+      browseEntries = res.entries
     } catch (e) {
-      browseError = e instanceof Error ? e.message : String(e);
+      browseError = e instanceof Error ? e.message : String(e)
     } finally {
-      browseLoading = false;
+      browseLoading = false
     }
   }
 
   function openBrowser() {
-    showBrowser = true;
+    showBrowser = true
     // Start from whatever's already typed -- browsing is for refining a
     // starting point (recent cwd, hand-typed guess), not always starting
     // over from home. loadBrowse() itself falls back to the daemon's home
     // directory when given nothing.
-    loadBrowse(cwd || undefined);
+    loadBrowse(cwd || undefined)
   }
 
   function closeBrowser() {
-    showBrowser = false;
+    showBrowser = false
   }
 
   function useBrowsedFolder() {
-    if (browsePath) cwd = browsePath;
-    showBrowser = false;
+    if (browsePath) cwd = browsePath
+    showBrowser = false
   }
 
   function onLauncherSubmit(e: SubmitEvent) {
-    e.preventDefault();
-    launch();
+    e.preventDefault()
+    launch()
   }
 
   async function launch() {
-    launching = true;
-    launchError = null;
+    launching = true
+    launchError = null
     try {
       // Only claude actually understands `--resume`; the field itself is
       // hidden for any other preset, but the trim-and-check happens here
       // too so a stale value left over from switching presets mid-launcher
       // session can never leak into an unrelated command's argv.
-      const resumeId = selectedPreset === "claude" ? resumeSessionId.trim() : "";
+      const resumeId = selectedPreset === "claude" ? resumeSessionId.trim() : ""
       const body: CreateSessionRequest = selectedPreset
         ? {
             kind: "agent",
@@ -335,8 +346,8 @@
             rows: 36,
             ...(resumeId ? { args: ["--resume", resumeId] } : {}),
           }
-        : { kind: "shell", command: customCommand, cwd: cwd || homeDir || "/", cols: 120, rows: 36 };
-      const created = await api.createSession(body);
+        : { kind: "shell", command: customCommand, cwd: cwd || homeDir || "/", cols: 120, rows: 36 }
+      const created = await createSession(body)
       // The creator is the only client that could possibly be attached to a
       // session that didn't exist a moment ago -- the lease is unheld by
       // construction, so `mode=control` on the very next connect is granted
@@ -346,14 +357,14 @@
       // and until they did, Terminal.svelte's observer path rendered the
       // fixed launch geometry letterboxed inside the window instead of
       // filling it.
-      setControlling(created.id, true);
-      showLauncher = false;
-      showBrowser = false;
-      onOpen(created.id);
+      setControlling(created.id, true)
+      showLauncher = false
+      showBrowser = false
+      onOpen(created.id)
     } catch (e) {
-      launchError = describeError(e);
+      launchError = describeError(e)
     } finally {
-      launching = false;
+      launching = false
     }
   }
 
@@ -362,12 +373,12 @@
     // irreversible the way purge is (the log survives), but the X sits in
     // the same slot as delete and one mis-click ends real work. Same plain
     // confirm() as purge, for the same reason.
-    if (!confirm("Terminate this session? The running process will be killed.")) return;
+    if (!confirm("Terminate this session? The running process will be killed.")) return
     try {
-      await api.deleteSession(id);
-      await refresh();
+      await deleteSession(id)
+      await refresh()
     } catch (e) {
-      loadError = describeError(e);
+      loadError = describeError(e)
     }
   }
 
@@ -375,12 +386,12 @@
     // Purge also deletes the on-disk log (api.ts) -- the one irreversible
     // action in this app. One confirm, not a custom modal: boring and it
     // still stops a mis-tap.
-    if (!confirm("Delete this session and its log? This can't be undone.")) return;
+    if (!confirm("Delete this session and its log? This can't be undone.")) return
     try {
-      await api.deleteSession(id, true);
-      await refresh();
+      await deleteSession(id, true)
+      await refresh()
     } catch (e) {
-      loadError = describeError(e);
+      loadError = describeError(e)
     }
   }
 
@@ -398,68 +409,68 @@
   // Only one row open at a time; REVEAL_PX must match .session-row__action's
   // width below (kept as plain numbers, not a shared CSS custom property --
   // it's one value, every use next to a comment pointing at the other).
-  const REVEAL_PX = 72;
-  const OPEN_THRESHOLD_PX = REVEAL_PX / 2;
+  const REVEAL_PX = 72
+  const OPEN_THRESHOLD_PX = REVEAL_PX / 2
 
-  let openRowId: string | null = $state(null);
-  let dragRowId: string | null = $state(null);
-  let dragOffsetPx = $state(0);
-  let touchStartX = 0;
-  let touchStartY = 0;
-  let touchDirection: "horizontal" | "vertical" | null = null;
+  let openRowId: string | null = $state(null)
+  let dragRowId: string | null = $state(null)
+  let dragOffsetPx = $state(0)
+  let touchStartX = 0
+  let touchStartY = 0
+  let touchDirection: "horizontal" | "vertical" | null = null
 
   function closeSwipe() {
-    openRowId = null;
+    openRowId = null
   }
 
   /** The live transform for one row's front layer -- mid-drag, snapped open, or resting closed. */
   function rowOffset(sessionId: string): number {
-    if (dragRowId === sessionId) return dragOffsetPx;
-    return openRowId === sessionId ? -REVEAL_PX : 0;
+    if (dragRowId === sessionId) return dragOffsetPx
+    return openRowId === sessionId ? -REVEAL_PX : 0
   }
 
   function onRowTouchStart(e: TouchEvent, sessionId: string) {
-    const touch = e.touches[0];
-    if (!touch) return;
-    touchStartX = touch.clientX;
-    touchStartY = touch.clientY;
-    touchDirection = null;
-    dragRowId = sessionId;
+    const touch = e.touches[0]
+    if (!touch) return
+    touchStartX = touch.clientX
+    touchStartY = touch.clientY
+    touchDirection = null
+    dragRowId = sessionId
     // Start from wherever this row already sits -- swiping an open row
     // shut feels continuous instead of jumping back to 0 first.
-    dragOffsetPx = openRowId === sessionId ? -REVEAL_PX : 0;
+    dragOffsetPx = openRowId === sessionId ? -REVEAL_PX : 0
   }
 
   function onRowTouchMove(e: TouchEvent, sessionId: string) {
-    if (dragRowId !== sessionId) return;
-    const touch = e.touches[0];
-    if (!touch) return;
-    const dx = touch.clientX - touchStartX;
-    const dy = touch.clientY - touchStartY;
+    if (dragRowId !== sessionId) return
+    const touch = e.touches[0]
+    if (!touch) return
+    const dx = touch.clientX - touchStartX
+    const dy = touch.clientY - touchStartY
     if (touchDirection === null) {
       // A few px of wobble right at touchdown is normal on any gesture --
       // don't commit to horizontal (swipe) vs vertical (scroll) before the
       // direction is actually clear.
-      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-      touchDirection = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return
+      touchDirection = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical"
       if (touchDirection === "vertical") {
         // This is a page scroll, not a swipe -- let go and let the browser's
         // own native scrolling handle it from here (touch-action: pan-y
         // below keeps that native path unblocked while we're undecided).
-        dragRowId = null;
-        return;
+        dragRowId = null
+        return
       }
     }
-    if (touchDirection !== "horizontal") return;
-    e.preventDefault(); // committed to a horizontal swipe now -- stop the page scrolling along with it
-    const base = openRowId === sessionId ? -REVEAL_PX : 0;
-    dragOffsetPx = Math.min(0, Math.max(-REVEAL_PX, base + dx));
+    if (touchDirection !== "horizontal") return
+    e.preventDefault() // committed to a horizontal swipe now -- stop the page scrolling along with it
+    const base = openRowId === sessionId ? -REVEAL_PX : 0
+    dragOffsetPx = Math.min(0, Math.max(-REVEAL_PX, base + dx))
   }
 
   function onRowTouchEnd(sessionId: string) {
-    if (dragRowId !== sessionId) return;
-    dragRowId = null;
-    openRowId = dragOffsetPx <= -OPEN_THRESHOLD_PX ? sessionId : null;
+    if (dragRowId !== sessionId) return
+    dragRowId = null
+    openRowId = dragOffsetPx <= -OPEN_THRESHOLD_PX ? sessionId : null
   }
 </script>
 
