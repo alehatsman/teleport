@@ -300,6 +300,11 @@
   }
 
   async function terminate(id: string) {
+    // Kills a running process -- an agent mid-task, a shell with state. Not
+    // irreversible the way purge is (the log survives), but the X sits in
+    // the same slot as delete and one mis-click ends real work. Same plain
+    // confirm() as purge, for the same reason.
+    if (!confirm("Terminate this session? The running process will be killed.")) return;
     try {
       await api.deleteSession(id);
       await refresh();
