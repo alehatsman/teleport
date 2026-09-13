@@ -4,7 +4,7 @@
   import { SessionStream } from "./stream";
   import { setControlling, wasControlling } from "./identity";
   import * as api from "./api";
-  import type { Session as SessionData, StreamState } from "./types";
+  import { ApiError, type Session as SessionData, type StreamState } from "./types";
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props();
 
@@ -17,6 +17,10 @@
   let session: SessionData | null = $state(null);
   let toast: string | null = $state(null);
   let truncatedNotice = $state(false);
+  // Why the session record couldn't be read. A bogus id (a stale link, a
+  // purged session) used to render the id as the title, a "Closed" dot and
+  // a black canvas -- indistinguishable from a session that simply ended.
+  let sessionError: string | null = $state(null);
   // A process that ended is a fact about the session, not about our socket.
   // The header used to say "Closed" (the connection) after the 4s exit
   // toast faded, and the exit code was gone with it. Derive the visible
@@ -90,8 +94,11 @@
   async function loadSession() {
     try {
       session = await api.getSession(sessionId);
-    } catch {
-      // Non-fatal -- the header falls back to the raw session id.
+      sessionError = null;
+    } catch (e) {
+      // The header still falls back to the raw id; the banner says why.
+      if (e instanceof ApiError && e.status === 404) sessionError = "Session not found. It may have been deleted.";
+      else sessionError = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -156,6 +163,10 @@
       <div class="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>
     {/if}
   </header>
+
+  {#if sessionError}
+    <div class="banner banner--error session__banner" role="alert">{sessionError}</div>
+  {/if}
 
   {#if truncatedNotice}
     <div class="notice">
@@ -287,6 +298,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 50%;
+  }
+  .session__banner {
+    /* .banner's own margin is for stacked page content; here it's a strip
+       between header and terminal and should sit flush. */
+    margin: var(--space-2) var(--space-3);
   }
   .session__main {
     flex: 1;
