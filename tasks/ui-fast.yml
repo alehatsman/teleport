@@ -1,5 +1,5 @@
 ---
-description: fast pre-commit web gate — lockfile drift, biome over staged, typecheck, ai-lint over staged, soft caps
+description: fast pre-commit web gate — lockfile drift, biome over staged, typecheck, ai-lint and ui-lint over staged, soft caps
 
 # tq/fast over web/. No build, no suite, no network. The web half of
 # tasks/ci-fast.yml.
