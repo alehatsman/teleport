@@ -52,6 +52,13 @@
       // seam. Matching it here removes the mismatch instead of fighting
       // xterm's inline style from CSS.
       theme: { background: "#0a0a0d" },
+      // Agent prompts (powerlevel10k, starship) lean on Nerd Font glyphs;
+      // xterm's default "courier-new, courier, monospace" has none and drew
+      // the branch icon as a box. Prefer any installed Nerd Font, then the
+      // platform's own monospace. Cell metrics come from whichever lands.
+      fontFamily:
+        '"MesloLGS NF", "JetBrainsMono Nerd Font", "FiraCode Nerd Font", "Hack Nerd Font", ' +
+        '"Symbols Nerd Font Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
     })
     fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
