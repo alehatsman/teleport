@@ -1215,4 +1215,12 @@
     width: 26px;
     height: 26px;
   }
+  /* A thumb affordance. With a mouse the header button is one short move
+     away and the FAB was a third "New session" on an empty screen -- same
+     input-type split .session-row__front uses for the swipe action. */
+  @media (hover: hover) and (pointer: fine) {
+    .fab {
+      display: none;
+    }
+  }
 </style>
