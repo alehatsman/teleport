@@ -315,12 +315,12 @@
         ? {
             kind: "agent",
             preset: selectedPreset,
-            cwd: cwd || "/",
+            cwd: cwd || homeDir || "/",
             cols: 120,
             rows: 36,
             ...(resumeId ? { args: ["--resume", resumeId] } : {}),
           }
-        : { kind: "shell", command: customCommand, cwd: cwd || "/", cols: 120, rows: 36 };
+        : { kind: "shell", command: customCommand, cwd: cwd || homeDir || "/", cols: 120, rows: 36 };
       const created = await api.createSession(body);
       // The creator is the only client that could possibly be attached to a
       // session that didn't exist a moment ago -- the lease is unheld by
@@ -512,7 +512,7 @@
             <input
               type="text"
               bind:value={cwd}
-              placeholder="/home/me/project"
+              placeholder={homeDir ? `${homeDir}/project` : "/path/to/project"}
               list="recent-cwds"
               autocapitalize="none"
               autocorrect="off"
