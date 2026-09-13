@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 RUST_IMAGE="rust:1-bookworm"
-NODE_IMAGE="node:22-bookworm"
+NODE_IMAGE="node:24-bookworm"
 CARGO_CACHE="teleport-cargo-cache"   # named volume: ~/.cargo/registry + git
 TARGET_CACHE="teleport-target-cache" # named volume: daemon/target
 
@@ -77,7 +77,7 @@ job_web() {
     docker run --rm \
         -v "$(pwd)/web:/work" -w /work \
         -v teleport-npm-cache:/root/.npm \
-        "$NODE_IMAGE" bash -euc "npm ci && npm run check && npm run build"
+        "$NODE_IMAGE" bash -euc "npm ci && npm run lint && npm run typecheck && npm run build && npm test"
 }
 
 ALL_JOBS=(fmt test clippy audit windows web)

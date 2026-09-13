@@ -10,9 +10,20 @@ This file says how to write and style it.
   ([docs/09-frontend.md#explicitly-not-in-the-frontend](../docs/09-frontend.md#explicitly-not-in-the-frontend)).
   If a task seems to need one, it doesn't — ask, don't add a dependency.
 - No state-management library, no router library, no SSR/SvelteKit.
-- `npm run build && npm run check` before calling anything done. Both must come back
-  clean — 0 errors, 0 warnings. `svelte-check` also flags unused CSS selectors, which
-  is the cheapest signal that a rename missed a template reference.
+- `npm run lint && npm run typecheck && npm run build && npm test` before calling
+  anything done, or `provision apply tasks/ui-ci.yml` from the repo root for the full
+  gate. All must come back clean — 0 errors, 0 warnings. `svelte-check` also flags
+  unused CSS selectors, which is the cheapest signal that a rename missed a template
+  reference.
+- Lint and format are Biome (`biome.jsonc`, extending ts-quality's `biome.base.json`).
+  `npm run lint:fix` applies the safe fixes and the formatter; don't hand-sort imports
+  or hand-format. Style: no semicolons, double quotes, 100 columns. A deliberate
+  exception gets an inline `// biome-ignore lint/<group>/<rule>: <reason>`; never demote
+  a rule in `biome.jsonc` without a comment saying why.
+- Biome sees only the `<script>` block of a `.svelte` file, so three rules that need
+  the template are off for `**/*.svelte` (unused variables/imports, undeclared deps).
+  `svelte-check` covers those. Biome's `.svelte` support is script-only: the markup
+  and `<style>` are not formatted or linted by it.
 - For a visual change, look at it: run `npm run dev` and screenshot the affected views
   (headless Chromium works fine — `chromium-browser --headless=new --screenshot=out.png
   '<url>'`). A clean build proves the CSS parses, not that it looks right.
