@@ -298,9 +298,35 @@ visible, never ambiguous:
 | Observing | input disabled, dimmed cursor, prominent **Take control** button |
 | Control revoked | toast "Control taken by <client_name>", switch to observing, no data loss |
 | Asked for control, didn't get it | attach succeeded as observer; no toast, just the Take control button |
+| Session ends (`exited`/`lost`), by any path | no badge, no Take-control button — nothing left to control, regardless of what the last control frame said |
 
 Claims are preemptive — one tap, no negotiation, no confirmation dialog. That is the
 point: grabbing a runaway agent from a phone must be instant.
+
+**A session ending is a fact about the record, not about the socket** — same principle
+as [Connection status](#connection-status)'s "record first, socket second". `hasControl`
+and the controller's name are written only by control frames (`ready`, `control_granted`,
+`control_revoked`); nothing about those frames fires when the stream's `closed` state is
+reached because the daemon can no longer find the session at all (e.g. `ws-ticket` 404s
+after a restart recovers it as `lost`) — there is no frame to receive, the socket simply
+stops trying. Left alone, a client that held the lease keeps showing "Controlling" over
+a session that no longer has a PTY to control. So: on `stream.ts`'s `closed` state (and
+on a live `exit` frame, the other path to the same fact), reset `hasControl` to `false`
+and the controller name to `null` — a closed connection cannot be controlling anything —
+and re-fetch the session record so the header's label comes from `session.state`
+(`Lost` / `Exited (code N)`) instead of falling back to the raw connection-state string.
+
+The controller **name** shown to an observer can go stale the other way too: it comes
+from whichever control frame last mentioned it, and nothing pushes an update when the
+lease-holder named in a `control_revoked` frame later disconnects and its own
+`control_grace_ms` grace window lapses with no one reconnecting — the lease is free
+server-side, but an idle observer that received no further frames still attributes it to
+the departed client. Closing that gap exactly would need a new server-pushed "lease
+freed" frame; short of that, reconcile the displayed name (never `hasControl` itself —
+that stays frame-only, the point made under [`stream.ts`](#streamts-the-part-that-must-be-right))
+by polling `GET /sessions/{id}` on the same pragmatic interval `Sessions.svelte` already
+polls the list on. Clicking **Take control** is correct regardless — `claim_control`
+always succeeds — so this is a display-accuracy fix, not a functional one.
 
 ## Mobile
 

@@ -30,6 +30,16 @@
   // point in the script (it's only ever reassigned inside callbacks).
   let status = $derived.by(() => viewerStatus(session, connectionState))
   let toastTimer: ReturnType<typeof setTimeout> | null = null
+  let controllerPollTimer: ReturnType<typeof setInterval> | null = null
+  // Same pragmatic trade-off Sessions.svelte makes for the list (M5, no
+  // push channel for this yet): corrects the *displayed* controller name
+  // when the client we were told holds the lease disconnects and its own
+  // control_grace_ms lapses with no one reconnecting -- freeing the lease
+  // server-side generates no frame to tell an idle observer. Never touches
+  // `hasControl`: that stays frame-only (docs/09-frontend.md#streamts-the-
+  // part-that-must-be-right). A stale name is a display bug; claiming
+  // control despite one is not -- claim_control always succeeds.
+  const CONTROLLER_POLL_MS = 5000
 
   function showToast(message: string) {
     toast = message
@@ -41,7 +51,21 @@
     const s = new SessionStream(
       sessionId,
       {
-        onState: (state) => (connectionState = state),
+        onState: (state) => {
+          connectionState = state
+          // `closed` means the daemon has no live entry for this session at
+          // all -- a bad id, or (docs/01-architecture.md#the-crash-boundary)
+          // one recovered as `lost` after a restart. No more control frames
+          // are coming either way, so nothing else will ever clear a stale
+          // lease here: reset it now rather than leave "Controlling" over a
+          // session with no PTY left, and re-read the record so the header's
+          // label comes from `session.state` instead of falling back to the
+          // raw connection string (docs/09-frontend.md#control-lease-ui).
+          if (state === "closed") {
+            clearControl()
+            void loadSession()
+          }
+        },
         onOutput: (bytes) => terminalRef?.write(bytes),
         onGeometry: (cols, rows) => terminalRef?.setGeometry(cols, rows),
         onControlChange: (has, name) => {
@@ -56,6 +80,10 @@
           truncatedNotice = true
         },
         onExit: (code) => {
+          // Same fact as the `closed` state above, reached a different way
+          // (a live exit frame instead of the daemon losing the session
+          // outright): no PTY is left, so no one controls it any more.
+          clearControl()
           showToast(
             code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`
           )
@@ -77,14 +105,23 @@
     s.connect()
 
     void loadSession()
+    controllerPollTimer = setInterval(pollControllerName, CONTROLLER_POLL_MS)
 
     document.addEventListener("visibilitychange", onVisibilityChange)
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange)
       if (toastTimer) clearTimeout(toastTimer)
+      if (controllerPollTimer) clearInterval(controllerPollTimer)
       s.disconnect()
     }
   })
+
+  /** A closed connection cannot be controlling anything, whatever the last control frame said. */
+  function clearControl() {
+    hasControl = false
+    controllerName = null
+    setControlling(sessionId, false)
+  }
 
   async function loadSession() {
     try {
@@ -96,6 +133,13 @@
         sessionError = "Session not found. It may have been deleted."
       else sessionError = describeError(e)
     }
+  }
+
+  // See CONTROLLER_POLL_MS above. Only the displayed name, never `hasControl`.
+  async function pollControllerName() {
+    if (hasControl) return
+    await loadSession()
+    if (!hasControl && session) controllerName = session.controller
   }
 
   function onVisibilityChange() {
