@@ -17,6 +17,21 @@
   let session: SessionData | null = $state(null);
   let toast: string | null = $state(null);
   let truncatedNotice = $state(false);
+  // A process that ended is a fact about the session, not about our socket.
+  // The header used to say "Closed" (the connection) after the 4s exit
+  // toast faded, and the exit code was gone with it. Derive the visible
+  // status from the session record first, the connection second.
+  // $derived.by, not $derived: TS narrows `session` to its `null` initializer
+  // at this point in the script (it's only ever reassigned inside callbacks),
+  // so an inline expression here types `session?.state` as never.
+  let ended: boolean = $derived.by(() => session?.state === "exited" || session?.state === "lost");
+  let statusLabel: string = $derived.by(() => {
+    if (session?.state === "exited") return session.exit_code === null ? "Exited" : `Exited (code ${session.exit_code})`;
+    if (session?.state === "lost") return "Lost";
+    // Capitalized here, not via CSS text-transform: that capitalized every
+    // word and turned "Exited (code 3)" into "Exited (Code 3)".
+    return connectionState.charAt(0).toUpperCase() + connectionState.slice(1);
+  });
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   function showToast(message: string) {
@@ -45,6 +60,8 @@
         },
         onExit: (code) => {
           showToast(code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`);
+          // Re-read the record so the header's verdict outlives the toast.
+          void loadSession();
         },
         onError: (code, message) => {
           if (code === "not_controller") return; // expected when input races a lease change
@@ -60,12 +77,7 @@
     stream = s;
     s.connect();
 
-    api
-      .getSession(sessionId)
-      .then((data) => (session = data))
-      .catch(() => {
-        // Non-fatal -- the header falls back to the raw session id.
-      });
+    void loadSession();
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
@@ -74,6 +86,14 @@
       s.disconnect();
     };
   });
+
+  async function loadSession() {
+    try {
+      session = await api.getSession(sessionId);
+    } catch {
+      // Non-fatal -- the header falls back to the raw session id.
+    }
+  }
 
   function onVisibilityChange() {
     // Mobile: the socket is likely dead on resume -- reconnect immediately
@@ -115,14 +135,17 @@
       <span
         class="dot"
         aria-hidden="true"
-        class:dot--success={connectionState === "live"}
-        class:dot--warning-strong={connectionState === "reconnecting" || connectionState === "connecting"}
-        class:dot--pulse={connectionState === "reconnecting" || connectionState === "connecting"}
+        class:dot--success={!ended && connectionState === "live"}
+        class:dot--warning={session?.state === "lost"}
+        class:dot--warning-strong={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
+        class:dot--pulse={!ended && (connectionState === "reconnecting" || connectionState === "connecting")}
       ></span>
-      <span class="session__status-label">{connectionState}</span>
+      <span class="session__status-label">{statusLabel}</span>
     </span>
     <span class="session__spacer"></span>
-    {#if hasControl}
+    {#if ended}
+      <!-- Nothing to control any more; the badge/button would be a lie either way. -->
+    {:else if hasControl}
       <span class="badge badge--controlling">Controlling</span>
     {:else if connectionState !== "closed"}
       <button class="btn btn--primary session__control-btn" onclick={takeControl}>
@@ -239,7 +262,6 @@
   .session__status-label {
     font-size: 0.75rem;
     opacity: 0.7;
-    text-transform: capitalize;
   }
   .session__spacer {
     flex: 1;
