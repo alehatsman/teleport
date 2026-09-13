@@ -105,7 +105,11 @@
 
   function needsAttention(s: Session): boolean {
     if (s.state !== "running") return false;
-    if (s.idle_since_ms !== null) return true;
+    // "Went quiet" only means "waiting on you" for an agent. A shell at its
+    // prompt is quiet by definition -- flagging every idle shell made the
+    // dot light up on every row and mean nothing. A bell still counts for
+    // any kind: a process that rang is asking, whatever it is.
+    if (s.idle_since_ms !== null && s.kind === "agent") return true;
     return s.last_bell_ms !== null && Date.now() - s.last_bell_ms < BELL_RECENCY_MS;
   }
 
