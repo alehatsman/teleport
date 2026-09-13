@@ -6,7 +6,7 @@
   import { Terminal as XTerm } from "@xterm/xterm"
   import { onMount } from "svelte"
   import "@xterm/xterm/css/xterm.css"
-  import type { SessionStream } from "./stream"
+  import type { SessionStream } from "@/api/stream"
 
   let {
     stream,

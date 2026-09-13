@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte"
-  import { getSession } from "./api"
-  import { setControlling, wasControlling } from "./identity"
-  import { SessionStream } from "./stream"
-  import Terminal from "./Terminal.svelte"
-  import { ApiError, type Session as SessionData, type StreamState } from "./types"
+  import { getSession } from "@/api/api"
+  import { setControlling, wasControlling } from "@/api/identity"
+  import { SessionStream } from "@/api/stream"
+  import { ApiError, type Session as SessionData, type StreamState } from "@/api/types"
+  import Terminal from "@/Terminal.svelte"
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
