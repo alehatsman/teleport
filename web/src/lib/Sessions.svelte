@@ -692,7 +692,9 @@
                 {#if session.title}
                   <span class="session-row__title">({session.title})</span>
                 {/if}
-                <span class="session-row__cwd">{displayCwd(session.cwd)}</span>
+                <!-- <bdi> keeps the path itself left-to-right inside the
+                     rtl-ellipsis trick on .session-row__cwd below. -->
+                <span class="session-row__cwd"><bdi>{displayCwd(session.cwd)}</bdi></span>
                 {#if session.controller}
                   <span class="session-row__controller">controlled by {session.controller}</span>
                 {/if}
@@ -1128,6 +1130,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* Ellipsize the *start*: "~/projects/teleport/.dev-data/a-very-long…"
+       lost the leaf directory, the only part that told rows apart. Laying
+       the box out rtl puts the ellipsis on the left; the <bdi> inside
+       (isolated, forced ltr) keeps the path reading normally. */
+    direction: rtl;
+    text-align: left;
+  }
+  .session-row__cwd > bdi {
+    direction: ltr;
+    unicode-bidi: isolate;
   }
   .session-row__title {
     /* The agent's own words, not teleport's -- distinct from .session-row__command
