@@ -271,6 +271,31 @@ select:focus-visible {
   }
 }
 
+/* Block: chip -- a small toggleable option: filter tabs, recent-cwd picks.
+   --active is the selected one. */
+.chip {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+.chip:hover {
+  border-color: var(--muted);
+  color: var(--fg);
+}
+.chip--active {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
 /* Block: badge -- a small filled pill label. */
 .badge {
   font-size: 0.75rem;

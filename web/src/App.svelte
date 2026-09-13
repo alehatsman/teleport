@@ -3,8 +3,8 @@
   // No router library -- a hash suffices for two view types and keeps
   // "no state-management library" (docs/09-frontend.md#explicitly-not-in-the-frontend).
   import { onDestroy, onMount } from "svelte"
-  import Session from "@/Session.svelte"
-  import Sessions from "@/Sessions.svelte"
+  import Session from "@/features/sessions/Session.svelte"
+  import Sessions from "@/features/sessions/Sessions.svelte"
 
   let hash = $state(window.location.hash)
 

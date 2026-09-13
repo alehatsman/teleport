@@ -8,39 +8,54 @@ second server, and no SSR.
 
 ## Structure
 
-Same split as the fleet's other web app (codefort): a data layer (`api/`), a shared
-primitive vocabulary (`ui/` — it does not exist yet; the first primitive promoted on a
-second consumer creates it, see
+Same four layers as the fleet's other web app (codefort), per
 [ts-quality/docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md)
-rule 11), and everything else. Teleport has one real feature (sessions/terminal), not
-several, so there's no `features/` layer yet — `Sessions.svelte`, `Session.svelte` and
-`Terminal.svelte` stay at `src/` top level until a second feature exists to justify one.
+rule 19: `api/` (data), `ui/` (domain-free primitives), `shell/` (app chrome),
+`features/<x>/` (one domain each). Teleport has one domain — sessions — so there is one
+feature directory holding both the list and the viewer. `shell/` is empty with a README
+saying what lands there and when; `ui/` holds the two primitives promoted so far.
 
 ```text
 web/
 ├── vite.config.ts
 └── src/
     ├── main.ts
-    ├── App.svelte              # routing between list and session views
+    ├── App.svelte              # hash routing between list and session views
+    ├── app.css                 # tokens + shared blocks (web/CLAUDE.md)
     ├── api/
     │   ├── api.ts              # typed HTTP client for /api/v1 + describeError()
     │   ├── stream.ts           # WebSocket client: framing, offsets, reconnect
     │   ├── stream.test.ts
     │   ├── identity.ts         # client id / token / display name
     │   └── types.ts            # shared types mirroring the API doc
-    ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
-    ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
-    ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
-    ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
-    ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
-    ├── Session.svelte          # one session: header, status, control lease UI
-    └── Terminal.svelte         # xterm.js, isolated
+    ├── shell/                  # app chrome — empty until two features share some
+    ├── ui/
+    │   ├── tones.ts            # tone vocabularies (plain .ts so feature helpers can import)
+    │   ├── StatusDot.svelte    # .dot + its text twin (SessionRow, SessionHeader)
+    │   └── ErrorBanner.svelte  # .banner--error + role=alert (four call sites)
+    └── features/
+        └── sessions/
+            ├── sessionDisplay.ts       # pure: labels, tones, age/cwd/outcome, filters, viewerStatus
+            ├── sessionDisplay.test.ts
+            ├── launchRequest.ts        # pure: launcher fields -> CreateSessionRequest
+            ├── launchRequest.test.ts
+            ├── Sessions.svelte         # container: fetch/poll, filtering, launcher state
+            ├── SessionFilters.svelte   # status toggle + search box (bindable, no logic)
+            ├── NewSessionFab.svelte    # touch-only floating "New session" button
+            ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
+            ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
+            ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
+            ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
+            ├── Session.svelte          # container: the stream, lease state, toast
+            ├── SessionHeader.svelte    # viewer top bar: back, title, status, lease control
+            ├── KeyBar.svelte           # touch-only key row; emits bytes, Session decides
+            └── Terminal.svelte         # xterm.js, isolated
 ```
 
 Imports use the `@/` alias for `src/` (`tsconfig.app.json` paths + `vite.config.ts`
-resolve.alias), matching codefort — e.g. `@/api/api`, `@/SessionRow.svelte`. No relative
-`../` imports across these top-level files; only a component's own same-directory files
-(none, today) would use `./`.
+resolve.alias), matching codefort — e.g. `@/api/api`, `@/features/sessions/SessionRow.svelte`.
+No relative `../` imports across layers; a component's own same-directory siblings may
+use `./`.
 
 `Terminal.svelte` is the **only** file that imports xterm.js. Everything else deals in
 session IDs and connection state. If a second component reaches into the xterm API, the
@@ -85,6 +100,20 @@ five components composed together, each small enough to read in one sitting:
   boolean) => void` (the swipe-reveal state, owned by `SessionList`), `onOpen: (id:
   string) => void`, `onResume: (session: Session) => void`, `onTerminate: (id: string) =>
   void`, `onPurge: (id: string) => void`.
+- **`SessionHeader.svelte`** — the viewer's top bar, pure presentation. Props: `title`,
+  `tone`/`pulse`/`statusLabel` (from `viewerStatus()`), `ended`, `hasControl`, `closed`,
+  `controllerName`, `toast`, `onBack`, `onTakeControl`. The toast renders inside it so
+  the `.toast` anchoring override lives with the header it anchors to.
+- **`NewSessionFab.svelte`** — the touch-only floating "New session" button. Props:
+  `expanded` (mirrors the launcher panel), `onclick`. Hidden on fine-pointer devices.
+
+Helpers with no reactive state are plain modules beside the components, unit-tested
+without mounting anything (UI.md rule 27): **`sessionDisplay.ts`** (state labels and
+tones, `displayAge`/`displayCwd`/`displayOutcome`, `needsAttention`, the list filter,
+`recentCwds`, and `viewerStatus()` — the record-first/socket-second rule for the viewer
+header) and **`launchRequest.ts`** (`buildLaunchRequest()`: launcher fields to a
+`CreateSessionRequest`, including the claude-only `--resume` rule). Every clock is
+passed in as `now`; nothing in these modules reads `Date.now()`.
 
 `describeError()` (interpreting an `ApiError` into an actionable message) moved from a
 local function into `api/api.ts` and is exported — `Sessions.svelte` (list/refresh

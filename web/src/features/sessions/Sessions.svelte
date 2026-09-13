@@ -10,8 +10,17 @@
   } from "@/api/api"
   import { setControlling } from "@/api/identity"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
-  import SessionLauncher from "@/SessionLauncher.svelte"
-  import SessionList from "@/SessionList.svelte"
+  import NewSessionFab from "@/features/sessions/NewSessionFab.svelte"
+  import SessionFilters from "@/features/sessions/SessionFilters.svelte"
+  import SessionLauncher from "@/features/sessions/SessionLauncher.svelte"
+  import SessionList from "@/features/sessions/SessionList.svelte"
+  import ErrorBanner from "@/ui/ErrorBanner.svelte"
+  import {
+    recentCwds as deriveRecentCwds,
+    filterSessions,
+    isActiveStatus,
+    type StatusFilter,
+  } from "./sessionDisplay"
 
   let { onOpen }: { onOpen: (id: string) => void } = $props()
 
@@ -36,28 +45,11 @@
   // running|closing; "closed" is exited|lost. Not persisted, same as
   // searchQuery -- reopening the page is a fresh look at what's live now,
   // not a resumed filter session.
-  let statusFilter: "active" | "closed" = $state("active")
-
-  function isActiveStatus(s: Session): boolean {
-    return s.state === "running" || s.state === "closing"
-  }
+  let statusFilter: StatusFilter = $state("active")
 
   let activeCount: number = $derived(sessions.filter(isActiveStatus).length)
   let closedCount: number = $derived(sessions.length - activeCount)
-
-  // Client-side only -- the full list is already on hand from polling, and
-  // a session count that ever justified a server-side search endpoint
-  // instead would justify pagination first. Matches command or cwd
-  // (against the real absolute path, not the "~/..." display string --
-  // typing the username you already know shouldn't be punished for it).
-  let filteredSessions: Session[] = $derived.by(() => {
-    const byStatus = sessions.filter((s) => isActiveStatus(s) === (statusFilter === "active"))
-    const q = searchQuery.trim().toLowerCase()
-    if (!q) return byStatus
-    return byStatus.filter(
-      (s) => s.command.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q)
-    )
-  })
+  let filteredSessions: Session[] = $derived(filterSessions(sessions, statusFilter, searchQuery))
   // Which machine this daemon is actually running on -- juggling more than
   // one teleportd (a dev box, a laptop, a work machine) otherwise looks
   // identical from this title alone; GET /api/v1/health already returns it
@@ -90,22 +82,7 @@
   // its own creation, to prefill preset/resume-id/cwd for that one open.
   let resumeSessionForLauncher: Session | null = $state(null)
 
-  // M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
-  // derived from the session list already on hand -- no new storage/endpoint.
-  // Most-recent-use-first, deduped, capped so the launcher's dropdown stays
-  // scannable.
-  let recentCwds: string[] = $derived.by(() => {
-    const latest = new Map<string, number>()
-    for (const s of sessions) {
-      if (!s.cwd) continue
-      const prev = latest.get(s.cwd)
-      if (prev === undefined || s.created_at_ms > prev) latest.set(s.cwd, s.created_at_ms)
-    }
-    return [...latest.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([dir]) => dir)
-  })
+  let recentCwds: string[] = $derived(deriveRecentCwds(sessions))
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -246,7 +223,7 @@
 
   <main>
     {#if loadError}
-      <div class="banner banner--error" role="alert">{loadError}</div>
+      <ErrorBanner message={loadError} />
     {/if}
 
     {#if showLauncher}
@@ -266,43 +243,12 @@
     {#if loading}
       <p class="sessions__loading">Loading…</p>
     {:else if loadedOnce && sessions.length === 0}
-      <div class="empty">
-        <p class="empty__text">No sessions yet.</p>
+      <div class="sessions__empty">
+        <p class="sessions__empty-text">No sessions yet.</p>
         <button class="btn btn--primary" onclick={openLauncher}>New session</button>
       </div>
     {:else}
-      <div class="status-toggle" role="tablist" aria-label="Filter by status">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={statusFilter === "active"}
-          class="status-toggle__option"
-          class:status-toggle__option--active={statusFilter === "active"}
-          onclick={() => (statusFilter = "active")}
-        >
-          Active ({activeCount})
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={statusFilter === "closed"}
-          class="status-toggle__option"
-          class:status-toggle__option--active={statusFilter === "closed"}
-          onclick={() => (statusFilter = "closed")}
-        >
-          Closed ({closedCount})
-        </button>
-      </div>
-      <input
-        type="search"
-        class="sessions__search"
-        placeholder="Search sessions…"
-        aria-label="Search sessions"
-        bind:value={searchQuery}
-        autocapitalize="none"
-        autocorrect="off"
-        spellcheck="false"
-      />
+      <SessionFilters bind:statusFilter bind:searchQuery {activeCount} {closedCount} />
       {#if filteredSessions.length === 0}
         <p class="sessions__loading">
           {#if searchQuery.trim()}
@@ -325,22 +271,10 @@
   </main>
 
   {#if !showLauncher}
-    <!-- Fixed, thumb-reachable twin of .sessions__new-btn -- same openLauncher(),
-         just easier to hit one-handed on a phone than the header. Hidden while
-         the launcher panel is open: no point stacking two "add" affordances,
-         and it would otherwise sit on top of the panel's own buttons on a
-         short mobile viewport. -->
-    <button
-      class="fab"
-      onclick={openLauncher}
-      aria-expanded={showLauncher}
-      aria-controls="launcher-panel"
-      aria-label="New session"
-    >
-      <svg class="fab__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" fill="none" />
-      </svg>
-    </button>
+    <!-- Hidden while the launcher panel is open: no point stacking two "add"
+         affordances, and it would otherwise sit on top of the panel's own
+         buttons on a short mobile viewport. -->
+    <NewSessionFab expanded={showLauncher} onclick={openLauncher} />
   {/if}
 </div>
 
@@ -391,38 +325,8 @@
   .sessions__loading {
     opacity: 0.6;
   }
-  .sessions__search {
-    display: block;
-    width: 100%;
-    margin-bottom: var(--space-3);
-    font-size: 0.9rem;
-  }
-  .status-toggle {
-    display: flex;
-    gap: var(--space-2);
-    margin-bottom: var(--space-3);
-  }
-  .status-toggle__option {
-    background: var(--surface);
-    color: var(--muted);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0.3rem 0.65rem;
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .status-toggle__option:hover {
-    border-color: var(--muted);
-    color: var(--fg);
-  }
-  .status-toggle__option--active {
-    background: var(--surface-hover);
-    border-color: var(--accent);
-    color: var(--fg);
-  }
 
-  /* Block: empty -- the no-sessions-yet placeholder. */
-  .empty {
+  .sessions__empty {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -432,7 +336,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
   }
-  .empty__text {
+  .sessions__empty-text {
     margin: 0;
     opacity: 0.6;
   }
@@ -441,53 +345,6 @@
     .sessions {
       padding: 0.5rem;
       padding-bottom: calc(56px + var(--space-4) * 2);
-    }
-  }
-
-  /* Block: fab -- fixed, always-reachable "new session" button; a thumb-zone
-     twin of .sessions__new-btn, not a replacement (mouse users keep the
-     header button; this is for one-handed phone use). Round, gradient +
-     shadow borrowed straight from .btn--primary / --shadow-panel rather than
-     inventing a second visual language for "primary action". */
-  .fab {
-    position: fixed;
-    right: var(--space-4);
-    /* env() falls back to 0 with no viewport-fit=cover meta, same as not
-       being there at all -- safe to always include. */
-    bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    cursor: pointer;
-    background: linear-gradient(180deg, var(--accent-hover), var(--accent));
-    color: var(--accent-fg);
-    box-shadow: var(--shadow-panel);
-    z-index: 5; /* above list content, below .toast's 10 */
-    transition:
-      transform var(--transition-fast),
-      box-shadow var(--transition-fast);
-  }
-  .fab:hover {
-    box-shadow: var(--shadow-glow);
-    transform: translateY(-2px);
-  }
-  .fab:active {
-    transform: translateY(0) scale(0.94);
-  }
-  .fab__icon {
-    width: 26px;
-    height: 26px;
-  }
-  /* A thumb affordance. With a mouse the header button is one short move
-     away and the FAB was a third "New session" on an empty screen -- same
-     input-type split SessionRow's swipe action uses. */
-  @media (hover: hover) and (pointer: fine) {
-    .fab {
-      display: none;
     }
   }
 </style>

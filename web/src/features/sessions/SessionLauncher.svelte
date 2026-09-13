@@ -2,7 +2,9 @@
   import { onMount, tick } from "svelte"
   import { describeError } from "@/api/api"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
-  import DirectoryBrowser from "@/DirectoryBrowser.svelte"
+  import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
+  import ErrorBanner from "@/ui/ErrorBanner.svelte"
+  import { buildLaunchRequest } from "./launchRequest"
 
   // The new-session form panel. `cwd`/`selectedPreset`/`customCommand` are
   // owned by Sessions.svelte and bound, not local state here -- they must
@@ -89,21 +91,13 @@
     launching = true
     launchError = null
     try {
-      // Only claude actually understands `--resume`; the field itself is
-      // hidden for any other preset, but the trim-and-check happens here
-      // too so a stale value left over from switching presets mid-launcher
-      // session can never leak into an unrelated command's argv.
-      const resumeId = selectedPreset === "claude" ? resumeSessionId.trim() : ""
-      const body: CreateSessionRequest = selectedPreset
-        ? {
-            kind: "agent",
-            preset: selectedPreset,
-            cwd: cwd || homeDir || "/",
-            cols: 120,
-            rows: 36,
-            ...(resumeId ? { args: ["--resume", resumeId] } : {}),
-          }
-        : { kind: "shell", command: customCommand, cwd: cwd || homeDir || "/", cols: 120, rows: 36 }
+      const body = buildLaunchRequest({
+        selectedPreset,
+        customCommand,
+        cwd,
+        homeDir,
+        resumeSessionId,
+      })
       await onLaunch(body)
     } catch (e) {
       launchError = describeError(e)
@@ -181,14 +175,19 @@
          already used is exactly the friction this removes. -->
     <div class="launcher__recent">
       {#each recentCwds as dir (dir)}
-        <button type="button" class="cwd-chip" class:cwd-chip--active={dir === cwd} onclick={() => (cwd = dir)}>
+        <button
+          type="button"
+          class="chip launcher__chip"
+          class:chip--active={dir === cwd}
+          onclick={() => (cwd = dir)}
+        >
           {dir}
         </button>
       {/each}
     </div>
   {/if}
   {#if launchError}
-    <div class="banner banner--error" role="alert">{launchError}</div>
+    <ErrorBanner message={launchError} />
   {/if}
   <div class="launcher__actions">
     <button type="button" class="btn" onclick={onClose} disabled={launching}>Cancel</button>
@@ -246,33 +245,13 @@
     font-size: 0.85rem;
   }
 
-  /* Block: cwd-chip -- a tap-to-fill recent working directory (sibling of
-     launcher, not launcher__recent__chip: BEM elements don't nest). */
-  .cwd-chip {
-    background: var(--surface);
-    color: var(--muted);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0.3rem 0.55rem;
-    font-size: 0.78rem;
+  /* Element: launcher__chip -- what a recent-cwd .chip (app.css) adds on
+     top of the shared block: a path is monospace and may be long. */
+  .launcher__chip {
     font-family: var(--font-mono);
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    cursor: pointer;
-    transition:
-      background-color var(--transition-fast),
-      border-color var(--transition-fast),
-      color var(--transition-fast);
-  }
-  .cwd-chip:hover {
-    border-color: var(--muted);
-    color: var(--fg);
-  }
-  .cwd-chip--active {
-    background: var(--surface-hover);
-    border-color: var(--accent);
-    color: var(--fg);
   }
 </style>

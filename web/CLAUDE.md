@@ -12,11 +12,13 @@ This file is only the teleport delta: where things live here, and the gate.
 ## Structure
 
 [09-frontend.md#structure](../docs/09-frontend.md#structure) has the file tree and the
-`SessionLauncher`/`DirectoryBrowser` interfaces — same `api/` / `ui/` split as codefort's
-web app, without a `features/` layer (teleport has one feature, not several) and with
-`ui/` still unborn (first promoted primitive creates it). Imports
-use the `@/` alias for `src/` (`@/api/api`, `@/Session.svelte`) — no relative `../`
-across top-level files.
+component interfaces. Codefort's four layers, UI.md rule 19: `api/`, `ui/`, `shell/`,
+`features/<x>/`. One feature today, `features/sessions/`, holding list and viewer both.
+`shell/` is empty with a README saying what lands there; `ui/` holds the primitives
+below; do not create a
+third top-level layer, and do not put a component at `src/` root — `App.svelte`,
+`main.ts` and `app.css` are the only root files. Imports use the `@/` alias for `src/`
+(`@/api/api`, `@/features/sessions/Session.svelte`) — no relative `../` across layers.
 
 ## Gate
 
@@ -39,6 +41,15 @@ across top-level files.
   (headless Chromium works — `chromium-browser --headless=new --screenshot=out.png
   '<url>'`). A clean build proves the CSS parses, not that it looks right.
 
+## Logic lives in plain modules
+
+Anything with no reactive state — formatting, filtering, request building — is a `.ts`
+file beside the component that uses it (`features/sessions/sessionDisplay.ts`,
+`launchRequest.ts`), with a `.test.ts` next to it (UI.md rule 27). A component's
+`<script>` holds state, effects and handlers; if a function in it takes plain values and
+returns plain values, it belongs in the module. Pass `now` in; never read `Date.now()`
+inside a helper.
+
 ## Where a block lives here
 
 **Shared blocks live in `src/app.css`.** Anything that appears in more than one
@@ -48,6 +59,7 @@ component is a block there, not duplicated per component:
 |---|---|---|
 | `.btn` | `--primary`, `--danger` | every button |
 | `.dot` | `--success`, `--warning`, `--warning-strong`, `--pulse` | status indicators (pair with a `.sr-only` label — a dot is `aria-hidden`) |
+| `.chip` | `--active` | small toggleable options: filter tabs, recent-cwd picks |
 | `.badge` | `--controlling` | filled pill labels |
 | `.banner` | `--error` | full-width inline alerts |
 | `.notice` | elements `__link`, `__dismiss` | dismissible strip (e.g. "scrollback truncated") |
@@ -56,9 +68,24 @@ component is a block there, not duplicated per component:
 Before adding a new button/badge/dot color, check this table first — reuse a modifier
 or add one here rather than hand-rolling colors in a component's `<style>`.
 
+**Primitives live in `src/ui/`** (UI.md rules 24, 28) — a component only when the
+shared thing is markup, not just a class (rule 13: a bare shared block goes straight on
+the element):
+
+| Primitive | Props | Wraps |
+|---|---|---|
+| `StatusDot` | `tone`, `pulse`, `label`, `showLabel` | `.dot` + its text twin (visible or `.sr-only`) — never place a bare `.dot` |
+| `ErrorBanner` | `message` | `.banner--error` + `role="alert"`; placement is the caller's (wrap it) |
+
+A primitive's prop vocabulary (`DotTone`) lives in `src/ui/tones.ts`, a plain module:
+`tsc` cannot read a type exported from a `.svelte` module script, and feature helpers
+in `.ts` need it.
+
 **Component-scoped blocks stay in that component's `<style>`**, scoped by Svelte
-automatically (`.sessions`, `.launcher`, `.empty`, `.session-list`, `.session-row`,
-`.session`, `.key-bar`, `.terminal`, …). Don't promote to `app.css` until a second
+automatically (`.sessions`, `.session-filters`, `.fab`, `.launcher`, `.browser`,
+`.session-list`, `.session-row`, `.session`, `.session-header`, `.key-bar`,
+`.terminal`). One component, one block (UI.md rule 23) — a part with parts of its own
+gets its own file. Don't promote to `app.css` until a second
 component actually needs it. Conditional classes use Svelte's `class:` directive.
 
 ## Tokens

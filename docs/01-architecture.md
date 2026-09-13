@@ -130,11 +130,10 @@ teleport/
 ├── web/
 │   ├── src/
 │   │   ├── App.svelte
-│   │   ├── lib/api.ts       # HTTP client
-│   │   ├── lib/stream.ts    # WebSocket client, offset tracking, reconnect
-│   │   ├── lib/Terminal.svelte   # xterm.js, isolated
-│   │   ├── lib/Sessions.svelte
-│   │   └── lib/Session.svelte
+│   │   ├── api/             # HTTP client, WebSocket client (offsets, reconnect), types
+│   │   ├── shell/           # app chrome (empty)
+│   │   ├── ui/              # promoted primitives (empty)
+│   │   └── features/sessions/   # list, launcher, viewer, Terminal.svelte (xterm.js, isolated)
 │   └── vite.config.ts
 │
 ├── desktop/

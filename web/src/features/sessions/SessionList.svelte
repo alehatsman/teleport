@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Session } from "@/api/types"
-  import SessionRow from "@/SessionRow.svelte"
+  import SessionRow from "@/features/sessions/SessionRow.svelte"
 
   let {
     sessions,
