@@ -1,0 +1,11 @@
+---
+description: assert web/ has not weakened ts-quality's tsconfig or biome baseline
+
+# tq/config-check over web/: resolves tsconfig.json and compares every
+# baseline compilerOption, and checks biome.json extends the base. A rule
+# switched off is a warning, not an error, and each one in web/biome.json
+# carries its reason. The web half of tasks/lints-check.yml.
+steps:
+  - name: web
+    use: ~/.cache/provision/tools/ts-quality/config-check.yml
+    props: { dir: web }

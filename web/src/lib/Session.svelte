@@ -1,28 +1,28 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
-  import Terminal from "./Terminal.svelte";
-  import { SessionStream } from "./stream";
-  import { setControlling, wasControlling } from "./identity";
-  import * as api from "./api";
-  import type { Session as SessionData, StreamState } from "./types";
+  import { onMount } from "svelte"
+  import { getSession } from "./api"
+  import { setControlling, wasControlling } from "./identity"
+  import { SessionStream } from "./stream"
+  import Terminal from "./Terminal.svelte"
+  import type { Session as SessionData, StreamState } from "./types"
 
-  let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props();
+  let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
-  let terminalRef: Terminal | undefined = $state();
-  let stream: SessionStream | undefined = $state();
+  let terminalRef: Terminal | undefined = $state()
+  let stream: SessionStream | undefined = $state()
 
-  let connectionState: StreamState = $state("connecting");
-  let hasControl = $state(false);
-  let controllerName: string | null = $state(null);
-  let session: SessionData | null = $state(null);
-  let toast: string | null = $state(null);
-  let truncatedNotice = $state(false);
-  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  let connectionState: StreamState = $state("connecting")
+  let hasControl = $state(false)
+  let controllerName: string | null = $state(null)
+  let session: SessionData | null = $state(null)
+  let toast: string | null = $state(null)
+  let truncatedNotice = $state(false)
+  let toastTimer: ReturnType<typeof setTimeout> | null = null
 
   function showToast(message: string) {
-    toast = message;
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = null), 4000);
+    toast = message
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => (toast = null), 4000)
   }
 
   onMount(() => {
@@ -33,63 +33,68 @@
         onOutput: (bytes) => terminalRef?.write(bytes),
         onGeometry: (cols, rows) => terminalRef?.setGeometry(cols, rows),
         onControlChange: (has, name) => {
-          const wasHolding = hasControl;
-          hasControl = has;
-          controllerName = name;
-          setControlling(sessionId, has);
-          if (wasHolding && !has && name) showToast(`Control taken by ${name}`);
+          const wasHolding = hasControl
+          hasControl = has
+          controllerName = name
+          setControlling(sessionId, has)
+          if (wasHolding && !has && name) showToast(`Control taken by ${name}`)
         },
         onTruncated: () => {
-          terminalRef?.reset();
-          truncatedNotice = true;
+          terminalRef?.reset()
+          truncatedNotice = true
         },
         onExit: (code) => {
-          showToast(code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`);
+          showToast(
+            code === 0 || code === null ? "Process exited" : `Process exited (code ${code})`
+          )
         },
         onError: (code, message) => {
-          if (code === "not_controller") return; // expected when input races a lease change
-          showToast(message ?? code);
+          if (code === "not_controller") return // expected when input races a lease change
+          showToast(message ?? code)
         },
       },
       // A reopened tab (or a WS drop) resumes control instead of silently
       // dropping to observer -- mode=control never preempts, so this is
       // always safe even if someone else took over in the meantime (the
       // `ready` frame would then just come back control:false).
-      { requestControl: wasControlling(sessionId) },
-    );
-    stream = s;
-    s.connect();
+      { requestControl: wasControlling(sessionId) }
+    )
+    stream = s
+    s.connect()
 
-    api
-      .getSession(sessionId)
+    getSession(sessionId)
       .then((data) => (session = data))
       .catch(() => {
         // Non-fatal -- the header falls back to the raw session id.
-      });
+      })
 
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("visibilitychange", onVisibilityChange)
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (toastTimer) clearTimeout(toastTimer);
-      s.disconnect();
-    };
-  });
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+      if (toastTimer) clearTimeout(toastTimer)
+      s.disconnect()
+    }
+  })
 
   function onVisibilityChange() {
     // Mobile: the socket is likely dead on resume -- reconnect immediately
     // with the tracked offset instead of waiting for the backoff timer
     // (docs/09-frontend.md#mobile).
-    if (document.visibilityState === "visible" && connectionState !== "live" && connectionState !== "connecting") {
-      stream?.connect();
+    if (
+      document.visibilityState === "visible" &&
+      connectionState !== "live" &&
+      connectionState !== "connecting"
+    ) {
+      stream?.connect()
     }
   }
 
   function takeControl() {
-    stream?.takeControl();
+    stream?.takeControl()
   }
 
   function sendKey(bytes: string) {
-    if (hasControl) stream?.sendInput(bytes);
+    if (hasControl) stream?.sendInput(bytes)
   }
 </script>
 

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "ts-quality baseline — fleet type-checking policy",
+
+  // WHAT THIS FILE IS. Type-checking POLICY, and nothing else. It carries no
+  // `module`, `moduleResolution`, `target`, `lib`, `paths`, `outDir` or
+  // `include`: those describe a project's SHAPE, which differs between a Vite
+  // app and a published Node library, and a shared file that guesses at them
+  // is a file every consumer has to fight. Strictness does not differ, so
+  // strictness is what lives here.
+  //
+  // A consumer extends it and adds its own shape:
+  //
+  //   { "extends": "./tsconfig.base.json",
+  //     "compilerOptions": { "target": "ES2023", "module": "preserve",
+  //                          "moduleResolution": "bundler", "noEmit": true },
+  //     "include": ["src"] }
+  //
+  // `tsq/config-check` asserts the consumer did not quietly weaken any of it.
+  // That check is not paranoia: a consumer extending a base with
+  // `strict: true` and setting `strict: false` locally compiles an
+  // implicit-any function with exit 0 and no diagnostic. Verified on 7.0.2.
+  "compilerOptions": {
+    // `strict` is the umbrella: noImplicitAny, strictNullChecks,
+    // strictFunctionTypes, strictBindCallApply, strictPropertyInitialization,
+    // noImplicitThis, useUnknownInCatchVariables, alwaysStrict. Listing its
+    // members individually is how a config drifts out of step with the
+    // compiler; take the umbrella and name only what it does NOT cover.
+    "strict": true,
+
+    // Not covered by `strict`. Each one opted into deliberately.
+    "noUncheckedIndexedAccess": true,   // arr[i] is T | undefined. The single
+                                        // highest-value non-strict flag.
+    "exactOptionalPropertyTypes": true, // `{a?: string}` != `{a: string|undefined}`
+    "noImplicitOverride": true,         // `override` must be written
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Module hygiene. `verbatimModuleSyntax` makes type-only imports explicit
+    // and is what keeps a bundler from shipping a module for its types alone.
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    // `erasableSyntaxOnly` bans the TS syntax that is not erasable — enums,
+    // parameter properties and namespaces — so sources stay runnable by a
+    // type-stripping runtime. Verified: all three produce TS1294 on 7.0.2, and
+    // node 22.23.1 runs a plain .ts file unflagged, which is the point.
+    "erasableSyntaxOnly": true,
+
+    // Reporting. Unused locals/parameters are errors, not editor grey-out.
+    // `_`-prefixed parameters remain exempt by compiler convention.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // `skipLibCheck` is on, and that is a deliberate concession rather than an
+    // oversight: with it off, a single badly-typed transitive `@types/*`
+    // package fails a gate the consumer cannot fix. The cost is that errors
+    // inside .d.ts files go unreported.
+    "skipLibCheck": true
+  }
+}

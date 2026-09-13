@@ -49,7 +49,9 @@ jobs:
             desktop/src-tauri -> target
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 24, not 22: web/.npmrc is engine-strict against ts-quality's
+          # engines baseline, so the web build below fails on older node.
+          node-version: 24
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
