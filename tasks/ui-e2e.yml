@@ -1,0 +1,35 @@
+---
+description: build teleportd and run the Playwright e2e suite against it (docs/10-testing.md#web-e2e-playwright)
+
+# Not a `use:` of anything in ts-quality/rust-quality: this is teleport-
+# specific (a real teleportd binary + Playwright's own browsers), not part
+# of either pinned tool repo. tasks/ui-tools.yml (chromium, via
+# @playwright/test) and tasks/tools.yml (cargo) are prerequisites, not
+# steps of this file -- same separation tasks/ui-ci.yml keeps from
+# tasks/ci.yml.
+steps:
+  - name: build teleportd
+    shell: cd daemon && cargo build -p teleportd
+    changed_when: "false"
+
+  # webkit specifically: the "mobile" project (playwright.config.ts) uses
+  # devices['iPhone 14'], which is WebKit -- the real engine an iPhone
+  # runs, not Chromium's mobile-viewport emulation. tasks/ui-tools.yml's
+  # `tools.sh install` already covers chromium as a side effect of
+  # @playwright/test being a devDependency; it has no opinion on e2e
+  # specifically, so webkit is this task's own job.
+  - name: install webkit
+    # `playwright install` is already a no-op when the pinned version is
+    # present -- no `creates:` gate needed, same as tasks/ui-tools.yml's
+    # own "verify" step below its install.
+    shell: cd web && npx playwright install webkit
+    timeout: 10m
+    changed_when: "false"
+
+  - name: build web/dist
+    shell: cd web && npm run build
+    changed_when: "false"
+
+  - name: run the e2e suite
+    shell: cd web && TELEPORTD_BIN="$(pwd)/../daemon/target/debug/teleportd" npm run test:e2e
+    changed_when: "false"

@@ -27,8 +27,11 @@ steps:
   # rust-quality's scripts.sh directly: a `use:` target is resolved when the
   # plan is parsed, before the git step above has run.
   #
-  # tools.sh also downloads Playwright browsers when @playwright/test is a
-  # devDependency. It is not one here, so this is `npm ci` and nothing else.
+  # tools.sh also downloads Playwright's chromium as a side effect now that
+  # @playwright/test is a devDependency (docs/10-testing.md#web-e2e-
+  # playwright) -- webkit (the "mobile" project's real-iPhone engine, see
+  # tasks/ui-e2e.yml) isn't chromium and stays this task's own job, since
+  # tools.sh has no opinion on e2e specifically.
   - name: install (npm ci)
     shell: cd web && bash "{{ tq_dir }}/scripts/tools.sh" install
     creates: web/node_modules/.package-lock.json

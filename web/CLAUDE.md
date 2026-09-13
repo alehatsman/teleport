@@ -27,6 +27,10 @@ third top-level layer, and do not put a component at `src/` root — `App.svelte
   gate. All must come back clean — 0 errors, 0 warnings. `svelte-check` also flags
   unused CSS selectors, which is the cheapest signal that a rename missed a template
   reference.
+- `npm run test:e2e` (Playwright, `web/e2e/`) is separate from the gate above — it needs
+  a real `teleportd` binary and real browsers, not just Node. See
+  [docs/10-testing.md#web-e2e-playwright](../docs/10-testing.md#web-e2e-playwright), or
+  `provision apply tasks/ui-e2e.yml` for the whole thing in one command.
 - Lint and format are Biome (`biome.jsonc`, extending ts-quality's `biome.base.json`).
   `npm run lint:fix` applies the safe fixes and the formatter; don't hand-sort imports
   or hand-format. Style: no semicolons, double quotes, 100 columns. A deliberate

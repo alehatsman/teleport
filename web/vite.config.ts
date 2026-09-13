@@ -1,6 +1,9 @@
 import { fileURLToPath } from "node:url"
 import { svelte } from "@sveltejs/vite-plugin-svelte"
-import { defineConfig } from "vite"
+// From "vitest/config", not "vite": vitest reads this file too (no separate
+// vitest.config.ts), and only this import gives `defineConfig` the `test`
+// key's types.
+import { defineConfig } from "vitest/config"
 
 // Destructured once: process.env is an index signature, and the baseline's
 // noPropertyAccessFromIndexSignature would otherwise want bracket access,
@@ -38,5 +41,13 @@ export default defineConfig({
       },
     },
     ...(tailnetHost ? { allowedHosts: [tailnetHost] } : {}),
+  },
+  test: {
+    // Vitest's own default include pattern matches `*.spec.ts` as well as
+    // `*.test.ts` -- without this it also picks up web/e2e/*.spec.ts,
+    // Playwright's files, and fails them outright (wrong test API entirely).
+    // UI.md rule 27 / web/CLAUDE.md: `.test.ts` is vitest's suffix here,
+    // `.spec.ts` is Playwright's (docs/10-testing.md#web-e2e-playwright).
+    include: ["src/**/*.test.ts"],
   },
 })

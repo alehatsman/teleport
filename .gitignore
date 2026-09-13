@@ -12,6 +12,12 @@
 /web/dist-ssr/
 *.local
 
+# Playwright e2e (docs/10-testing.md#web-e2e-playwright)
+/web/e2e/.tmp/
+/web/playwright-report/
+/web/test-results/
+/web/blob-report/
+
 # Editor / OS
 .vscode/*
 !.vscode/extensions.json

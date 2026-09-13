@@ -139,3 +139,49 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+
+  # Separate from the `web` job above on purpose: this needs a real
+  # teleportd binary (docs/10-testing.md#web-e2e-playwright's daemon
+  # fixture) and real browsers, both slower than lint/typecheck/build/test,
+  # so a plain typo doesn't wait on a Rust build + two browser downloads.
+  web-e2e:
+    name: web (e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon -> target
+      - run: cargo build -p teleportd
+        working-directory: daemon
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: npm ci
+      # Not just `chromium`: the "mobile" project uses devices['iPhone 14'],
+      # which is WebKit -- the real engine an iPhone runs, not Chromium's
+      # mobile-viewport emulation (this app is mobile-first, and this
+      # session's real bugs were WebKit-specific). ts-quality's tools.sh
+      # only auto-installs chromium (it has no opinion on e2e), so both are
+      # installed explicitly here rather than relied on from that gate.
+      - working-directory: web
+        run: npx playwright install --with-deps chromium webkit
+      # The daemon fixture points teleportd's --web-dist at this (fixtures/
+      # daemon.ts) -- a separate job/runner from `web`'s own build, so this
+      # has to build its own copy rather than reuse that one.
+      - working-directory: web
+        run: npm run build
+      - working-directory: web
+        env:
+          TELEPORTD_BIN: ${{ github.workspace }}/daemon/target/debug/teleportd
+        run: npm run test:e2e
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 14

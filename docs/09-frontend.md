@@ -370,6 +370,9 @@ Vite's dev proxy must forward **both** `/api` HTTP and the WebSocket upgrade (`w
 The dev origin `http://localhost:5173` is allowlisted only in debug builds
 ([06-security.md](06-security.md#browser-origin-defense)).
 
+Real browser-level tests (Playwright, against a real `teleportd`, no dev proxy involved)
+are a separate thing: [10-testing.md#web-e2e-playwright](10-testing.md#web-e2e-playwright).
+
 **To see it render on an actual phone** (not just resize your desktop
 browser), use [scripts/mobile-dev](../scripts/mobile-dev/README.md) — an
 isolated dev daemon, Tailscale Serve wiring, and two observation tools (Mac

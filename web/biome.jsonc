@@ -27,7 +27,13 @@
       "!*.tsbuildinfo",
       // Static assets (favicon.svg): not source, and the a11y rules do not
       // apply to a browser-tab icon.
-      "!public"
+      "!public",
+      // Playwright output (docs/10-testing.md#web-e2e-playwright) -- reports,
+      // traces and the daemon-fixture state file, none of it source.
+      "!**/playwright-report",
+      "!**/test-results",
+      "!**/blob-report",
+      "!**/e2e/.tmp"
     ]
   },
   "html": {

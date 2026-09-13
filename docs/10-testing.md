@@ -213,6 +213,55 @@ Not a benchmark suite — a guard against architectural regressions.
 
 If memory grows unboundedly anywhere, a queue is unbounded — find it.
 
+## Web e2e (Playwright)
+
+`web/e2e/` — real Svelte components, a real browser (Playwright), a real `teleportd`.
+Never a mock WebSocket server: this repo already treats "prove it against the real
+primitive" as the point of testing (this file's opening line), and the frontend has no
+exception for that.
+
+**Scope is deliberately narrow**: the real, user-facing critical paths and the one
+invariant the product exists to protect — exactly one controller, truthfully shown
+(docs/09-frontend.md#control-lease-ui) — not a browser-level re-run of this file's
+failure-injection matrix above. That stays Rust's job; duplicating it through a browser
+would be slower and no more convincing. Five spec files: session lifecycle (launch,
+attach, typed input round-trips), control lease (claim preempts, the ousted client is
+notified), the session list (search, closed-tab bulk delete), a reconnect/restart
+regression test, and a mobile-viewport smoke pass — see each file's own header comment
+for what it covers and why.
+
+**The daemon fixture** (`web/e2e/fixtures/daemon.ts`) spawns a real `teleportd` against
+an ephemeral port and a throwaway data dir, waits on the same signals a human would (the
+`<data_dir>/port` file, then `/health` answering — never a fixed sleep), and reuses
+`TELEPORTD_BIN` when set (CI: a pre-built binary) or falls back to `cargo run -p
+teleportd --` (local: `npm run test:e2e` alone just works, `tasks/ui-e2e.yml` builds the
+binary first for speed). Auth stays **on** — the real default
+([06-security.md](06-security.md#authentication)) — a custom `authedPage` fixture does
+the one real `?token=…` navigation every test, the actual onboarding flow, rather than
+routing around it with `auth_token = false`.
+
+Most specs share one daemon instance (`global-setup.ts`/`global-teardown.ts`), safe
+because every test creates whatever session(s) it needs and scopes its own assertions to
+a unique marker — never the raw Active/Closed counts, which reflect every session on the
+shared daemon and would be flaky under parallel test files.
+`reconnect-and-lost.spec.ts` is the one exception: it owns a **dedicated** instance,
+because it deliberately kills the daemon and restarts it against the same data dir and
+port (to exercise the real "recovered as lost" path, [01](01-architecture.md#the-crash-boundary))
+— that must never disturb whatever else is running in parallel against the shared one.
+
+Run it: `cd web && npm run test:e2e` (needs a built `teleportd` on `PATH` or
+`TELEPORTD_BIN`, and `npx playwright install chromium webkit` once), or
+`provision apply tasks/ui-e2e.yml` for the whole thing in one command. CI runs it as its
+own `web-e2e` job ([.github/workflows/ci.yml](../.github/workflows/ci.yml)), separate
+from the fast `web` job (lint/typecheck/build/vitest) so a typo doesn't wait on a Rust
+build and two browser downloads.
+
+The "mobile" Playwright project uses `devices['iPhone 14']`, which is **WebKit** — the
+real engine an iPhone runs, not Chromium's mobile-viewport emulation
+(`scripts/mobile-dev/README.md`'s own "Fidelity" table makes the same distinction for
+manual testing). This app is mobile-first and two of this session's three real bugs were
+WebKit-specific; emulated Chromium would not have caught either.
+
 ## Manual pre-release pass
 
 Run on all three OSes:

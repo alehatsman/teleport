@@ -1,0 +1,22 @@
+{
+  // e2e/ and playwright.config.ts run under Playwright's own bundler-based
+  // loader, never emitted or run directly by `node file.js` -- bundler
+  // resolution (not tsconfig.node.json's `nodenext`) matches how they're
+  // actually executed, and skips nodenext's real-ESM explicit-extension
+  // requirement on relative imports, which would otherwise fight the plain
+  // `from "./fixtures"` style every other tsconfig here uses.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    "target": "es2023",
+    // DOM: `page.evaluate(() => document...)` callbacks are authored here
+    // but run in the browser -- TS still type-checks the closure itself
+    // against this project's lib, which otherwise has no DOM types at all.
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}
