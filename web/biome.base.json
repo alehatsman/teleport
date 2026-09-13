@@ -4,12 +4,11 @@
 
   "files": {
     "includes": [
-      "**",
-      "!**/node_modules/**",
-      "!**/dist/**",
-      "!**/build/**",
-      "!**/coverage/**",
-      "!**/.gate/**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/build",
+      "!**/coverage",
+      "!**/.gate",
       "!**/*.min.js",
       "!**/*.gen.ts"
     ]

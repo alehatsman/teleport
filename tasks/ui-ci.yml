@@ -4,10 +4,9 @@ description: full pre-push web gate — biome, typecheck, config drift, build, t
 # tq/ci over web/. The checkout is tasks/ui-tools.yml's job and the pin lives
 # there. Every prop tq/ci declares already defaults to what web/ wants.
 #
-# The gate's typecheck step is a bare `tsc -b`, which never sees a .svelte
-# file. svelte-check is what type-checks the components, so web/package.json
-# runs it from `build` (via `check:svelte`), which the gate calls next. The
-# consumer-facing `npm run typecheck` runs both.
+# The gate's typecheck step runs web/package.json's `typecheck` script
+# (ts-quality#3), which is svelte-check followed by `tsc -b`: tsc alone never
+# sees a .svelte file.
 steps:
   - name: full gate
     use: ~/.cache/provision/tools/ts-quality/ci.yml

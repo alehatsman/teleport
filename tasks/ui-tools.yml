@@ -7,11 +7,12 @@ description: check out ts-quality and install the web gate's tools (npm ci)
 #
 # No tag past v0.1.0 exists upstream, and v0.1.0 predates the provision
 # migration (mooncake-only, and provision rejects its `name:` key outright).
-# Pinned to the migration commit until a tag lands; re-pin to the tag then.
-# codefort pins the same commit.
+# Pinned to a commit until a tag lands; re-pin to the tag then. This one is
+# ts-quality#3: the gate runs the consumer's `typecheck` script, which is
+# what lets svelte-check run inside it.
 steps:
   - vars:
-      tq_ref: 6cf4279755c1bd5b697e94427e3001338252f026
+      tq_ref: 7021dcaf793425350d76a0362c5fe20fc8aa3899
       tq_dir: "{{ home }}/.cache/provision/tools/ts-quality"
 
   - name: "ts-quality at {{ tq_ref }}"
