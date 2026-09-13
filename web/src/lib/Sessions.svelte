@@ -10,6 +10,12 @@
   let presets: Preset[] = $state([]);
   let loading = $state(true);
   let loadError: string | null = $state(null);
+  // Has any session-list fetch ever succeeded? Gates the "No sessions yet"
+  // placeholder: until it has, an empty `sessions` means "unknown", not
+  // "none" -- rendering the empty state under an error banner (bad token,
+  // daemon down) told the reader there was nothing running when we simply
+  // couldn't ask.
+  let loadedOnce = $state(false);
   let searchQuery = $state("");
 
   // Status toggle alongside the text search below. "Active" (the default --
@@ -144,6 +150,7 @@
       const res = await api.listSessions();
       sessions = res.sessions;
       loadError = null;
+      loadedOnce = true;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
@@ -551,7 +558,7 @@
 
     {#if loading}
       <p class="sessions__loading">Loading…</p>
-    {:else if sessions.length === 0}
+    {:else if loadedOnce && sessions.length === 0}
       <div class="empty">
         <p class="empty__text">No sessions yet.</p>
         <button class="btn btn--primary" onclick={openLauncher}>New session</button>
