@@ -8,39 +8,43 @@ second server, and no SSR.
 
 ## Structure
 
-Same split as the fleet's other web app (codefort): a data layer (`api/`), a shared
-primitive vocabulary (`ui/` — it does not exist yet; the first primitive promoted on a
-second consumer creates it, see
+Same four layers as the fleet's other web app (codefort), per
 [ts-quality/docs/UI.md](https://github.com/alehatsman/ts-quality/blob/main/docs/UI.md)
-rule 11), and everything else. Teleport has one real feature (sessions/terminal), not
-several, so there's no `features/` layer yet — `Sessions.svelte`, `Session.svelte` and
-`Terminal.svelte` stay at `src/` top level until a second feature exists to justify one.
+rule 19: `api/` (data), `ui/` (domain-free primitives), `shell/` (app chrome),
+`features/<x>/` (one domain each). Teleport has one domain — sessions — so there is one
+feature directory holding both the list and the viewer. `shell/` and `ui/` exist but are
+empty; each carries a README saying what lands there and when.
 
 ```text
 web/
 ├── vite.config.ts
 └── src/
     ├── main.ts
-    ├── App.svelte              # routing between list and session views
+    ├── App.svelte              # hash routing between list and session views
+    ├── app.css                 # tokens + shared blocks (web/CLAUDE.md)
     ├── api/
     │   ├── api.ts              # typed HTTP client for /api/v1 + describeError()
     │   ├── stream.ts           # WebSocket client: framing, offsets, reconnect
     │   ├── stream.test.ts
     │   ├── identity.ts         # client id / token / display name
     │   └── types.ts            # shared types mirroring the API doc
-    ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
-    ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
-    ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
-    ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
-    ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
-    ├── Session.svelte          # one session: header, status, control lease UI
-    └── Terminal.svelte         # xterm.js, isolated
+    ├── shell/                  # app chrome — empty until two features share some
+    ├── ui/                     # promoted primitives — empty until a second consumer exists
+    └── features/
+        └── sessions/
+            ├── Sessions.svelte         # orchestrator: fetch/poll, filter/search, launcher trigger
+            ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
+            ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
+            ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
+            ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
+            ├── Session.svelte          # one session: header, status, control lease UI
+            └── Terminal.svelte         # xterm.js, isolated
 ```
 
 Imports use the `@/` alias for `src/` (`tsconfig.app.json` paths + `vite.config.ts`
-resolve.alias), matching codefort — e.g. `@/api/api`, `@/SessionRow.svelte`. No relative
-`../` imports across these top-level files; only a component's own same-directory files
-(none, today) would use `./`.
+resolve.alias), matching codefort — e.g. `@/api/api`, `@/features/sessions/SessionRow.svelte`.
+No relative `../` imports across layers; a component's own same-directory siblings may
+use `./`.
 
 `Terminal.svelte` is the **only** file that imports xterm.js. Everything else deals in
 session IDs and connection state. If a second component reaches into the xterm API, the

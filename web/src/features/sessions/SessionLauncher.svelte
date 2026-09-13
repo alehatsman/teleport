@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte"
   import { describeError } from "@/api/api"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
-  import DirectoryBrowser from "@/DirectoryBrowser.svelte"
+  import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
 
   // The new-session form panel. `cwd`/`selectedPreset`/`customCommand` are
   // owned by Sessions.svelte and bound, not local state here -- they must

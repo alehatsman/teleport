@@ -12,11 +12,12 @@ This file is only the teleport delta: where things live here, and the gate.
 ## Structure
 
 [09-frontend.md#structure](../docs/09-frontend.md#structure) has the file tree and the
-`SessionLauncher`/`DirectoryBrowser` interfaces — same `api/` / `ui/` split as codefort's
-web app, without a `features/` layer (teleport has one feature, not several) and with
-`ui/` still unborn (first promoted primitive creates it). Imports
-use the `@/` alias for `src/` (`@/api/api`, `@/Session.svelte`) — no relative `../`
-across top-level files.
+component interfaces. Codefort's four layers, UI.md rule 19: `api/`, `ui/`, `shell/`,
+`features/<x>/`. One feature today, `features/sessions/`, holding list and viewer both.
+`shell/` and `ui/` are empty with a README each saying what lands there; do not create a
+third top-level layer, and do not put a component at `src/` root — `App.svelte`,
+`main.ts` and `app.css` are the only root files. Imports use the `@/` alias for `src/`
+(`@/api/api`, `@/features/sessions/Session.svelte`) — no relative `../` across layers.
 
 ## Gate
 

@@ -10,8 +10,8 @@
   } from "@/api/api"
   import { setControlling } from "@/api/identity"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
-  import SessionLauncher from "@/SessionLauncher.svelte"
-  import SessionList from "@/SessionList.svelte"
+  import SessionLauncher from "@/features/sessions/SessionLauncher.svelte"
+  import SessionList from "@/features/sessions/SessionList.svelte"
 
   let { onOpen }: { onOpen: (id: string) => void } = $props()
 

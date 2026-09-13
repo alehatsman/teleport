@@ -4,7 +4,7 @@
   import { setControlling, wasControlling } from "@/api/identity"
   import { SessionStream } from "@/api/stream"
   import { ApiError, type Session as SessionData, type StreamState } from "@/api/types"
-  import Terminal from "@/Terminal.svelte"
+  import Terminal from "@/features/sessions/Terminal.svelte"
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
