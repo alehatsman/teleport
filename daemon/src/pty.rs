@@ -42,6 +42,7 @@ use anyhow::{bail, Context, Result};
 use portable_pty::{
     native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize,
 };
+use tracing::warn;
 
 /// Bytes per chunk read from the pty master (docs/03-pty-layer.md#reader-loop).
 const READ_BUFFER_SIZE: usize = 64 * 1024;
@@ -522,6 +523,18 @@ fn control_thread_main(
         reason = "read only by #[cfg(unix)]'s Terminate arm; #[cfg(windows)] tears the child down via the ConPTY master handle instead"
     )]
     pid: Option<u32>,
+    // Used only by `#[cfg(windows)]`'s hard kill below; Unix signals the
+    // group itself (see `hard_kill_group`) -- same platform-dependent
+    // #[allow] pairing as `pid` above.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "the #[allow] below has to stay an #[allow]; see the comment on it"
+    )]
+    #[allow(
+        unused_variables,
+        unused_mut,
+        reason = "used only by #[cfg(windows)]'s hard kill; #[cfg(unix)] sends SIGKILL itself via hard_kill_group"
+    )]
     mut killer: Box<dyn ChildKiller + Send + Sync>,
     control_rx: &Receiver<ControlEvent>,
     exit_tx: &SyncSender<PtyExit>,
@@ -612,13 +625,19 @@ fn control_thread_main(
                 {
                     pty_exit_from_wait(result)
                 } else {
-                    // Step 4: hard kill. portable-pty's kill() is a hard
-                    // kill on both platforms (SIGKILL / TerminateProcess).
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "best-effort hard kill; if it fails, the wait below still resolves via KillTimeout"
-                    )]
-                    let _ = killer.kill();
+                    // Step 4: hard kill. Not `killer.kill()` on Unix --
+                    // portable-pty 0.9's cloned killer sends SIGHUP there,
+                    // which a child ignoring HUP survives (issue #49).
+                    // Windows' `killer.kill()` is TerminateProcess.
+                    #[cfg(unix)]
+                    let killed = hard_kill_group(pid);
+                    #[cfg(windows)]
+                    let killed = killer.kill();
+                    // Still best-effort: the wait below resolves via
+                    // KillTimeout either way. Just never silently.
+                    if let Err(e) = killed {
+                        warn!(?pid, error = %e, "hard kill failed");
+                    }
                     match wait_for_child_exited(control_rx, Instant::now() + KILL_WAIT) {
                         Some(result) => pty_exit_from_wait(result),
                         None => PtyExit {
@@ -642,6 +661,34 @@ fn control_thread_main(
                 return; // post-reap cleanup: `master` drops with this frame
             }
         }
+    }
+}
+
+/// Step 4's hard kill on Unix (docs/03-pty-layer.md#concrete-policy):
+/// SIGKILL to the session's whole process group -- the child leads it
+/// (portable-pty spawns under `setsid`), so this is the same target as step
+/// 2's SIGHUP and takes the child and its descendants together.
+#[cfg(unix)]
+fn hard_kill_group(pid: Option<u32>) -> IoResult<()> {
+    // Same negative-pid_t guard as step 2: never let a wrapped cast turn
+    // into "some other group".
+    let Some(pid) = pid.and_then(|p| libc::pid_t::try_from(p).ok()) else {
+        return Err(std::io::Error::other("no valid pid to kill"));
+    };
+    // SAFETY: killpg with a pid we own (this session's child) and a signal
+    // that does not affect memory safety.
+    #[expect(unsafe_code, reason = "killpg(2) via libc; no safe wrapper")]
+    let rc = unsafe { libc::killpg(pid, libc::SIGKILL) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    // ESRCH: the group died between the graceful wait's timeout and now --
+    // nothing left to kill, not a failure.
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err)
     }
 }
 

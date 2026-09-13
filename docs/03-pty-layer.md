@@ -308,14 +308,22 @@ EOF or the session is garbage-collected.
      Unverified on real Windows as of this writing — see the Windows note in
      [15-open-questions.md#s4](15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole).
 3. Wait up to **5 s** for child exit, **while the reader thread keeps draining**.
-4. If still alive: `child.kill()` (hard kill — `SIGKILL` on Unix).
+4. If still alive: hard kill.
+   - Unix: `libc::killpg(pgid, SIGKILL)` — the whole group, same target as step 2's
+     `SIGHUP`. **Not** `portable-pty`'s `ChildKiller::kill()`; see the note below.
+   - Windows: `ChildKiller::kill()` (`TerminateProcess`).
 5. Wait up to a further **2 s**, then give up and mark the session `exited` with
    `exit_code = null` and a `lost_reason` of `"kill_timeout"`.
 6. Reader thread exits on EOF; flush and fsync `output.vt`; record `exited_at_ms` and
    `exit_code`; emit the `exit` control frame to all subscribers; close their sockets.
 
-`portable-pty`'s `Child::kill()` is a hard kill on Unix. Do not mistake it for a
-graceful stop — that is why step 2 exists.
+`portable-pty` 0.9's kill is not a hard kill on Unix. `Child::kill()` sends `SIGHUP`,
+waits ~250 ms, then `SIGKILL`s; the `clone_killer()` handle the control thread holds
+(the reaper thread owns the `Child` itself) sends **only** `SIGHUP`
+(`portable-pty-0.9.0/src/lib.rs`, `impl ChildKiller for ProcessSignaller`). A child
+that ignores `HUP` and `TERM` survived both steps 2 and 4 and leaked behind an
+`exited` row until step 4 sent `SIGKILL` itself (issue #49; regression fixture
+`terminate_hard_kills_a_child_that_ignores_hup_and_term`).
 
 ## The `TerminalSession` trait
 

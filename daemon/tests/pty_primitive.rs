@@ -434,6 +434,53 @@ fn terminate_reaches_exited_within_the_bounded_policy() {
     );
 }
 
+/// Issue #49: a child that ignores both graceful signals must still die by
+/// step 4's hard kill (docs/03-pty-layer.md#concrete-policy), not ride out
+/// `KILL_WAIT` and leak as a live process behind an `exited` row.
+#[test]
+fn terminate_hard_kills_a_child_that_ignores_hup_and_term() {
+    let (spawned, out_rx) = spawn_sh(
+        "trap '' HUP TERM; echo TRAPPED; while :; do sleep 1; done",
+        24,
+        80,
+    );
+    recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| contains(acc, "TRAPPED"));
+    let pid = spawned
+        .pid
+        .and_then(|p| libc::pid_t::try_from(p).ok())
+        .expect("spawned session should report its pid");
+
+    spawned
+        .session
+        .terminate()
+        .expect("terminate should not error");
+
+    let exit = spawned
+        .exit_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("exit_rx should already have fired by the time terminate() returns");
+    assert!(
+        exit.lost_reason.is_none(),
+        "hard kill should produce an observed exit, got lost_reason {:?}",
+        exit.lost_reason
+    );
+    assert!(
+        !exit.status.is_some_and(|s| s.success()),
+        "a SIGKILLed shell should not report success"
+    );
+
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for a liveness probe"
+    )]
+    // SAFETY: kill(pid, 0) is a pure liveness probe, sends no signal.
+    let rc = unsafe { libc::kill(pid, 0) };
+    assert!(
+        rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+        "session pid {pid} is still alive after terminate"
+    );
+}
+
 #[test]
 fn terminate_under_output_load_does_not_deadlock() {
     let (spawned, out_rx) = spawn_sh("yes", 24, 80);
