@@ -52,12 +52,17 @@ function defaultClientName(): string {
   return platform ? `${browser} on ${platform}` : browser
 }
 
-function readOrCreate(store: Storage, key: string, create: () => string): string {
+// `store` is a thunk, not a Storage: resolving `sessionStorage` itself can
+// throw (or be undefined -- Node under vitest has localStorage but not
+// sessionStorage), and that has to land in the same catch as a blocked
+// getItem.
+function readOrCreate(store: () => Storage, key: string, create: () => string): string {
   try {
-    const existing = store.getItem(key)
+    const s = store()
+    const existing = s.getItem(key)
     if (existing) return existing
     const created = create()
-    store.setItem(key, created)
+    s.setItem(key, created)
     return created
   } catch {
     // Private browsing / storage disabled: fall back to a per-load value
@@ -66,8 +71,8 @@ function readOrCreate(store: Storage, key: string, create: () => string): string
   }
 }
 
-export const CLIENT_ID = readOrCreate(sessionStorage, CLIENT_ID_KEY, newClientId)
-export const CLIENT_NAME = readOrCreate(localStorage, CLIENT_NAME_KEY, defaultClientName)
+export const CLIENT_ID = readOrCreate(() => sessionStorage, CLIENT_ID_KEY, newClientId)
+export const CLIENT_NAME = readOrCreate(() => localStorage, CLIENT_NAME_KEY, defaultClientName)
 
 export function getToken(): string | null {
   try {
