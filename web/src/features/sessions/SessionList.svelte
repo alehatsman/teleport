@@ -10,6 +10,9 @@
     onResume,
     onTerminate,
     onPurge,
+    selectMode,
+    selectedIds,
+    onToggleSelected,
   }: {
     sessions: Session[]
     now: number
@@ -18,6 +21,9 @@
     onResume: (session: Session) => void
     onTerminate: (id: string) => void
     onPurge: (id: string) => void
+    selectMode: boolean
+    selectedIds: Set<string>
+    onToggleSelected: (id: string) => void
   } = $props()
 
   // Swipe-reveal exclusivity: only one row's action button is ever revealed
@@ -39,6 +45,9 @@
       {onResume}
       {onTerminate}
       {onPurge}
+      {selectMode}
+      selected={selectedIds.has(session.id)}
+      {onToggleSelected}
     />
   {/each}
 </ul>

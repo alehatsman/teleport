@@ -40,6 +40,9 @@
     onResume,
     onTerminate,
     onPurge,
+    selectMode,
+    selected,
+    onToggleSelected,
   }: {
     session: Session
     now: number
@@ -50,6 +53,9 @@
     onResume: (session: Session) => void
     onTerminate: (id: string) => void
     onPurge: (id: string) => void
+    selectMode: boolean
+    selected: boolean
+    onToggleSelected: (id: string) => void
   } = $props()
 
   let isDeletable = $derived(session.state === "exited" || session.state === "lost")
@@ -64,6 +70,7 @@
   let frontOffsetPx = $derived(dragging ? dragOffsetPx : isOpen ? -REVEAL_PX : 0)
 
   function onTouchStart(e: TouchEvent) {
+    if (selectMode) return // swipe-to-delete and bulk select don't mix -- tap toggles the checkbox instead.
     const touch = e.touches[0]
     if (!touch) return
     touchStartX = touch.clientX
@@ -121,6 +128,7 @@
        operable by keyboard/AT with no dependency on these touch handlers. -->
   <div
     class="session-row__front"
+    class:session-row__front--full={selectMode}
     style="transform: translateX({frontOffsetPx}px)"
     ontouchstart={onTouchStart}
     ontouchmove={onTouchMove}
@@ -131,6 +139,14 @@
       class="session-row__link"
       href={`#/sessions/${session.id}`}
       onclick={(e) => {
+        if (selectMode) {
+          // Select mode repurposes the whole row as the checkbox's hit
+          // target -- navigating away mid-selection would be the wrong tap
+          // to forgive.
+          e.preventDefault();
+          onToggleSelected(session.id);
+          return;
+        }
         if (isOpen) {
           // Swiped open -- the tap dismisses the reveal instead of also
           // navigating, same as tapping the content of an open iOS swipe
@@ -142,6 +158,16 @@
         onOpen(session.id);
       }}
     >
+      {#if selectMode}
+        <input
+          type="checkbox"
+          class="session-row__checkbox"
+          checked={selected}
+          aria-label={`Select ${session.command}`}
+          onclick={(e) => e.stopPropagation()}
+          onchange={() => onToggleSelected(session.id)}
+        />
+      {/if}
       <StatusDot tone={stateTone(session.state)} label={STATE_LABELS[session.state]} />
       {#if needsAttention(session, now)}
         <span class="session-row__attention" aria-hidden="true">●</span>
@@ -167,22 +193,24 @@
       {/if}
       <span class="session-row__age" title={new Date(session.created_at_ms).toLocaleString()}>{displayAge(session.created_at_ms, now)}</span>
     </a>
-    {#if isDeletable && session.claude_resume_id}
+    {#if !selectMode && isDeletable && session.claude_resume_id}
       <button type="button" class="session-row__resume" onclick={() => onResume(session)}>
         ↻ Resume
       </button>
     {/if}
   </div>
-  <button
-    class="session-row__action"
-    class:session-row__action--danger={isDeletable}
-    aria-label={isDeletable ? "Delete session" : "Terminate session"}
-    onclick={handleAction}
-  >
-    <svg class="session-row__action-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" fill="none" />
-    </svg>
-  </button>
+  {#if !selectMode}
+    <button
+      class="session-row__action"
+      class:session-row__action--danger={isDeletable}
+      aria-label={isDeletable ? "Delete session" : "Terminate session"}
+      onclick={handleAction}
+    >
+      <svg class="session-row__action-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" fill="none" />
+      </svg>
+    </button>
+  {/if}
 </li>
 
 <style>
@@ -259,6 +287,17 @@
     .session-row__front {
       width: calc(100% - 72px);
     }
+  }
+  /* Select mode hides .session-row__action entirely (the bulk bar replaces
+     it) -- reclaim the gutter the rule above reserved for it. */
+  .session-row__front--full {
+    width: 100%;
+  }
+  .session-row__checkbox {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
   }
   .session-row__link {
     flex: 1;

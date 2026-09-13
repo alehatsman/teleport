@@ -50,6 +50,67 @@
   let activeCount: number = $derived(sessions.filter(isActiveStatus).length)
   let closedCount: number = $derived(sessions.length - activeCount)
   let filteredSessions: Session[] = $derived(filterSessions(sessions, statusFilter, searchQuery))
+
+  // Bulk delete -- Closed tab only. There's no bulk-terminate: killing a
+  // batch of *running* sessions is a different, riskier action than
+  // clearing out ones that are already dead, so it stays out of scope here
+  // (single-row terminate below still covers it one at a time). Leaving the
+  // Closed tab always exits select mode -- a selection made against one
+  // filtered list shouldn't silently carry into another.
+  let selectMode = $state(false)
+  let selectedIds: Set<string> = $state(new Set())
+  let bulkDeleting = $state(false)
+
+  $effect(() => {
+    if (statusFilter !== "closed") exitSelectMode()
+  })
+
+  function exitSelectMode() {
+    selectMode = false
+    selectedIds = new Set()
+  }
+
+  function toggleSelectMode() {
+    if (selectMode) exitSelectMode()
+    else selectMode = true
+  }
+
+  function toggleSelected(id: string) {
+    const next = new Set(selectedIds)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    selectedIds = next
+  }
+
+  let allVisibleSelected: boolean = $derived(
+    filteredSessions.length > 0 && filteredSessions.every((s) => selectedIds.has(s.id))
+  )
+
+  function toggleSelectAll() {
+    selectedIds = allVisibleSelected ? new Set() : new Set(filteredSessions.map((s) => s.id))
+  }
+
+  async function bulkDelete() {
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+    if (
+      !confirm(
+        `Delete ${ids.length} session${ids.length === 1 ? "" : "s"} and their logs? This can't be undone.`
+      )
+    )
+      return
+    bulkDeleting = true
+    try {
+      const results = await Promise.allSettled(ids.map((id) => deleteSession(id, true)))
+      const failed = results.filter((r) => r.status === "rejected").length
+      await refresh()
+      exitSelectMode()
+      if (failed > 0)
+        loadError = `${failed} of ${ids.length} session${ids.length === 1 ? "" : "s"} failed to delete.`
+    } finally {
+      bulkDeleting = false
+    }
+  }
   // Which machine this daemon is actually running on -- juggling more than
   // one teleportd (a dev box, a laptop, a work machine) otherwise looks
   // identical from this title alone; GET /api/v1/health already returns it
@@ -249,6 +310,28 @@
       </div>
     {:else}
       <SessionFilters bind:statusFilter bind:searchQuery {activeCount} {closedCount} />
+      {#if statusFilter === "closed" && closedCount > 0}
+        <div class="select-bar">
+          {#if selectMode}
+            <label class="select-bar__all">
+              <input type="checkbox" checked={allVisibleSelected} onchange={toggleSelectAll} />
+              Select all
+            </label>
+            <span class="select-bar__count">{selectedIds.size} selected</span>
+            <button type="button" class="btn" onclick={exitSelectMode} disabled={bulkDeleting}>Cancel</button>
+            <button
+              type="button"
+              class="btn btn--danger"
+              onclick={bulkDelete}
+              disabled={selectedIds.size === 0 || bulkDeleting}
+            >
+              {bulkDeleting ? "Deleting…" : `Delete (${selectedIds.size})`}
+            </button>
+          {:else}
+            <button type="button" class="btn select-bar__enter" onclick={toggleSelectMode}>Select</button>
+          {/if}
+        </div>
+      {/if}
       {#if filteredSessions.length === 0}
         <p class="sessions__loading">
           {#if searchQuery.trim()}
@@ -266,6 +349,9 @@
         onResume={openResumeLauncher}
         onTerminate={terminate}
         onPurge={purge}
+        {selectMode}
+        {selectedIds}
+        onToggleSelected={toggleSelected}
       />
     {/if}
   </main>
@@ -339,6 +425,34 @@
   .sessions__empty-text {
     margin: 0;
     opacity: 0.6;
+  }
+
+  /* Block: select-bar -- the "Select" toggle and, once entered, the bulk
+     delete controls. Only ever rendered on the Closed tab (see selectMode's
+     declaration in the script block). */
+  .select-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    min-height: 2.1rem; /* holds the row's height steady across the one-button <-> four-control swap */
+  }
+  .select-bar__all {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .select-bar__count {
+    font-size: 0.8rem;
+    opacity: 0.6;
+    margin-right: auto;
+  }
+  .select-bar__enter {
+    font-size: 0.8rem;
+    padding: 0.3rem 0.65rem;
   }
 
   @media (max-width: 600px) {
