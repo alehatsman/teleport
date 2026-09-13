@@ -25,19 +25,28 @@
   let browseEntries: BrowseEntry[] = $state([])
   let browseError: string | null = $state(null)
   let browseLoading = $state(false)
+  // Bumped on every call, compared after the await: two folders tapped
+  // quickly fire two overlapping requests with no guarantee the slower one
+  // resolves first, so without this the *last response to land* wins
+  // instead of the *last folder tapped* -- whichever request this call
+  // started stops mattering the moment a newer one starts.
+  let browseRequestId = 0
 
   async function loadBrowse(path?: string) {
+    const requestId = ++browseRequestId
     browseLoading = true
     browseError = null
     try {
       const res = await browse(path)
+      if (requestId !== browseRequestId) return // superseded by a newer tap
       browsePath = res.path
       browseParent = res.parent
       browseEntries = res.entries
     } catch (e) {
+      if (requestId !== browseRequestId) return
       browseError = describeError(e)
     } finally {
-      browseLoading = false
+      if (requestId === browseRequestId) browseLoading = false
     }
   }
 
@@ -63,12 +72,17 @@
   {:else}
     <div class="browser__list">
       {#if browseParent}
-        <button type="button" class="browser__entry browser__entry--up" onclick={() => loadBrowse(browseParent ?? undefined)}>
+        <button
+          type="button"
+          class="browser__entry browser__entry--up"
+          disabled={browseLoading}
+          onclick={() => loadBrowse(browseParent ?? undefined)}
+        >
           .. (up)
         </button>
       {/if}
       {#each browseEntries as entry (entry.path)}
-        <button type="button" class="browser__entry" onclick={() => loadBrowse(entry.path)}>
+        <button type="button" class="browser__entry" disabled={browseLoading} onclick={() => loadBrowse(entry.path)}>
           {entry.name}
         </button>
       {/each}
@@ -130,6 +144,10 @@
   }
   .browser__entry:hover {
     background: var(--surface-hover);
+  }
+  .browser__entry:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .browser__entry--up {
     color: var(--muted);
