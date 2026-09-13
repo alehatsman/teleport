@@ -1113,9 +1113,12 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-    /* Args and cwd both ellipsize; args carry more identity, so they get
-       first claim on the row's width and cwd gives way first. */
-    flex-shrink: 0.5;
+    /* Args and cwd both ellipsize; args carry more identity, so they keep
+       their natural width up to a cap and cwd absorbs the rest of the
+       squeeze. (A shrink *ratio* alone didn't do it -- cwd's larger basis
+       still left args crushed to "-c sleep 1…" next to a long path.) */
+    flex-shrink: 0;
+    max-width: 45%;
   }
   .session-row__age {
     margin-left: auto;
