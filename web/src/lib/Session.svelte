@@ -90,6 +90,20 @@
 
   function sendKey(bytes: string) {
     if (hasControl) stream?.sendInput(bytes);
+    else onObserverInput();
+  }
+
+  const OBSERVER_HINT = "Read-only. Take control to type.";
+
+  function onObserverInput() {
+    // Repeated keystrokes just keep the same toast alive; don't re-trigger
+    // its entrance animation on every key.
+    if (toast === OBSERVER_HINT) {
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast = null), 4000);
+      return;
+    }
+    showToast(OBSERVER_HINT);
   }
 </script>
 
@@ -132,7 +146,7 @@
 
   <main class="session__main" class:session__main--dimmed={!hasControl}>
     {#if stream}
-      <Terminal bind:this={terminalRef} {stream} isController={hasControl} />
+      <Terminal bind:this={terminalRef} {stream} isController={hasControl} {onObserverInput} />
     {/if}
   </main>
 

@@ -7,7 +7,16 @@
   import "@xterm/xterm/css/xterm.css";
   import type { SessionStream } from "./stream";
 
-  let { stream, isController }: { stream: SessionStream; isController: boolean } = $props();
+  let {
+    stream,
+    isController,
+    onObserverInput,
+  }: {
+    stream: SessionStream;
+    isController: boolean;
+    /** Fired when keystrokes land while observing -- the parent decides how to say "read-only". */
+    onObserverInput?: () => void;
+  } = $props();
 
   let wrapperEl: HTMLDivElement;
   let containerEl: HTMLDivElement;
@@ -48,6 +57,9 @@
     // keystrokes must never reach the PTY (docs/09-frontend.md#terminalsvelte).
     term.onData((data) => {
       if (isController) stream.sendInput(data);
+      // Typing into an observer view used to do nothing at all -- no echo,
+      // no hint, the only clue a button in the far corner. Say so.
+      else onObserverInput?.();
     });
 
     const resizeObserver = new ResizeObserver(() => scheduleGeometryUpdate());
