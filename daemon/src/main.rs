@@ -149,12 +149,17 @@ async fn main() -> Result<()> {
     write_port_file(&data_dir, bound_addr.port())?;
     info!(addr = %bound_addr, "teleportd listening");
 
-    println!(
-        "http://{}:{}/?token={}",
-        bound_addr.ip(),
-        bound_addr.port(),
-        token
-    );
+    if config.auth_token {
+        println!(
+            "http://{}:{}/?token={}",
+            bound_addr.ip(),
+            bound_addr.port(),
+            token
+        );
+    } else {
+        info!("auth disabled by config");
+        println!("http://{}:{}", bound_addr.ip(), bound_addr.port());
+    }
 
     let log_limits = LogLimits {
         warn_bytes: config.log_warn_bytes,
