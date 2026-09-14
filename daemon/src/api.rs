@@ -142,6 +142,13 @@ pub enum ApiError {
     /// `SessionManager::create` refused the request -- see [`CreateError`]
     /// for the status-code mapping.
     Create(CreateError),
+    /// The pin cap is reached and the request would add one more -- `429`
+    /// (docs/18-locations.md#post-apiv1locationspins).
+    PinsFull(usize),
+    /// A route that needs the metadata store on a daemon that has none.
+    /// Only reachable in test fixtures built without a `Db`
+    /// ([`AppState::db`]) -- a real daemon always has one.
+    NoPersistence,
 }
 
 impl From<AuthError> for ApiError {
@@ -208,6 +215,16 @@ impl IntoResponse for ApiError {
                 "spawn_failed",
                 e.to_string(),
             ),
+            ApiError::PinsFull(max) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_pins",
+                format!("pin limit ({max}) reached -- unpin something first"),
+            ),
+            ApiError::NoPersistence => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "this daemon has no metadata store".to_string(),
+            ),
         };
         (
             status,
@@ -268,6 +285,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}/stream", get(crate::ws::upgrade))
         .route("/api/v1/presets", get(list_presets))
         .route("/api/v1/browse", get(browse))
+        .route(
+            "/api/v1/locations/pins",
+            get(list_pins).post(add_pin).delete(remove_pin),
+        )
         .route("/api/v1/shutdown", post(shutdown))
         .route("/api/v1/ws-ticket", post(create_ws_ticket))
         .fallback(spa_fallback)
@@ -899,6 +920,114 @@ struct BrowseResponse {
 /// not scoped to under the home directory or any other root; that would be
 /// a false sense of security (the free-text `cwd` field already lets
 /// someone type their way anywhere) while genuinely blocking legitimate
+/// `canonicalize()` resolves symlinks and `.`/`..` to the real path a session
+/// would actually launch in, and doubles as the existence check -- there is no
+/// separate "does this exist" step to race against it. Shared by `browse` and
+/// the pin routes so a pinned path and a browsed one are spelled the same way,
+/// and so both match the `cwd` a session records.
+fn resolve_dir(requested: &std::path::Path) -> Result<PathBuf, ApiError> {
+    let resolved = requested
+        .canonicalize()
+        .map_err(|e| ApiError::BadRequest(format!("{}: {e}", requested.display())))?;
+    if !resolved.is_dir() {
+        return Err(ApiError::BadRequest(format!(
+            "{}: not a directory",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Refuse to pin past this many directories
+/// (docs/18-locations.md#post-apiv1locationspins). A shortlist that needs
+/// scrolling has stopped being one; the frecency ranking already covers the
+/// long tail.
+pub const MAX_PINS: usize = 50;
+
+#[derive(Debug, Serialize)]
+struct PinView {
+    path: String,
+    pinned_at_ms: i64,
+}
+
+impl From<persistence::PinRow> for PinView {
+    fn from(row: persistence::PinRow) -> Self {
+        Self {
+            path: row.path,
+            pinned_at_ms: row.pinned_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PinRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinQuery {
+    path: String,
+}
+
+/// `GET /api/v1/locations/pins` (docs/18-locations.md#get-apiv1locationspins).
+/// A pinned directory that has since been deleted or unmounted is still
+/// listed -- hiding it would leave no way to unpin it, and launching there
+/// fails with the same `422` any other bad `cwd` gets.
+async fn list_pins(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+) -> Result<impl IntoResponse, ApiError> {
+    let db = state.db.as_ref().ok_or(ApiError::NoPersistence)?;
+    let pins = db
+        .list_pins()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let pins: Vec<PinView> = pins.into_iter().map(PinView::from).collect();
+    Ok(Json(serde_json::json!({ "pins": pins })))
+}
+
+/// `POST /api/v1/locations/pins`. Idempotent: pinning an already-pinned path
+/// returns the stored row unchanged rather than an error -- two devices
+/// tapping the same star is normal, not a conflict.
+async fn add_pin(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Json(req): Json<PinRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_origin(&state, &headers)?;
+    let db = state.db.as_ref().ok_or(ApiError::NoPersistence)?;
+    let resolved = resolve_dir(std::path::Path::new(&req.path))?;
+    let outcome = db
+        .add_pin(&resolved.display().to_string(), crate::now_ms(), MAX_PINS)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    match outcome {
+        persistence::AddPinOutcome::Stored(row) => Ok(Json(PinView::from(row))),
+        persistence::AddPinOutcome::Full { max_pins } => Err(ApiError::PinsFull(max_pins)),
+    }
+}
+
+/// `DELETE /api/v1/locations/pins?path=...`. Unpinning something that was
+/// never pinned is `204`, not `404`: the caller asked for an end state, and
+/// that end state holds.
+async fn remove_pin(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Query(q): Query<PinQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_origin(&state, &headers)?;
+    let db = state.db.as_ref().ok_or(ApiError::NoPersistence)?;
+    // Deliberately *not* canonicalized: a pin whose directory has since been
+    // deleted can't be resolved at all, and that is exactly the pin someone
+    // most wants to remove. The stored string is the key.
+    db.remove_pin(&q.path)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// uses (`/srv`, `/opt`, an external mount).
 async fn browse(
     _principal: Principal,
@@ -915,18 +1044,7 @@ async fn browse(
             })?,
     };
 
-    // canonicalize() resolves symlinks/"."/".." to the real path a session
-    // would actually launch in, and doubles as the existence check --
-    // there's no separate "does this exist" step to race against it.
-    let resolved = requested
-        .canonicalize()
-        .map_err(|e| ApiError::BadRequest(format!("{}: {e}", requested.display())))?;
-    if !resolved.is_dir() {
-        return Err(ApiError::BadRequest(format!(
-            "{}: not a directory",
-            resolved.display()
-        )));
-    }
+    let resolved = resolve_dir(&requested)?;
 
     let read_dir = std::fs::read_dir(&resolved)
         .map_err(|e| ApiError::BadRequest(format!("{}: {e}", resolved.display())))?;

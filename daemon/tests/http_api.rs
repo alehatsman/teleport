@@ -494,3 +494,134 @@ async fn bad_origin_on_a_mutating_request_is_rejected() {
     let (status, _) = request(&daemon, req).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+// --- pinned locations (docs/18-locations.md#pins) -----------------------------
+
+/// A scratch directory tree plus the daemon that stores pins about it. Both
+/// live under one root so a single `remove_dir_all` cleans up.
+async fn pin_fixture(name: &str) -> (support::Daemon, std::path::PathBuf) {
+    let root = browse_test_dir(name);
+    std::fs::create_dir_all(root.join("daemon")).expect("create scratch daemon dir");
+    std::fs::create_dir_all(root.join("project")).expect("create scratch project dir");
+    let daemon = support::spawn_with_db(support::default_config(), &root.join("daemon")).await;
+    (daemon, root)
+}
+
+fn cleanup(root: &std::path::Path) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn pins_without_a_credential_are_rejected() {
+    let daemon = support::spawn(support::default_config()).await;
+    let (status, _) = request(&daemon, get("/api/v1/locations/pins", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_pinned_directory_comes_back_canonicalized_and_listed() {
+    let (daemon, root) = pin_fixture("pin-add").await;
+    // Routed through "project/.." so the response proves canonicalization:
+    // a pin has to be spelled the same way a session's `cwd` is, or the
+    // launcher can never match the two up.
+    let requested = root.join("project").join("..").join("project");
+    let canonical = requested.canonicalize().unwrap().display().to_string();
+
+    let (status, body) = request(
+        &daemon,
+        post_json(
+            "/api/v1/locations/pins",
+            Some(support::TOKEN),
+            &json!({ "path": requested.display().to_string() }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["path"], canonical);
+
+    let (status, body) =
+        request(&daemon, get("/api/v1/locations/pins", Some(support::TOKEN))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pins"][0]["path"], canonical);
+
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn pinning_a_path_that_is_not_a_directory_is_rejected() {
+    let (daemon, root) = pin_fixture("pin-bad").await;
+    std::fs::write(root.join("README.md"), "not a directory").unwrap();
+
+    for path in [
+        root.join("README.md").display().to_string(),
+        root.join("nope").display().to_string(),
+    ] {
+        let (status, _) = request(
+            &daemon,
+            post_json(
+                "/api/v1/locations/pins",
+                Some(support::TOKEN),
+                &json!({ "path": path }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "pinning {path}");
+    }
+
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn unpinning_uses_the_stored_path_and_is_idempotent() {
+    let (daemon, root) = pin_fixture("pin-remove").await;
+    let project = root.join("project").canonicalize().unwrap();
+    let (status, _) = request(
+        &daemon,
+        post_json(
+            "/api/v1/locations/pins",
+            Some(support::TOKEN),
+            &json!({ "path": project.display().to_string() }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleted out from under the daemon first: a pin whose directory is gone
+    // is exactly the one someone needs to remove, so DELETE must not try to
+    // resolve it (docs/18-locations.md#delete-apiv1locationspinspath).
+    std::fs::remove_dir_all(&project).unwrap();
+    let uri = format!(
+        "/api/v1/locations/pins?path={}",
+        urlencode(&project.display().to_string())
+    );
+
+    let (status, _) = request(&daemon, delete_request(&uri, support::TOKEN)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = request(&daemon, delete_request(&uri, support::TOKEN)).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "unpinning twice is still success"
+    );
+
+    let (_, body) = request(&daemon, get("/api/v1/locations/pins", Some(support::TOKEN))).await;
+    assert_eq!(body["pins"].as_array().expect("pins array").len(), 0);
+
+    cleanup(&root);
+}
+
+/// Percent-encodes the few characters a temp path can actually carry into a
+/// query string. Not a general-purpose encoder -- there is no URL crate in
+/// this dependency set, and one test does not justify adding it.
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => c.to_string(),
+            other => format!("%{:02X}", other as u32),
+        })
+        .collect()
+}
