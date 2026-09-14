@@ -73,6 +73,14 @@ export interface Preset {
    * field omits it entirely.
    */
   login_shell?: boolean
+  /**
+   * How this agent is told to resume a previous conversation, e.g.
+   * `["--resume"]`. Empty (or absent, on a daemon older than the field)
+   * means it has no resume story, and no Resume action is offered. This is
+   * the only thing the UI knows about any agent's capabilities -- there is
+   * deliberately no preset id anywhere in the resume path.
+   */
+  resume_args?: string[]
 }
 
 export interface PresetsResponse {

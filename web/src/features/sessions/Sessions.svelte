@@ -19,6 +19,7 @@
     recentCwds as deriveRecentCwds,
     filterSessions,
     isActiveStatus,
+    resumablePresetIds,
     type StatusFilter,
   } from "./sessionDisplay"
 
@@ -31,6 +32,9 @@
   // re-runs). Coarse on purpose -- ages are shown at minute granularity.
   let now = $state(Date.now())
   let presets: Preset[] = $state([])
+  // Recomputed when presets load; every row asks this rather than each
+  // scanning the preset list itself (sessionDisplay.ts#resumablePresetIds).
+  const resumablePresets = $derived(resumablePresetIds(presets))
   let loading = $state(true)
   let loadError: string | null = $state(null)
   // Has any session-list fetch ever succeeded? Gates the "No sessions yet"
@@ -405,6 +409,7 @@
         {selectMode}
         {selectedIds}
         onToggleSelected={toggleSelected}
+        {resumablePresets}
       />
     {/if}
   </main>

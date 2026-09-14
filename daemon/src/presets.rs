@@ -29,6 +29,20 @@ pub struct Preset {
     pub args: Vec<String>,
     /// Icon name for the UI; not interpreted here.
     pub icon: String,
+    /// How this agent is told to resume a previous conversation, e.g.
+    /// `["--resume"]`. Empty means "this agent has no resume story", and the
+    /// UI offers no Resume action for it -- which is the honest default for
+    /// an arbitrary command.
+    ///
+    /// This is the seam that keeps harness knowledge out of the daemon and
+    /// out of the wire: teleport does not know that `claude` resumes and a
+    /// plain shell does not, it reads that from `presets.toml`
+    /// (docs/11-mvp-plan.md#m8--agent-presets anticipated exactly this
+    /// field). A session id, when one is known, is appended to these args by
+    /// the caller; teleport never parses or validates it -- it is the
+    /// agent's own opaque identifier.
+    #[serde(default)]
+    pub resume_args: Vec<String>,
     /// Run `command` through the user's login shell instead of exec'ing it
     /// directly, so it inherits the environment their dotfiles build
     /// (docs/03-pty-layer.md#spawn, docs/04-api-protocol.md#get-apiv1presets).
@@ -71,6 +85,11 @@ fn default_presets() -> Vec<Preset> {
             args: vec![],
             icon: "codex".to_string(),
             login_shell: true,
+            // Deliberately empty rather than guessed: codex's resume flag
+            // has not been verified against a real binary here, and a wrong
+            // flag turns a Resume button into a failed spawn. One line in
+            // `presets.toml` adds it once someone checks.
+            resume_args: vec![],
         },
         Preset {
             id: "claude".to_string(),
@@ -79,6 +98,12 @@ fn default_presets() -> Vec<Preset> {
             args: vec![],
             icon: "claude".to_string(),
             login_shell: true,
+            // Bare `--resume` opens Claude Code's own picker for the folder.
+            // Deliberately not `--continue`, which resumes the most recent
+            // conversation in the directory without asking -- restoring four
+            // agents that worked in one repo would point all four at one
+            // conversation.
+            resume_args: vec!["--resume".to_string()],
         },
         // Already `$SHELL -l`: wrapping a login shell in a login shell buys
         // nothing but a second startup.
@@ -89,6 +114,7 @@ fn default_presets() -> Vec<Preset> {
             args: vec!["-l".to_string()],
             icon: "terminal".to_string(),
             login_shell: false,
+            resume_args: vec![],
         },
     ]
 }
@@ -309,6 +335,7 @@ mod tests {
             args: vec![],
             icon: "terminal".into(),
             login_shell: false,
+            resume_args: vec![],
         };
         std::env::set_var("SHELL", "/bin/zsh");
         assert_eq!(preset.resolved_command(), "/bin/zsh");
