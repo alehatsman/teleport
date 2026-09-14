@@ -56,7 +56,6 @@ sha2               = "0.10"
 # exist and never bakes in stale assets.
 rust-embed         = { version = "8", optional = true }
 mime_guess         = { version = "2", optional = true }
-webauthn-rs = "0.5"
 url = "2.5.8"
 uuid = "1.26.1"
 
@@ -65,6 +64,14 @@ embedded-web = ["dep:rust-embed", "dep:mime_guess"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Unix-only, and not by preference: `webauthn-rs` hard-depends on `openssl` +
+# `openssl-sys` (non-optional, no rustls feature in 0.5.x), which has no
+# prebuilt path on Windows -- `daemon (windows-latest)` fails in openssl-sys'
+# build script before it reaches a line of our code (issue #87). Rather than
+# vendor a C build into every release, passkey login is a unix capability and
+# a Windows daemon serves the token path only, which docs/17-passkey-login.md
+# already treats as a first-class credential that never goes away.
+webauthn-rs = "0.5"
 
 [dev-dependencies]
 # M4 protocol tests drive `api.rs` in-process (no real socket needed) and
