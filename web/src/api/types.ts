@@ -109,6 +109,13 @@ export interface HealthResponse {
   platform?: string
   /** The daemon's own home directory -- lets the UI collapse a session's `cwd` to `~/...`. */
   home_dir?: string
+  /**
+   * The release tag `<data_dir>/web/current` points at
+   * (docs/18-ui-upgrades.md#telling-the-client). Absent or null when the
+   * daemon is serving its embedded bundle or an explicit `--web-dist`, so a
+   * change in it means the UI on disk was flipped under this tab.
+   */
+  ui_version?: string | null
   pid?: number
   uptime_ms?: number
   sessions_running?: number

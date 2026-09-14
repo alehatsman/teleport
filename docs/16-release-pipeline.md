@@ -52,13 +52,27 @@ Linux `aarch64` is deliberately not in the first pass — no arm64 GitHub-hosted
 this repo's plan yet, and cross-compiling `rusqlite`'s bundled SQLite adds real CI
 complexity. Add it if someone asks for it.
 
+## The web bundle also ships on its own
+
+The embedded bundle below stays exactly as it is — a downloaded `teleportd` is still one
+self-contained file. Alongside it the release publishes
+`teleport-web-<tag>.tar.gz`: the *same* `npm run build` output, packaged once, target
+independent, checksummed into the same `checksums.txt`.
+
+It exists so a UI-only change can be shipped without restarting a daemon and killing
+every session under it ([18-ui-upgrades.md](18-ui-upgrades.md), issue
+[#65](https://github.com/alehatsman/teleport/issues/65)). `teleport ui upgrade` consumes
+it; nothing else does, and an install that never runs that command never sees it.
+
 ## Embedding the web UI (`embedded-web` feature)
 
-`daemon/src/main.rs` already resolves the SPA assets to serve at `/` from a `--web-dist`
-path (default `web/dist`, relative to cwd), falling back to API-only when that path
-isn't a directory ([08](08-packaging.md#build-pipeline)). That's right for local dev
-(`npm run dev` never touches this path) and wrong for a binary someone drops in
-`~/.local/bin` with nothing next to it.
+`daemon/src/web_assets.rs` resolves the SPA assets to serve at `/` — an explicit
+`--web-dist` first, then the `<data_dir>/web/current` slot
+([18](18-ui-upgrades.md#the-slot)), falling back to API-only when neither is a
+directory ([08](08-packaging.md#build-pipeline)). That's right for local dev
+(`npm run dev` never touches either path) and for an upgraded install, and wrong for a
+binary someone drops in `~/.local/bin` with nothing next to it — which is what the
+embedded bundle below is for.
 
 Fix: a new, **optional** `embedded-web` cargo feature. Off by default — `cargo build`,
 `cargo test`, `cargo clippy` in CI and local dev are unaffected and never need
@@ -68,11 +82,12 @@ Fix: a new, **optional** `embedded-web` cargo feature. Off by default — `cargo
   `daemon/Cargo.toml`) into the binary at compile time. The release workflow runs
   `npm run build` in `web/` *before* `cargo build --release --features embedded-web`, so
   the folder is populated when the macro reads it.
-- `api.rs`'s `spa_fallback` keeps disk-backed `--web-dist` as the first check (so
-  `--web-dist` still overrides an embedded build for local testing against a fresh `npm
-  run build` without a rebuild). Only when `state.web_dist` is `None` **and** the feature
-  is compiled in does it serve from the embedded bundle instead of falling through to
-  `route_not_found`.
+- `api.rs`'s `spa_fallback` keeps the disk paths as the first check (so `--web-dist`
+  still overrides an embedded build for local testing against a fresh `npm run build`
+  without a rebuild, and an upgraded slot overrides it without a new binary). Only when
+  `state.web.resolve()` is `None` **and** the feature is compiled in does it serve from
+  the embedded bundle instead of falling through to `route_not_found`. That resolution
+  happens per request, not at startup ([18](18-ui-upgrades.md#resolution-is-per-request-not-per-process)).
 - Missing `web/dist` at compile time with the feature on is a **build failure**, not a
   silently-empty bundle — the release workflow must fail loudly rather than ship a
   `teleportd` with no UI.

@@ -61,6 +61,14 @@ ulid               = "1"
 # HTTP client for the sessions/presets/kill surface (04) -- same crate,
 # version and TLS feature choice as desktop/src-tauri's copy.
 reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# `teleport ui upgrade` (docs/18-ui-upgrades.md): fetch a release tarball,
+# check it against the release's own checksums.txt, unpack it into the slot.
+# Three small, boring crates rather than shelling out to `tar` -- the
+# extraction rules (regular files only, nothing that escapes the staging
+# directory) have to be enforced entry by entry, which a subprocess can't do.
+sha2               = "0.10"
+flate2             = "1"
+tar                = "0.4"
 
 # rust-quality — canonical lint block.
 #
