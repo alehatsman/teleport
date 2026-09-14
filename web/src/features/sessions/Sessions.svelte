@@ -431,6 +431,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    /* The title is the flex item built to absorb a narrow viewport -- it
+       ellipsizes (see `.sessions__title`). These are two buttons with
+       nowrap labels and a 44px touch floor: shrinking them just overflows
+       their own box, which is exactly what a phone-width header did once
+       this group gained a second button. */
+    flex-shrink: 0;
   }
 
   /* Square, so the glyph sits centred rather than in a text-width pill; the
