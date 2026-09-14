@@ -89,6 +89,7 @@ pub struct AppState {
     pub bound_port: u16,
     /// `WebAuthn` instances, RP policy and in-flight ceremonies
     /// (docs/17-passkey-login.md).
+    #[cfg(unix)]
     pub passkeys: crate::auth_routes::PasskeyState,
 }
 
@@ -278,7 +279,7 @@ const CSP_DIRECTIVES: &[&str] = &[
 /// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
 /// router `main.rs` serves and `tests/support` boots for in-process tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route(
@@ -290,11 +291,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/presets", get(list_presets))
         .route("/api/v1/browse", get(browse))
         .route("/api/v1/shutdown", post(shutdown))
-        .route("/api/v1/ws-ticket", post(create_ws_ticket))
-        // docs/17-passkey-login.md#api-surface. `status` and the two
-        // `login/*` routes are unauthenticated by necessity -- a client has
-        // no credential before it logs in -- but every one of these is
-        // Origin-checked inside its handler, unlike `/health`.
+        .route("/api/v1/ws-ticket", post(create_ws_ticket));
+
+    // docs/17-passkey-login.md#api-surface. `status` and the two `login/*`
+    // routes are unauthenticated by necessity -- a client has no credential
+    // before it logs in -- but every one of these is Origin-checked inside
+    // its handler, unlike `/health`.
+    //
+    // Absent on Windows, where `webauthn-rs` cannot build (issue #87). The
+    // SPA already handles a `/auth/status` that does not answer: `chooseScreen`
+    // treats a null status as "use the token path", which is exactly right
+    // there (docs/09-frontend.md).
+    #[cfg(unix)]
+    let router = router
         .route("/api/v1/auth/status", get(crate::auth_routes::status))
         .route(
             "/api/v1/auth/passkey/register/start",
@@ -329,7 +338,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/auth/sessions/{id}",
             axum::routing::delete(crate::auth_routes::delete_session),
         )
-        .route("/api/v1/auth/logout", post(crate::auth_routes::logout))
+        .route("/api/v1/auth/logout", post(crate::auth_routes::logout));
+
+    router
         .fallback(spa_fallback)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,

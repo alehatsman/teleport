@@ -62,6 +62,21 @@ Out:
 - Removing or deprecating the bearer token. It is the recovery path and the root of
   trust; it never goes away.
 
+**Unix only, and not by choice.** `webauthn-rs` 0.5.x hard-depends on `openssl` and
+`openssl-sys` — non-optional, no rustls feature — and `openssl-sys` has no prebuilt path
+on Windows, so `daemon (windows-latest)` fails in its build script before reaching a line
+of teleport's code ([#87](https://github.com/alehatsman/teleport/issues/87)). The
+alternative was vendoring a C build into every release, against
+[02-stack-decisions.md](02-stack-decisions.md). So the dependency is declared under
+`[target.'cfg(unix)'.dependencies]`, `auth_routes` is `#[cfg(unix)]`, and a Windows
+daemon simply has no `/api/v1/auth/*` routes.
+
+Nothing about that is a degraded experience by this doc's own terms: the bearer token is
+a first-class, permanently supported credential, and the SPA already renders the token
+path whenever `/auth/status` does not answer (`chooseScreen` treats a null status as
+"use the token", [09-frontend.md](09-frontend.md)). If Windows passkeys are ever wanted,
+#87 is where that decision goes — it is a dependency problem, not a design one.
+
 ## The constraint that shapes everything: RP ID
 
 WebAuthn binds a credential to a **relying party ID** — a registrable domain. Two facts
@@ -111,6 +126,7 @@ always, plus every entry in `allowed_hosts` ([config](#config)). Building it fro
 | Browser at a tailnet/CF host | passkey session token (enroll once per host) | new login screen |
 | Browser at `127.0.0.1` or a LAN IP | bearer token only | UI explains why, links the `localhost` URL |
 | Tauri shell | `<data_dir>/token`, read directly | none |
+| Any browser against a **Windows** daemon | bearer token only | the `/auth/*` routes are absent |
 | CLI / script / native | `Authorization: Bearer <token>` | none |
 
 ## Data model

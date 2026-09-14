@@ -191,11 +191,15 @@ async fn main() -> Result<()> {
     // Built from the port actually bound plus config, before the state it
     // goes into (docs/17-passkey-login.md). One `Webauthn` instance per
     // usable RP ID; an origin that cannot host a passkey simply gets none.
+    // Unix-only: `webauthn-rs` does not build on Windows (issue #87), where
+    // the bearer token is the whole credential story.
+    #[cfg(unix)]
     let passkeys = teleportd::auth_routes::PasskeyState::new(
         bound_addr.port(),
         &config.allowed_origins,
         &config.allowed_hosts,
     );
+    #[cfg(unix)]
     if config.auth_token && config.auth_passkey {
         info!(rp_ids = ?passkeys.policy.rp_ids(), "passkey login available");
     }
@@ -239,6 +243,7 @@ async fn main() -> Result<()> {
         shutdown: Arc::clone(&shutdown_trigger),
         ws_tickets: TicketStore::new(),
         bound_port: bound_addr.port(),
+        #[cfg(unix)]
         passkeys,
     });
     spawn_idle_sweep_task(Arc::clone(&state));
