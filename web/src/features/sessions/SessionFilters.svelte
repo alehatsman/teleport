@@ -63,6 +63,5 @@
   }
   .session-filters__search {
     width: 100%;
-    font-size: 0.9rem;
   }
 </style>
