@@ -5,6 +5,7 @@ import {
   displayAge,
   displayCwd,
   displayOutcome,
+  displayTitle,
   filterSessions,
   needsAttention,
   outcomeFailed,
@@ -126,6 +127,22 @@ describe("displayOutcome / outcomeFailed", () => {
     expect(outcomeFailed(session({ state: "exited", exit_code: null }))).toBe(false)
     expect(outcomeFailed(session({ state: "exited", exit_code: 1 }))).toBe(true)
     expect(outcomeFailed(session({ state: "lost" }))).toBe(true)
+  })
+})
+
+describe("displayTitle", () => {
+  it("prefers the live title over the command", () => {
+    expect(displayTitle(session({ title: "✳ Fix login bug", command: "claude" }), "s1")).toBe(
+      "✳ Fix login bug"
+    )
+  })
+
+  it("falls back to the command with no title", () => {
+    expect(displayTitle(session({ title: null, command: "claude" }), "s1")).toBe("claude")
+  })
+
+  it("falls back to the id with no session record", () => {
+    expect(displayTitle(null, "s1")).toBe("s1")
   })
 })
 
