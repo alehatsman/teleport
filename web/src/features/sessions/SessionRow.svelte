@@ -205,7 +205,12 @@
       {/if}
       <span class="session-row__age" title={new Date(session.created_at_ms).toLocaleString()}>{displayAge(session.created_at_ms, now)}</span>
     </a>
-    {#if !selectMode && isDeletable && session.claude_resume_id}
+    <!-- Not gated on `claude_resume_id`: Claude Code stopped emitting the
+         OSC 8 link that field is read from, so gating on it hid the action
+         on every real session. A claude session can always be resumed --
+         with the exact conversation when the id is known, through Claude
+         Code's own picker for that folder when it isn't (launchRequest.ts). -->
+    {#if !selectMode && isDeletable && (session.claude_resume_id || session.preset === "claude")}
       <button type="button" class="session-row__resume" onclick={() => onResume(session)}>
         ↻ Resume
       </button>

@@ -62,7 +62,10 @@ CREATE TABLE sessions (
     started_at_ms   INTEGER,
     exited_at_ms    INTEGER,
     exit_code       INTEGER,
-    lost_reason     TEXT
+    lost_reason     TEXT,
+
+    title             TEXT,
+    claude_resume_id  TEXT
 );
 
 CREATE TABLE session_events (
@@ -101,6 +104,48 @@ reader loop already scans every byte, so detecting them is a few lines and costs
 nothing. Recording them now means push notifications later are "deliver existing events"
 rather than "add detection to the hot path"
 ([13-native-clients.md](13-native-clients.md#detection-heuristics)).
+
+### Agent-reported metadata
+
+`title` and `claude_resume_id` are read out of the session's own output by
+`session/osc.rs` — an xterm "set window title" sequence (OSC 0/2) and a Claude Code
+resumable-conversation link (OSC 8). Neither is a teleport concept and neither is a
+versioned contract; an agent that stops emitting them just leaves both null
+([04-api-protocol.md](04-api-protocol.md#get-apiv1sessions)).
+
+They are persisted, unlike `last_bell_ms`/`idle_since_ms`, because of **when** they are
+useful. `claude_resume_id` exists to relaunch a conversation whose session can no longer
+be attached to, and the most common way a session reaches that state is a daemon restart
+— an upgrade or a reprovision ([01-architecture.md](01-architecture.md#the-crash-boundary):
+the update row). Held in memory only, the id died in exactly the case it was for, and
+every recovered `lost` session came back as an unlabeled row with no way back into its
+conversation (issue
+[#65](https://github.com/alehatsman/teleport/issues/65)). `title` rides along for the
+same reason at list level: after a restart, "which of these eight is which" needs the
+agent's own summary, and `command` + `cwd` alone do not carry it.
+
+An attention signal answers "does this running session need you *now*" and is worthless
+once the session is closed, which is why those stay live-only. These two are the
+opposite: they matter most after the session is gone.
+
+Write cadence, same discipline as `output_bytes`
+([When `output_bytes` is written](#when-output_bytes-is-written)):
+
+- Never on the per-chunk path. The reader loop records the new value in memory and marks
+  the pair dirty; the write happens from the **existing throttled branch**, at most once
+  per second per session, and only when something actually changed. A program that
+  rewrites its title in a loop costs one write per second, not one per update.
+- Once more when the session reaches `exited`/`lost` through this process, so a final
+  title is not left up to a second stale.
+- A write only ever *sets* a field it has a value for (`COALESCE(?, title)`); it never
+  clears one. A session that emitted a resume id once and never again keeps it.
+- A daemon killed between a change and the next flush loses up to one second of title
+  churn. The resume id does not churn — Claude Code emits it in its banner, once — so in
+  practice the field the restore path depends on is durable well before any restart.
+
+Recovery needs no special case: the columns are ordinary session columns, they survive
+the `running → lost` update untouched, and `GET /api/v1/sessions` serves them from the
+row when there is no live session behind it. No index — nothing queries by either.
 
 **`env` is deliberately absent from the schema.** Agent environments routinely contain
 API keys. Reconnecting a terminal does not require storing them. Store `command`,

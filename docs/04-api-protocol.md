@@ -179,9 +179,21 @@ id (`session_<id>`), pulled from an OSC 8 hyperlink in Claude Code's own banner 
 launching a *new* session with `args: ["--resume", claude_resume_id]` against the
 `claude` preset resumes that exact conversation (docs/11-mvp-plan.md#m8--agent-presets);
 most useful once the session that had it has gone `exited`/`lost` and can't itself be
-attached to anymore. Both are computed in memory only, same as `last_bell_ms`/
-`idle_since_ms` above, and are lost once a session falls out of the in-memory map (GC, or
-a daemon restart) — not persisted, not a `session_events` row, nothing to migrate.
+attached to anymore. Both are computed in memory and **persisted** to the session row
+(docs/05-persistence.md#agent-reported-metadata) — unlike `last_bell_ms`/`idle_since_ms`
+below, which are live-only. The difference is when each is useful: an attention signal
+is meaningless on a closed session, while a resume id is *only* useful on one, and the
+usual way a session closes is the daemon restarting under it. So both survive a restart
+and appear on a recovered `lost` row; only a GC'd session (row deleted outright) loses
+them.
+
+Observed 2026-09-14, and the reason "not a versioned contract" is not a hypothetical:
+**Claude Code 2.1.236 emits the title but no longer emits the resume link at all**, so
+`claude_resume_id` reads `null` on every real session against that build. It degrades
+exactly as designed — no parse error, no broken session — and the UI's restore path does
+not depend on it (docs/09-frontend.md: a bare `claude --resume` opens the CLI's own
+picker for the folder). If a later build brings the link back, the persisted id makes
+the restore exact again with no further change.
 
 **`last_bell_ms` / `idle_since_ms`** (formerly docs/15-open-questions.md's D3;
 docs/13-native-clients.md#detection-heuristics): attention signals, both `null` unless

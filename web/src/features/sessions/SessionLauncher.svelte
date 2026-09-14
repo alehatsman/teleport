@@ -42,6 +42,11 @@
   // `resumeSession` directly here, so it's a plain one-time read rather
   // than a reactive dependency on a prop this component never revisits.
   let resumeSessionId = $state("")
+  // True when the launcher was opened by "Resume" on a closed session.
+  // Kept apart from `resumeSessionId` being non-empty: a restore with no
+  // known id still resumes -- via Claude Code's own picker -- and that is
+  // the common case now (see launchRequest.ts).
+  let resumeRequested = $derived(resumeSession !== null)
   let firstFieldEl: HTMLSelectElement | undefined = $state()
   let showBrowser = $state(false)
 
@@ -97,6 +102,7 @@
         cwd,
         homeDir,
         resumeSessionId,
+        resumeRequested,
       })
       await onLaunch(body)
     } catch (e) {
@@ -136,6 +142,17 @@
   {#if selectedPreset === "claude"}
     <label class="launcher__field">
       Resume session ID (optional)
+      {#if resumeRequested}
+        <!-- A restore with no id in hand is the normal case: Claude Code
+             stopped emitting the link this is read from. Say what Launch
+             will actually do rather than leaving a blank field looking
+             like a failure. -->
+        <span class="launcher__hint">
+          {resumeSessionId
+            ? "Continues this exact conversation."
+            : "Blank — Claude Code will list this folder's conversations to pick from."}
+        </span>
+      {/if}
       <!-- No format validation -- this is Claude Code's own opaque
            conversation id, not something teleport has any business
            parsing. A bad id surfaces as `claude --resume`'s own error,
@@ -227,6 +244,12 @@
   .launcher__field input,
   .launcher__field select {
     color: var(--fg);
+  }
+  /* Sits between the label text and the input, so it reads as part of the
+     label rather than as an error under the field. */
+  .launcher__hint {
+    font-size: 0.78rem;
+    color: var(--muted);
   }
   .launcher__actions {
     display: flex;

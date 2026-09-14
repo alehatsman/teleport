@@ -27,6 +27,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use teleportd::session::IDLE_SWEEP_INTERVAL_MS;
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_teleportd"))
@@ -288,6 +289,129 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
         file_len_after_restart,
         "the full log must be readable after recovery, not truncated"
     );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The restore path (docs/05-persistence.md#agent-reported-metadata, issue
+/// #65): a daemon restart is the *usual* way a session stops being
+/// attachable, so the OSC-reported resume id and title have to be on the
+/// row when the process that saw them is gone. Held in memory only, both
+/// read back `null` on the recovered `lost` session -- and a `null` resume
+/// id is exactly a swarm of agent sessions that can't be brought back.
+#[test]
+fn a_claude_resume_id_and_title_survive_a_sigkilled_daemon() {
+    let data_dir = temp_dir("resume-id-recovery");
+
+    let child = spawn_daemon(&data_dir);
+    let port = read_port(&data_dir);
+    let token = read_token(&data_dir);
+
+    // Claude Code's own banner shape: an OSC 8 resumable-conversation link
+    // and an OSC 0 title, then the session sits there like an idle agent
+    // waiting for a prompt -- the state a reprovision actually catches one
+    // in. `printf` writes both in one go; `sleep` keeps the child alive so
+    // the row is still `running` at the moment of the kill.
+    let script = "printf '\\033]8;id=x;https://claude.ai/code/session_R3STOR3?from=cli\\033\\\\'; \
+                  printf '\\033]0;Fix the login bug\\007'; sleep 120";
+    let create_body = json!({
+        "kind": "claude",
+        "command": "/bin/sh",
+        "args": ["-c", script],
+        "cwd": std::env::temp_dir().to_string_lossy(),
+        "cols": 80,
+        "rows": 24,
+    });
+    let (status, created) = http(port, "POST", "/api/v1/sessions", &token, Some(&create_body));
+    assert_eq!(status, 201, "create failed: {created:?}");
+    let id = created["id"].as_str().expect("id").to_string();
+
+    // Poll the live view until the scanner has seen both -- a fixed sleep
+    // would either flake or be needlessly slow.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, view) = http(port, "GET", &format!("/api/v1/sessions/{id}"), &token, None);
+        if view["claude_resume_id"] == "session_R3STOR3" && view["title"] == "Fix the login bug" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the live session never picked up both OSC values: {view:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The live view above reads memory, which is ahead of the row: the
+    // banner emits both sequences milliseconds apart, so only the first
+    // goes out on the reader thread's leading edge and the second waits for
+    // `Session::flush_agent_meta` on the idle sweep. One sweep interval
+    // plus margin is the honest wait -- a real agent sits idle for minutes
+    // or hours before a reprovision catches it, so this is the tightest
+    // window the contract ever has to survive, not a typical one.
+    std::thread::sleep(Duration::from_millis(IDLE_SWEEP_INTERVAL_MS + 1500));
+
+    #[expect(
+        unsafe_code,
+        reason = "kill(2) via libc; no safe wrapper for signaling an arbitrary pid"
+    )]
+    // SAFETY: sending SIGKILL to a child process this test just spawned and owns.
+    unsafe {
+        libc::kill(
+            libc::pid_t::try_from(child.0.id()).expect("a real OS pid fits pid_t"),
+            libc::SIGKILL,
+        );
+    }
+    let mut child = child;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a process this test owns; nothing to do if it fails"
+    )]
+    let _ = child.0.wait();
+    drop(child);
+    // Same stale-port-file reason as the test above.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort test cleanup; nothing to do if it fails"
+    )]
+    let _ = std::fs::remove_file(data_dir.join("port"));
+
+    let _child2 = spawn_daemon(&data_dir); // KillOnDrop: torn down at the end of the test
+    let port2 = read_port(&data_dir);
+    let token2 = read_token(&data_dir);
+
+    let (status, view) = http(
+        port2,
+        "GET",
+        &format!("/api/v1/sessions/{id}"),
+        &token2,
+        None,
+    );
+    assert_eq!(status, 200, "session unresolvable after restart: {view:?}");
+    assert_eq!(view["state"], "lost", "{view:?}");
+    assert_eq!(
+        view["claude_resume_id"], "session_R3STOR3",
+        "the resume id must come back off the row -- it is the whole restore path: {view:?}"
+    );
+    assert_eq!(
+        view["title"], "Fix the login bug",
+        "the title must come back off the row too: {view:?}"
+    );
+
+    // And through the list, which is what the session UI actually renders.
+    let (status, list) = http(port2, "GET", "/api/v1/sessions", &token2, None);
+    assert_eq!(status, 200);
+    let listed = list["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .expect("the recovered session must be listed")
+        .clone();
+    assert_eq!(listed["claude_resume_id"], "session_R3STOR3", "{listed:?}");
 
     #[expect(
         clippy::let_underscore_must_use,
