@@ -5,6 +5,7 @@
   import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
   import { buildLaunchRequest } from "./launchRequest"
+  import { LOCATION_CHIPS_MAX, type Location } from "./locations"
 
   // The new-session form panel. `cwd`/`selectedPreset`/`customCommand` are
   // owned by Sessions.svelte and bound, not local state here -- they must
@@ -17,7 +18,7 @@
     selectedPreset = $bindable(),
     customCommand = $bindable(),
     presets,
-    recentCwds,
+    locations,
     homeDir,
     resumeSession,
     onLaunch,
@@ -27,7 +28,7 @@
     selectedPreset: string
     customCommand: string
     presets: Preset[]
-    recentCwds: string[]
+    locations: Location[]
     homeDir: string | null
     resumeSession: Session | null
     onLaunch: (req: CreateSessionRequest) => Promise<void>
@@ -49,6 +50,10 @@
   let resumeRequested = $derived(resumeSession !== null)
   let firstFieldEl: HTMLSelectElement | undefined = $state()
   let showBrowser = $state(false)
+  // The inline shortlist. The rest of `locations` stays reachable through
+  // the datalist and the browser; a chip wall taller than the form is not a
+  // shortlist (docs/18-locations.md#stage-1--ranked-labelled-chips).
+  let chipLocations: Location[] = $derived(locations.slice(0, LOCATION_CHIPS_MAX))
 
   onMount(async () => {
     if (resumeSession) {
@@ -58,11 +63,11 @@
       selectedPreset = "claude"
       resumeSessionId = resumeSession.claude_resume_id ?? ""
       cwd = resumeSession.cwd
-    } else if (!cwd && recentCwds[0] !== undefined) {
-      // Prefill with the last-used directory -- typing the same path every
+    } else if (!cwd && locations[0] !== undefined) {
+      // Prefill with the best-ranked directory -- typing the same path every
       // launch is the friction this is meant to remove. Only when empty:
       // never clobber whatever was carried over from an earlier open.
-      cwd = recentCwds[0]
+      cwd = locations[0].path
     }
     await tick()
     firstFieldEl?.focus()
@@ -181,10 +186,13 @@
       />
       <button type="button" class="btn launcher__browse-btn" onclick={openBrowser}>Browse…</button>
     </div>
-    {#if recentCwds.length > 0}
+    {#if locations.length > 0}
+      <!-- Full paths here, not the chips' basename+parent split: this one is
+           a typing aid, and a label you cannot type into the field is no use
+           in it. -->
       <datalist id="recent-cwds">
-        {#each recentCwds as dir (dir)}
-          <option value={dir}></option>
+        {#each locations as loc (loc.path)}
+          <option value={loc.path}></option>
         {/each}
       </datalist>
     {/if}
@@ -192,20 +200,27 @@
   {#if showBrowser}
     <DirectoryBrowser initialPath={cwd || null} onSelect={useBrowsedFolder} onClose={closeBrowser} />
   {/if}
-  {#if recentCwds.length > 0}
+  {#if chipLocations.length > 0}
     <!-- datalist above covers typing; these are for tapping -- a
          datalist's dropdown affordance is inconsistent on mobile
          (docs/09-frontend.md#mobile), and re-typing a path you've
-         already used is exactly the friction this removes. -->
+         already used is exactly the friction this removes. Basename first,
+         parent dimmed behind it: eight full paths under one home directory
+         differ only in the part the ellipsis eats
+         (docs/18-locations.md#what-is-wrong-today). -->
     <div class="launcher__recent">
-      {#each recentCwds as dir (dir)}
+      {#each chipLocations as loc (loc.path)}
         <button
           type="button"
           class="chip launcher__chip"
-          class:chip--active={dir === cwd}
-          onclick={() => (cwd = dir)}
+          class:chip--active={loc.path === cwd}
+          title={loc.path}
+          onclick={() => (cwd = loc.path)}
         >
-          {dir}
+          <span class="launcher__chip-name">{loc.name}</span>
+          {#if loc.parent}
+            <span class="launcher__chip-parent">{loc.parent}</span>
+          {/if}
         </button>
       {/each}
     </div>
@@ -275,11 +290,26 @@
     font-size: 0.85rem;
   }
 
-  /* Element: launcher__chip -- what a recent-cwd .chip (app.css) adds on
-     top of the shared block: a path is monospace and may be long. */
+  /* Element: launcher__chip -- what a location .chip (app.css) adds on top
+     of the shared block: a path is monospace, and it is split into the
+     basename and the directory above it. */
   .launcher__chip {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
     font-family: var(--font-mono);
     max-width: 100%;
+    overflow: hidden;
+  }
+  .launcher__chip-name {
+    color: var(--fg);
+    flex-shrink: 0;
+  }
+  /* The parent is context, not identity: it dims, and it is the part that
+     gets clipped when the chip runs out of room. */
+  .launcher__chip-parent {
+    color: var(--muted);
+    font-size: 0.75rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

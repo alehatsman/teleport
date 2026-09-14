@@ -15,12 +15,8 @@
   import SessionLauncher from "@/features/sessions/SessionLauncher.svelte"
   import SessionList from "@/features/sessions/SessionList.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
-  import {
-    recentCwds as deriveRecentCwds,
-    filterSessions,
-    isActiveStatus,
-    type StatusFilter,
-  } from "./sessionDisplay"
+  import { knownLocations, type Location } from "./locations"
+  import { filterSessions, isActiveStatus, type StatusFilter } from "./sessionDisplay"
 
   let { onOpen }: { onOpen: (id: string) => void } = $props()
 
@@ -143,7 +139,12 @@
   // its own creation, to prefill preset/resume-id/cwd for that one open.
   let resumeSessionForLauncher: Session | null = $state(null)
 
-  let recentCwds: string[] = $derived(deriveRecentCwds(sessions))
+  // Ranked working directories for the launcher. Derived from the session
+  // list already polled -- no extra request, and it re-ranks as `now` ticks
+  // over (docs/18-locations.md#frecency). `pins` is empty until the daemon
+  // side of docs/18-locations.md#pins lands.
+  let pins: string[] = $state([])
+  let locations: Location[] = $derived(knownLocations(sessions, pins, homeDir, now))
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -294,7 +295,7 @@
         bind:selectedPreset
         bind:customCommand
         {presets}
-        {recentCwds}
+        {locations}
         {homeDir}
         resumeSession={resumeSessionForLauncher}
         onLaunch={handleLaunch}

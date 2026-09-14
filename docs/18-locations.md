@@ -66,10 +66,12 @@ as today. The source is therefore bounded by `retain_days`; pins are what surviv
 
 ## Stage 1 — ranked, labelled chips
 
-No new component. `sessionDisplay.ts` grows `knownLocations(sessions, pins, homeDir,
-now): Location[]` and `recentCwds()` is deleted (its single caller and its tests move
-over). `SessionLauncher.svelte` renders each chip as `name` + dimmed `parent`, with the
-full path in `title` for the fine-pointer case.
+No new component. A new module `features/sessions/locations.ts` owns the type, the
+ranking and the matching — not `sessionDisplay.ts`, which is helpers over *one* `Session`
+record, while this is a derived domain of its own with pins and queries in it.
+`recentCwds()` is deleted; its caller and tests move over.
+`SessionLauncher.svelte` renders each chip as `name` + dimmed `parent`, with the full
+path in `title` for the fine-pointer case.
 
 - Cap: **8 chips**. Every pin is shown first; frecency fills the remainder. More than 8
   pins means the tail is only reachable from stage 2's picker — acceptable, and the
@@ -99,7 +101,7 @@ Layout, top to bottom: a search input (autofocused on fine pointers only — see
 `Browse filesystem…` pinned at the bottom, which mounts the existing
 `DirectoryBrowser.svelte` unchanged.
 
-Matching is deliberately dumb and lives in `sessionDisplay.ts` as
+Matching is deliberately dumb and lives in `locations.ts` as
 `matchLocations(locations, query)`:
 
 - Query is lowercased and split on whitespace and `/`.
@@ -197,7 +199,7 @@ the soft keyboard on open covers the list the user came to read.
 | # | Commit | Touches |
 |---|---|---|
 | 1 | `fix(web): stop iOS zooming when a form input is focused` | `app.css`, `SessionFilters.svelte` |
-| 2 | `feat(web): rank launcher locations by frecency` | `sessionDisplay.ts` (+tests), `SessionLauncher.svelte` |
+| 2 | `feat(web): rank launcher locations by frecency` | `locations.ts` (+tests), `sessionDisplay.ts`, `SessionLauncher.svelte` |
 | 3 | `feat(daemon): pinned locations` | `persistence.rs`, `api.rs`, `04-api-protocol.md`, `05-persistence.md` |
 | 4 | `feat(web): searchable location picker` | `LocationPicker.svelte`, `api.ts`, `Sessions.svelte`, `09-frontend.md` |
 
@@ -205,7 +207,7 @@ the soft keyboard on open covers the list the user came to read.
 
 ## Validation
 
-- `knownLocations` / `matchLocations`: unit tests in `sessionDisplay.test.ts` — decay
+- `knownLocations` / `matchLocations`: unit tests in `locations.test.ts` — decay
   ordering (10 launches last week beat 1 yesterday), pins first, pins with no session
   history still listed, cap, tie-break stability, multi-term and `/`-split matching.
 - Pins: `persistence.rs` tests (round trip, re-pin is idempotent, delete-missing is not
