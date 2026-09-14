@@ -190,6 +190,9 @@ pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf
         &config.allowed_origins,
         &config.allowed_hosts,
     );
+    // Cloned before `config` is moved into the state below.
+    let config_origins = config.allowed_origins.clone();
+    let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
         db: None,
@@ -207,6 +210,12 @@ pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf
         web_dist,
         shutdown: Arc::new(tokio::sync::Notify::new()),
         ws_tickets: TicketStore::new(),
+        bound_port: addr.port(),
+        passkeys: teleportd::auth_routes::PasskeyState::new(
+            addr.port(),
+            &config_origins,
+            &config_hosts,
+        ),
     });
 
     let app = teleportd::api::build_router(Arc::clone(&state));

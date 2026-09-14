@@ -13,6 +13,12 @@
 const CLIENT_ID_KEY = "teleport.client_id"
 const CLIENT_NAME_KEY = "teleport.client_name"
 const TOKEN_KEY = "teleport.token"
+// A passkey login session (docs/17-passkey-login.md). Stored separately from
+// the master token rather than overwriting it: the two have different
+// lifetimes, and a user who logs out should fall back to whatever bootstrap
+// credential they already had instead of being locked out of their own
+// daemon.
+const SESSION_TOKEN_KEY = "teleport.session_token"
 
 // `crypto` is exposed only in a secure context (HTTPS, or a localhost
 // origin). Over plain http://<lan-ip> -- the --i-know-what-im-doing path --
@@ -74,11 +80,61 @@ function readOrCreate(store: () => Storage, key: string, create: () => string): 
 export const CLIENT_ID = readOrCreate(() => sessionStorage, CLIENT_ID_KEY, newClientId)
 export const CLIENT_NAME = readOrCreate(() => localStorage, CLIENT_NAME_KEY, defaultClientName)
 
-export function getToken(): string | null {
+function read(key: string): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY)
+    return localStorage.getItem(key)
   } catch {
     return null
+  }
+}
+
+/**
+ * The credential to present, in precedence order
+ * (docs/09-frontend.md#credential-precedence-and-the-login-screen):
+ *
+ * 1. a passkey session token
+ * 2. the master token captured from `?token=`
+ * 3. nothing -- the caller renders the login screen
+ *
+ * A session token wins on purpose. Opening an old bookmarked `?token=` URL
+ * must not silently drop a signed-in browser back to the master credential.
+ * Both are presented identically, as `Authorization: Bearer`; the daemon
+ * tells them apart, not this module.
+ */
+export function getToken(): string | null {
+  return read(SESSION_TOKEN_KEY) ?? read(TOKEN_KEY)
+}
+
+/** Whether a passkey session -- not merely the master token -- is in hand. */
+export function hasSessionToken(): boolean {
+  return read(SESSION_TOKEN_KEY) !== null
+}
+
+/** Whether any credential at all is in hand, for the initial screen choice. */
+export function hasAnyToken(): boolean {
+  return getToken() !== null
+}
+
+export function setSessionToken(token: string): void {
+  try {
+    localStorage.setItem(SESSION_TOKEN_KEY, token)
+  } catch {
+    // Storage blocked: the session lives until this tab closes, which is
+    // degraded but still a working login.
+  }
+}
+
+/**
+ * Drops the passkey session. Deliberately leaves the master token alone --
+ * see `SESSION_TOKEN_KEY`'s comment. Called on an explicit logout and on any
+ * `401`, since a session that the daemon has stopped honouring is worse than
+ * useless: it shadows the master token that might still work.
+ */
+export function clearSessionToken(): void {
+  try {
+    localStorage.removeItem(SESSION_TOKEN_KEY)
+  } catch {
+    // Nothing to do; the next request simply fails again and returns here.
   }
 }
 

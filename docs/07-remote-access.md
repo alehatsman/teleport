@@ -121,6 +121,19 @@ supervision (autossh or a systemd unit), HTTPS termination, and browser-user
 authentication — all of which the other two options give you for free. Document it; do
 not build tooling for it.
 
+## Passkeys are per-hostname
+
+Adding a remote hostname here means enrolling a passkey there **once**, separately from
+the `localhost` one: a WebAuthn credential is bound to its relying-party ID, and no
+configuration merges two origins into one credential
+([06-security.md](06-security.md#an-rp-id-is-a-domain-never-an-ip)). The first visit to a
+new hostname still uses the startup token; after that it is a fingerprint.
+
+A synced provider (1Password, iCloud Keychain, Bitwarden) is worth preferring for exactly
+this reason -- both enrollments then exist on every device you own, so the second one is a
+one-time cost rather than a per-device one. The daemon derives its accepted RP IDs from
+`allowed_hosts` below, so there is no second setting to keep in sync.
+
 ## Daemon configuration surface
 
 ```toml

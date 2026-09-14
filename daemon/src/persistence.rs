@@ -73,6 +73,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
+use crate::auth_store::{AuthCommand, AuthSessionRow, OwnerRow, PasskeyRow};
 use crate::now_ms;
 
 /// A `sessions` row, read back. `args` is `argv_json` already parsed --
@@ -249,6 +250,10 @@ enum Command {
     List {
         reply: oneshot::Sender<Result<Vec<SessionRow>>>,
     },
+    /// Every passkey-login query, in one variant so this enum grows by a
+    /// line rather than fourteen (`auth_store.rs` owns the shape and the
+    /// SQL).
+    Auth(AuthCommand),
     /// `exited`/`lost` rows whose `exited_at_ms` is older than the cutoff --
     /// GC candidates (docs/05-persistence.md#garbage-collection).
     GcCandidates {
@@ -502,11 +507,184 @@ impl Db {
     }
 }
 
+/// Passkey login (docs/17-passkey-login.md). A separate `impl` block from
+/// the session methods above purely for readability -- these go through the
+/// exact same actor, channel and thread. All `async`: the only callers are
+/// `api.rs` handlers and `auth.rs`'s resolve path, both already on the Tokio
+/// executor, and none of this is reachable from the PTY reader thread.
+impl Db {
+    /// The single owner row, or `None` when nothing is enrolled yet --
+    /// which is what `/auth/status` reports as `enrolled: false`.
+    pub async fn owner(&self) -> Result<Option<OwnerRow>> {
+        self.call(|reply| Command::Auth(AuthCommand::OwnerGet { reply }))
+            .await
+    }
+
+    /// Creates the owner on first enrollment and returns it either way.
+    /// A later call's `user_handle` is discarded if a row already exists.
+    pub async fn ensure_owner(
+        &self,
+        user_handle: Vec<u8>,
+        user_name: String,
+        now_ms: i64,
+    ) -> Result<OwnerRow> {
+        self.call(|reply| {
+            Command::Auth(AuthCommand::OwnerEnsure {
+                user_handle,
+                user_name,
+                now_ms,
+                reply,
+            })
+        })
+        .await
+    }
+
+    /// Records a newly enrolled credential. Fails if this
+    /// `(credential_id, rp_id)` pair is already enrolled.
+    pub async fn insert_passkey(&self, row: PasskeyRow) -> Result<()> {
+        self.call(|reply| Command::Auth(AuthCommand::PasskeyInsert { row, reply }))
+            .await
+    }
+
+    /// `None` lists every credential; `Some(rp_id)` scopes to one origin.
+    pub async fn list_passkeys(&self, rp_id: Option<String>) -> Result<Vec<PasskeyRow>> {
+        self.call(|reply| Command::Auth(AuthCommand::PasskeyList { rp_id, reply }))
+            .await
+    }
+
+    /// One credential by its API-facing ULID.
+    pub async fn get_passkey(&self, id: String) -> Result<Option<PasskeyRow>> {
+        self.call(|reply| Command::Auth(AuthCommand::PasskeyGet { id, reply }))
+            .await
+    }
+
+    /// Resolves the credential an assertion names. Scoped by `rp_id`, so a
+    /// credential from another origin can never be found here.
+    pub async fn get_passkey_by_credential_id(
+        &self,
+        credential_id: Vec<u8>,
+        rp_id: String,
+    ) -> Result<Option<PasskeyRow>> {
+        self.call(|reply| {
+            Command::Auth(AuthCommand::PasskeyGetByCredentialId {
+                credential_id,
+                rp_id,
+                reply,
+            })
+        })
+        .await
+    }
+
+    /// `false` means no such row, which `api.rs` turns into a `404`.
+    pub async fn rename_passkey(&self, id: String, label: String) -> Result<bool> {
+        self.call(|reply| Command::Auth(AuthCommand::PasskeyRename { id, label, reply }))
+            .await
+    }
+
+    /// Cascades to every `auth_sessions` row this credential minted.
+    pub async fn delete_passkey(&self, id: String) -> Result<bool> {
+        self.call(|reply| Command::Auth(AuthCommand::PasskeyDelete { id, reply }))
+            .await
+    }
+
+    /// Fire-and-forget: advances the stored signature counter and
+    /// `last_used_ms` after a successful assertion. Dropped with a `warn!`
+    /// if the channel is full rather than making a user who has already
+    /// authenticated wait on disk.
+    pub fn note_passkey_used(&self, id: &str, credential: String, last_used_ms: i64) {
+        if self
+            .tx
+            .try_send(Command::Auth(AuthCommand::PasskeyNoteUsed {
+                id: id.to_string(),
+                credential,
+                last_used_ms,
+            }))
+            .is_err()
+        {
+            warn!(
+                passkey_id = id,
+                "db command channel full or closed; passkey use not recorded"
+            );
+        }
+    }
+
+    /// Mints a login session. `token_sha256` is the hash of the token
+    /// handed to the client; the token itself is never stored.
+    pub async fn insert_auth_session(
+        &self,
+        row: AuthSessionRow,
+        token_sha256: Vec<u8>,
+    ) -> Result<()> {
+        self.call(|reply| {
+            Command::Auth(AuthCommand::SessionInsert {
+                row,
+                token_sha256,
+                reply,
+            })
+        })
+        .await
+    }
+
+    /// The per-request lookup behind `Principal::DeviceToken`. Returns
+    /// `None` for unknown *and* for expired -- expiry is applied in SQL, so
+    /// there is no window in which a caller can forget to check it.
+    pub async fn lookup_auth_session(
+        &self,
+        token_sha256: Vec<u8>,
+        now_ms: i64,
+    ) -> Result<Option<AuthSessionRow>> {
+        self.call(|reply| {
+            Command::Auth(AuthCommand::SessionLookup {
+                token_sha256,
+                now_ms,
+                reply,
+            })
+        })
+        .await
+    }
+
+    /// Every live login session, for the "signed-in devices" list.
+    pub async fn list_auth_sessions(&self) -> Result<Vec<AuthSessionRow>> {
+        self.call(|reply| Command::Auth(AuthCommand::SessionList { reply }))
+            .await
+    }
+
+    /// Revokes one session. `false` means no such row.
+    pub async fn delete_auth_session(&self, id: String) -> Result<bool> {
+        self.call(|reply| Command::Auth(AuthCommand::SessionDelete { id, reply }))
+            .await
+    }
+
+    /// Fire-and-forget, and the caller throttles it to at most hourly per
+    /// session (docs/17-passkey-login.md#session-lifetime).
+    pub fn note_auth_session_seen(&self, id: &str, now_ms: i64) {
+        if self
+            .tx
+            .try_send(Command::Auth(AuthCommand::SessionTouch {
+                id: id.to_string(),
+                now_ms,
+            }))
+            .is_err()
+        {
+            warn!(
+                auth_session_id = id,
+                "db command channel full or closed; last_seen_ms not recorded"
+            );
+        }
+    }
+
+    /// Called by the existing GC task, not a second timer.
+    pub async fn sweep_expired_auth_sessions(&self, now_ms: i64) -> Result<usize> {
+        self.call(|reply| Command::Auth(AuthCommand::SessionSweepExpired { now_ms, reply }))
+            .await
+    }
+}
+
 /// Ordered, additive migrations. `PRAGMA user_version` is the counter: on
 /// open, every migration at an index `>= user_version` runs, then
 /// `user_version` is set to `MIGRATIONS.len()` (docs/05-persistence.md#migrations).
 /// No migration framework, no external tool.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, crate::auth_store::SCHEMA_V3];
 
 const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -799,6 +977,7 @@ fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
             } => {
                 note_agent_meta(conn, &id, title.as_deref(), claude_resume_id.as_deref());
             }
+            Command::Auth(cmd) => crate::auth_store::handle(conn, cmd),
             Command::Delete { id, reply } => {
                 #[expect(
                     clippy::let_underscore_must_use,

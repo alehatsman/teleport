@@ -13,7 +13,9 @@ This file is only the teleport delta: where things live here, and the gate.
 
 [09-frontend.md#structure](../docs/09-frontend.md#structure) has the file tree and the
 component interfaces. Codefort's four layers, UI.md rule 19: `api/`, `ui/`, `shell/`,
-`features/<x>/`. One feature today, `features/sessions/`, holding list and viewer both.
+`features/<x>/`. Two features: `features/sessions/`, holding list and viewer both, and
+`features/auth/`, holding the login screen and the passkey settings panel
+([../docs/17-passkey-login.md](../docs/17-passkey-login.md)).
 `shell/` is empty with a README saying what lands there; `ui/` holds the primitives
 below; do not create a
 third top-level layer, and do not put a component at `src/` root — `App.svelte`,

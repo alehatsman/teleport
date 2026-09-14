@@ -190,3 +190,48 @@ export type ClientMessage =
 
 /** `stream.ts`'s own connection-state machine -- not part of the wire protocol. */
 export type StreamState = "connecting" | "replaying" | "live" | "reconnecting" | "closed"
+
+// --- Passkey login (docs/17-passkey-login.md#api-surface) ---
+
+/** `GET /auth/status`. Drives which of three login screens renders. */
+export interface AuthStatus {
+  /** Whether this origin has a usable relying-party ID at all. */
+  passkey_supported: boolean
+  rp_id: string | null
+  /** Scoped to `rp_id` -- enrolment at another origin does not count here. */
+  enrolled: boolean
+  /** The `localhost` URL to switch to, sent only when unsupported. */
+  token_url_hint: string | null
+}
+
+/** A started ceremony. `options` goes straight to `navigator.credentials`. */
+export interface CeremonyStart<T> {
+  challenge_id: string
+  options: T
+}
+
+/** What a successful assertion mints. Used exactly like the master token. */
+export interface LoginResponse {
+  token: string
+  expires_at_ms: number
+  session_id: string
+}
+
+export interface PasskeySummary {
+  id: string
+  rp_id: string
+  label: string
+  created_at_ms: number
+  last_used_ms: number | null
+}
+
+export interface AuthSessionSummary {
+  id: string
+  passkey_id: string
+  label: string
+  created_at_ms: number
+  expires_at_ms: number
+  last_seen_ms: number
+  /** True for the session making the request. */
+  current: boolean
+}

@@ -42,6 +42,7 @@ struct ConfigFile {
     allowed_origins: Option<Vec<String>>,
     allowed_hosts: Option<Vec<String>>,
     auth_token: Option<bool>,
+    auth_passkey: Option<bool>,
     max_sessions: Option<usize>,
     control_grace_ms: Option<u64>,
     default_tail: Option<u64>,
@@ -66,6 +67,15 @@ pub struct Config {
     /// single-user-machine convenience, not the default
     /// (docs/06-security.md#authentication).
     pub auth_token: bool,
+    /// `false` removes the `/api/v1/auth/*` routes and stops existing
+    /// passkey sessions resolving; the master token still works. The
+    /// emergency off-switch, not a tuning knob
+    /// (docs/17-passkey-login.md#config).
+    ///
+    /// Meaningless when `auth_token` is `false`, which disables all
+    /// authentication -- one flag must never half-disable the other, so
+    /// `auth_routes.rs` requires both.
+    pub auth_passkey: bool,
     /// Refuse to spawn past this many concurrent sessions -- `429`
     /// (docs/06-security.md#process-spawning).
     pub max_sessions: usize,
@@ -92,6 +102,7 @@ impl Default for Config {
             allowed_origins: Vec::new(),
             allowed_hosts: Vec::new(),
             auth_token: true,
+            auth_passkey: true,
             max_sessions: DEFAULT_MAX_SESSIONS,
             control_grace_ms: DEFAULT_CONTROL_GRACE_MS,
             default_tail: DEFAULT_TAIL,
@@ -121,6 +132,7 @@ impl Config {
             allowed_origins: file.allowed_origins.unwrap_or(defaults.allowed_origins),
             allowed_hosts: file.allowed_hosts.unwrap_or(defaults.allowed_hosts),
             auth_token: file.auth_token.unwrap_or(defaults.auth_token),
+            auth_passkey: file.auth_passkey.unwrap_or(defaults.auth_passkey),
             max_sessions: file.max_sessions.unwrap_or(defaults.max_sessions),
             control_grace_ms: file.control_grace_ms.unwrap_or(defaults.control_grace_ms),
             default_tail: file.default_tail.unwrap_or(defaults.default_tail),
