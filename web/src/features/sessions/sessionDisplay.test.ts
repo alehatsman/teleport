@@ -197,8 +197,12 @@ describe("viewerStatus", () => {
 })
 
 describe("resumablePresetIds / canResume", () => {
+  // Spread rather than `resume_args` directly: `exactOptionalPropertyTypes`
+  // distinguishes "absent" from "present and undefined", and absent is the
+  // case being modelled -- a daemon older than the field.
   function preset(id: string, resume_args?: string[]): Preset {
-    return { id, label: id, command: id, args: [], icon: id, resume_args }
+    const base = { id, label: id, command: id, args: [], icon: id }
+    return resume_args === undefined ? base : { ...base, resume_args }
   }
 
   // The rule that used to be `preset === "claude"` spelled out in two
