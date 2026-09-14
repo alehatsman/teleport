@@ -73,6 +73,13 @@ The alternative on the table was vendoring a C build into every release, against
 [02-stack-decisions.md](02-stack-decisions.md). Do not downgrade this dependency to
 "stabilise" it; 0.6 being a `-dev` release is the lesser problem by a wide margin.
 
+One advisory rides along with it, and is ignored on purpose:
+`daemon/.cargo/audit.toml` suppresses **RUSTSEC-2023-0071** (Marvin, a timing sidechannel
+in `rsa`) because it is not reachable here. Marvin is an attack on RSA *private-key*
+operations; a relying party only ever verifies assertions with the authenticator's
+*public* key, and `webauthn-rs-core`'s entire RSA surface is three public-key types. The
+file carries the full reasoning — every other advisory still fails the build.
+
 **Stored credentials are version-specific.** 0.6 serializes `CredentialID` as a byte
 array where 0.5 used a base64 wrapper, so a credential enrolled against 0.5 no longer
 deserializes. This is not a lockout: the login path already skips unreadable rows loudly
