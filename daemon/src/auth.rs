@@ -434,6 +434,10 @@ impl<T> ChallengeStore<T> {
     /// Sweeps expired entries first -- the only cleanup this needs, given a
     /// 60-second TTL. Refuses once [`MAX_CHALLENGES`] live entries remain
     /// *after* that sweep.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a failed CSRNG read must not tell the caller anything beyond 401; the getrandom error has nothing safe to add to an unauthenticated response"
+    )]
     pub fn issue(&self, rp_id: &str, state: T) -> Result<String, AuthError> {
         let mut bytes = [0u8; TICKET_BYTES];
         getrandom::getrandom(&mut bytes).map_err(|_| AuthError::Unauthorized)?;
