@@ -122,11 +122,18 @@
   // phone shrinks a lot (scale can land well under 0.3) -- centering the
   // result is what makes that read as an intentional letterbox instead of a
   // terminal glued into the corner with the rest of the screen looking broken.
+  // No upper cap on scale either: a small PTY (e.g. a session whose
+  // controller had a small window) watched from a big desktop used to sit
+  // at native pixel size, unscaled -- a tiny terminal marooned in a mostly
+  // black viewport. Magnifying it to fill the viewport instead matches what
+  // taking control looks like (fitAddon.fit() also fills the viewport), at
+  // the cost of visibly soft text once scale climbs much past 1 -- an
+  // acceptable trade since it's still read-only.
   function letterbox() {
     if (!term?.element || !wrapperEl) return
     const scaleX = wrapperEl.clientWidth / term.element.scrollWidth
     const scaleY = wrapperEl.clientHeight / term.element.scrollHeight
-    const scale = Math.max(Math.min(scaleX, scaleY, 1), 0.1)
+    const scale = Math.max(Math.min(scaleX, scaleY), 0.1)
     // .terminal__surface (containerEl) is itself a flex container that
     // centers term.element inside its own *unscaled* box (see that block's
     // comment below) -- so term.element already sits pre-offset by
