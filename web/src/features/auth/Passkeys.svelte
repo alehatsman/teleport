@@ -10,6 +10,7 @@
     listPasskeys,
     registerFinish,
     registerStart,
+    renamePasskey,
   } from "@/api/api"
   import type { AuthStatus, PasskeySummary } from "@/api/types"
   import { createCredential, isUserCancellation } from "@/api/webauthn"
@@ -55,6 +56,37 @@
       onChanged?.()
     } catch (e) {
       error = isUserCancellation(e) ? null : describeError(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  // Rename is inline rather than a dialog: the whole edit is one short
+  // string, and a label only matters next to the other labels it has to be
+  // told apart from.
+  let editing = $state<string | null>(null)
+  let draft = $state("")
+
+  function startRename(passkey: PasskeySummary) {
+    editing = passkey.id
+    draft = passkey.label
+  }
+
+  async function commitRename(id: string) {
+    const next = draft.trim()
+    const current = passkeys.find((p) => p.id === id)?.label
+    editing = null
+    // An unchanged or emptied label is a cancel, not a request: the daemon
+    // would reject the empty one, and reporting that as an error blames the
+    // user for closing an edit they never made.
+    if (!next || next === current) return
+    busy = true
+    error = null
+    try {
+      await renamePasskey(id, next)
+      await refresh()
+    } catch (e) {
+      error = describeError(e)
     } finally {
       busy = false
     }
@@ -108,7 +140,31 @@
     <ul class="passkeys__list">
       {#each group as passkey (passkey.id)}
         <li class="passkeys__item">
-          <span class="passkeys__label">{passkey.label}</span>
+          {#if editing === passkey.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="passkeys__input passkeys__input--inline"
+              type="text"
+              bind:value={draft}
+              autofocus
+              onblur={() => commitRename(passkey.id)}
+              onkeydown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur()
+                if (e.key === "Escape") editing = null
+              }}
+              aria-label="Rename {passkey.label}"
+            />
+          {:else}
+            <button
+              class="passkeys__label passkeys__label--edit"
+              type="button"
+              onclick={() => startRename(passkey)}
+              disabled={busy}
+              title="Rename"
+            >
+              {passkey.label}
+            </button>
+          {/if}
           <span class="passkeys__meta">{describeLastUsed(passkey.last_used_ms, Date.now())}</span>
           <button
             class="btn btn--danger"
@@ -200,6 +256,20 @@
   }
 
   .passkeys__label {
+    flex: 1 1 auto;
+  }
+
+  .passkeys__label--edit {
+    padding: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: text;
+  }
+
+  .passkeys__input--inline {
     flex: 1 1 auto;
   }
 

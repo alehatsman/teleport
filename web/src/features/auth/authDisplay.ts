@@ -1,7 +1,7 @@
 // Pure decisions behind the login screens (web/CLAUDE.md: logic with no
 // reactive state is a module, not a component `<script>`).
 
-import type { AuthStatus, PasskeySummary } from "@/api/types"
+import type { AuthSessionSummary, AuthStatus, PasskeySummary } from "@/api/types"
 
 /**
  * Which screen the app renders before anything else
@@ -82,4 +82,31 @@ export function describeLastUsed(lastUsedMs: number | null, now: number): string
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `used ${hours}h ago`
   return `used ${Math.floor(hours / 24)}d ago`
+}
+
+/**
+ * How long a signed-in device has before its session expires, phrased for a
+ * revoke list: the question there is "is this still live, and for how long",
+ * not a precise timestamp. `now` is passed in, never read here.
+ */
+export function describeExpiry(expiresAtMs: number, now: number): string {
+  const minutes = Math.floor((expiresAtMs - now) / 60_000)
+  if (minutes <= 0) return "expired"
+  if (minutes < 60) return `expires in ${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `expires in ${hours}h`
+  return `expires in ${Math.floor(hours / 24)}d`
+}
+
+/**
+ * Signed-in devices, current first and then most-recently-seen. The session
+ * making the request is the one a user is most likely to be looking for --
+ * both to recognize the list and to avoid revoking by accident -- so it never
+ * sorts below a device that happened to check in a moment later.
+ */
+export function sortAuthSessions(sessions: AuthSessionSummary[]): AuthSessionSummary[] {
+  return [...sessions].sort((a, b) => {
+    if (a.current !== b.current) return a.current ? -1 : 1
+    return b.last_seen_ms - a.last_seen_ms
+  })
 }

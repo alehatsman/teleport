@@ -10,6 +10,7 @@
   import { chooseScreen, shouldOfferSetup } from "@/features/auth/authDisplay"
   import Login from "@/features/auth/Login.svelte"
   import Passkeys from "@/features/auth/Passkeys.svelte"
+  import Settings from "@/features/auth/Settings.svelte"
   import Session from "@/features/sessions/Session.svelte"
   import Sessions from "@/features/sessions/Sessions.svelte"
 
@@ -23,6 +24,9 @@
   onDestroy(() => window.removeEventListener("hashchange", onHashChange))
 
   let sessionId = $derived(hash.match(/^#\/sessions\/(.+)$/)?.[1] ?? null)
+  // A route, not a modal: settings is somewhere you navigate to, so the back
+  // button and a shared link both work, same as #/sessions/<id> (issue #72).
+  let showSettings = $derived(hash === "#/settings")
 
   function openSession(id: string) {
     window.location.hash = `#/sessions/${id}`
@@ -30,6 +34,10 @@
 
   function backToList() {
     window.location.hash = "#/"
+  }
+
+  function openSettings() {
+    window.location.hash = "#/settings"
   }
 
   // --- Auth gate (docs/17-passkey-login.md) ---
@@ -61,10 +69,28 @@
     credential = true
     void loadStatus()
   }
+
+  // Sign-out drops the passkey session; the token, if one was ever pasted,
+  // is a separate credential and `hasAnyToken` re-reads it. Re-deriving from
+  // storage rather than assuming `false` keeps a token holder in the app
+  // instead of bouncing them to a login screen they do not need.
+  function onSignedOut() {
+    credential = hasAnyToken()
+    backToList()
+    void loadStatus()
+  }
 </script>
 
 {#if screen !== "app"}
   <Login {status} passkeysUsable={usable} canUsePasskey={screen === "passkey-login"} {onSignedIn} />
+{:else if showSettings}
+  <Settings
+    {status}
+    passkeysUsable={usable}
+    onBack={backToList}
+    onChanged={loadStatus}
+    {onSignedOut}
+  />
 {:else if sessionId}
   <!-- Keyed on sessionId: the hash can go straight from one #/sessions/X to
        another #/sessions/Y without passing back through "#/" (a shared link,
@@ -90,7 +116,7 @@
       {/if}
     </div>
   {/if}
-  <Sessions onOpen={openSession} />
+  <Sessions onOpen={openSession} {openSettings} />
 {/if}
 
 <style>

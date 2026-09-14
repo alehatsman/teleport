@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest"
-import type { AuthStatus, PasskeySummary } from "@/api/types"
+import type { AuthSessionSummary, AuthStatus, PasskeySummary } from "@/api/types"
 import {
   chooseScreen,
+  describeExpiry,
   describeLastUsed,
   groupByRp,
   shouldOfferSetup,
+  sortAuthSessions,
   unsupportedReason,
 } from "./authDisplay"
 
@@ -120,5 +122,63 @@ describe("describeLastUsed", () => {
     expect(describeLastUsed(now - 5 * 60_000, now)).toBe("used 5m ago")
     expect(describeLastUsed(now - 3 * 3_600_000, now)).toBe("used 3h ago")
     expect(describeLastUsed(now - 2 * 86_400_000, now)).toBe("used 2d ago")
+  })
+})
+
+describe("describeExpiry", () => {
+  const now = 1_000_000_000_000
+
+  it("scales the unit with the remaining time", () => {
+    expect(describeExpiry(now + 5 * 60_000, now)).toBe("expires in 5m")
+    expect(describeExpiry(now + 3 * 3_600_000, now)).toBe("expires in 3h")
+    expect(describeExpiry(now + 10 * 86_400_000, now)).toBe("expires in 10d")
+  })
+
+  // A revoke list that says "expires in -4m" reads as a bug, and a session
+  // the daemon will reject anyway must not look live.
+  it("reports an elapsed expiry as expired, never as negative time", () => {
+    expect(describeExpiry(now - 60_000, now)).toBe("expired")
+    expect(describeExpiry(now, now)).toBe("expired")
+  })
+})
+
+describe("sortAuthSessions", () => {
+  function authSession(
+    id: string,
+    overrides: Partial<AuthSessionSummary> = {}
+  ): AuthSessionSummary {
+    return {
+      id,
+      passkey_id: "pk",
+      label: id,
+      created_at_ms: 0,
+      expires_at_ms: 1,
+      last_seen_ms: 0,
+      current: false,
+      ...overrides,
+    }
+  }
+
+  it("puts the current session first even when another was seen more recently", () => {
+    const sorted = sortAuthSessions([
+      authSession("other", { last_seen_ms: 500 }),
+      authSession("mine", { current: true, last_seen_ms: 100 }),
+    ])
+    expect(sorted.map((s) => s.id)).toEqual(["mine", "other"])
+  })
+
+  it("orders the rest most-recently-seen first", () => {
+    const sorted = sortAuthSessions([
+      authSession("old", { last_seen_ms: 100 }),
+      authSession("new", { last_seen_ms: 900 }),
+      authSession("mid", { last_seen_ms: 500 }),
+    ])
+    expect(sorted.map((s) => s.id)).toEqual(["new", "mid", "old"])
+  })
+
+  it("does not mutate its input", () => {
+    const input = [authSession("a", { last_seen_ms: 1 }), authSession("b", { last_seen_ms: 2 })]
+    sortAuthSessions(input)
+    expect(input.map((s) => s.id)).toEqual(["a", "b"])
   })
 })

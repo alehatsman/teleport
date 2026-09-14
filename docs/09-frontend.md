@@ -301,6 +301,29 @@ itself; do not infer support from the origin alone.
 A `401` mid-session returns to the login screen **without losing the current route**, so
 signing back in lands you on the terminal you were already watching.
 
+### Managing credentials after the first one
+
+The setup screen above is a first-run *nudge* -- gated on nothing being enrolled for this
+origin, so it disappears the moment it succeeds. Management lives at its own route,
+`#/settings`, reached from the session-list header and never gated on enrollment state
+(issue [#72](https://github.com/alehatsman/teleport/issues/72): it was reachable exactly
+once, which left four shipped endpoints with no consumer).
+
+A route, not a modal, for the same reason `#/sessions/<id>` is one: the back button and a
+pasted link both have to work. It holds two sections --
+
+- **Passkeys**: enroll, rename in place, remove. The per-origin rule means adding a
+  second credential on an origin you already enrolled is routine, not exotic.
+- **Signed-in devices**: every live passkey session, current first, each revocable. This
+  is the only way to revoke a lost device short of deleting the passkey it signed in
+  with, which takes every other device on that credential down too. Revoking your own
+  session confirms first and then signs out for real, rather than leaving the tab polling
+  `401`s.
+
+Signing out re-derives the credential from storage rather than assuming there is none: a
+user who also holds the master token stays in the app, because that token is a
+permanently supported credential and not a fallback to be cleared.
+
 ## Geometry
 
 There is exactly one PTY size per session and only the controller sets it. Observers
