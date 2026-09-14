@@ -151,6 +151,24 @@ row when there is no live session behind it. No index — nothing queries by eit
 API keys. Reconnecting a terminal does not require storing them. Store `command`,
 `argv_json`, `cwd` and redacted metadata only.
 
+### Auth tables
+
+Three tables back passkey login -- `owner` (exactly one row, `CHECK (id = 1)`),
+`passkeys`, and `auth_sessions`. Columns and constraints are specified in
+[17-passkey-login.md](17-passkey-login.md#data-model); two properties belong here:
+
+- `auth_sessions.token_sha256` is a hash with a `UNIQUE` index. **The session token
+  itself is never stored** -- lookup is an indexed exact match on the hash, which is
+  also why it is neither a table scan nor a timing oracle.
+- `auth_sessions.passkey_id` is `ON DELETE CASCADE` against `passkeys`, which the
+  `foreign_keys = ON` pragma below actually enforces. Deleting a passkey signs out every
+  session it created; that is the meaning of "remove this device."
+
+WebAuthn *challenges* are deliberately **not** here. They live in memory, like WS tickets
+([06-security.md](06-security.md#token-on-the-websocket-upgrade)) -- nothing durable
+should depend on a 60-second credential, and a restart mid-enrollment just means clicking
+the button again.
+
 ## Migrations
 
 `PRAGMA user_version` as the migration counter. Migrations are an ordered `&[&str]`

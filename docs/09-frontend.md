@@ -269,6 +269,38 @@ uses the short-lived, session-scoped ticket that comes back instead
 ([06-security.md](06-security.md#token-on-the-websocket-upgrade), mitigation 2) — the
 long-lived token itself never appears in a `ws://…` URL.
 
+### Credential precedence, and the login screen
+
+With passkeys ([17-passkey-login.md](17-passkey-login.md)) there are two credentials that
+look identical on the wire -- both are `Authorization: Bearer <hex>` -- so `identity.ts`
+needs one rule, applied in this order:
+
+```text
+1. a stored passkey session token   ← preferred; renewable without the startup URL
+2. a ?token= captured from the URL  ← the bootstrap and the recovery path
+3. nothing                          ← render the login screen
+```
+
+A passkey session token supersedes a captured `?token=` rather than the other way round:
+a user who opens an old bookmarked `?token=` URL should not silently drop back to the
+master credential.
+
+The SPA calls `GET /api/v1/auth/status` before rendering and picks one of three screens:
+
+| `status` | Screen |
+|---|---|
+| `passkey_supported && enrolled` | **Sign in with a passkey** -- one button, no username field |
+| `passkey_supported && !enrolled` | **Set up a passkey** -- reachable only once a token already authenticates the caller |
+| `!passkey_supported` | the token path, plus `token_url_hint` as a link: "open this on `localhost` to use a passkey" |
+
+The third row is the one to get right. Never present a passkey button that cannot work
+and let the ceremony fail -- on `127.0.0.1`, on a LAN IP, or in a browser without
+WebAuthn, say *why* and show the URL that does work. Probe `navigator.credentials`
+itself; do not infer support from the origin alone.
+
+A `401` mid-session returns to the login screen **without losing the current route**, so
+signing back in lands you on the terminal you were already watching.
+
 ## Geometry
 
 There is exactly one PTY size per session and only the controller sets it. Observers

@@ -30,6 +30,18 @@ GET    /api/v1/browse
 
 POST   /api/v1/shutdown
 POST   /api/v1/ws-ticket
+
+GET    /api/v1/auth/status
+POST   /api/v1/auth/passkey/register/start
+POST   /api/v1/auth/passkey/register/finish
+POST   /api/v1/auth/passkey/login/start
+POST   /api/v1/auth/passkey/login/finish
+GET    /api/v1/auth/passkeys
+PATCH  /api/v1/auth/passkeys/{id}
+DELETE /api/v1/auth/passkeys/{id}
+GET    /api/v1/auth/sessions
+DELETE /api/v1/auth/sessions/{id}
+POST   /api/v1/auth/logout
 ```
 
 Everything else is the SPA, served from the same origin at `/`.
@@ -328,6 +340,46 @@ in a URL that lands in proxy logs, browser history, or `Referer`. Requires the s
 to exist (`404`, same as every other `{id}`-taking route) and the same Origin check as
 any other mutating route. Issued tickets are in-memory only, per-daemon-process; a
 restart invalidates every outstanding one.
+
+### `/api/v1/auth/*`
+
+Passkey login, specified in full in [17-passkey-login.md](17-passkey-login.md#api-surface).
+Two rules matter at this layer:
+
+- **`GET /auth/status` and the two `login/*` routes are unauthenticated** -- a
+  freshly-loaded SPA has no credential yet and must still learn which screen to render,
+  and the login ceremony is by definition pre-credential.
+- **Every `/auth/*` route, including those three, is Origin-checked.** `/health`'s
+  exemption ([above](#get-apiv1health)) does not extend here: `/health` exists so a
+  desktop shell can probe before holding a credential and returns nothing an attacker
+  wants, whereas these routes mint and revoke credentials.
+
+`GET /auth/status` is the only one a client calls before it has anything:
+
+```json
+{
+  "passkey_supported": true,
+  "rp_id": "localhost",
+  "enrolled": true,
+  "token_url_hint": null
+}
+```
+
+`passkey_supported` is false for any origin whose RP ID would be an IP address or a
+non-trustworthy scheme ([06-security.md](06-security.md#an-rp-id-is-a-domain-never-an-ip));
+`token_url_hint` then carries the `localhost` URL to switch to. `enrolled` is scoped to
+*this* `rp_id` -- a passkey registered at `localhost` does not make a tailnet hostname
+enrolled.
+
+`POST /auth/passkey/login/finish` returns the session credential:
+
+```json
+{ "token": "<hex>", "expires_at_ms": 1789000000000, "session_id": "01K..." }
+```
+
+Presented thereafter as `Authorization: Bearer <token>`, exactly like the master token,
+including on `POST /ws-ticket`. Failed assertions are always `unauthorized` -- the daemon
+never distinguishes "no such credential" from "bad signature" in a response body.
 
 ## WebSocket protocol
 
@@ -740,4 +792,4 @@ error.
 | `session_closing` | input during termination | disable input |
 | `slow_consumer` | queue overflow (WS close 1013) | reconnect with backoff from last offset |
 | `bad_origin` | Origin/Host rejected | hard failure, do not retry |
-| `unauthorized` | missing or invalid credential | prompt for the token / re-pair |
+| `unauthorized` | missing or invalid credential | show the login screen (passkey, else the token) / re-pair |

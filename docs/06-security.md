@@ -163,10 +163,49 @@ Mitigations, in order of preference:
    `?token=` fallback) for a native client that has no ticket flow yet; `stream.ts`
    itself no longer uses it.
 
-A custom username/password system is explicitly out of scope for the MVP
-([11-mvp-plan.md](11-mvp-plan.md#out-of-scope)). When accounts arrive they come from the
-cloud backend — passkeys or OAuth, never hand-rolled passwords
+A custom username/password system is explicitly out of scope
+([11-mvp-plan.md](11-mvp-plan.md#out-of-scope)), and stays out of scope permanently.
+Hand-rolled passwords are not a thing this daemon will ever have. When accounts arrive
+they come from the cloud backend — OAuth or passkeys, never passwords
 ([14-cloud-backend.md](14-cloud-backend.md#what-the-backend-is)).
+
+### Passkeys: a second stage-1/2 credential
+
+Pasting a 64-hex-character token into a phone is the worst part of the remote flow, and
+the fix is the mechanism this doc already named: **passkeys (WebAuthn)**, specified in
+full in [17-passkey-login.md](17-passkey-login.md). It is strictly additive — a second
+way to obtain a credential, not a replacement for the token:
+
+- **The token remains the root of trust.** Enrolling a passkey *requires* an
+  already-authenticated caller, which on a fresh daemon means the `0600` token file.
+  That is what preserves the OS-user boundary above: another OS user on the host cannot
+  enroll, because they cannot read the token.
+- **The token remains the recovery path.** Lose every passkey, lose the vault, wipe the
+  phone — the token still works. There is no lockout state, by construction.
+- A successful assertion issues an opaque **session token** (30-day expiry, `sha256`
+  at rest, revocable), presented as `Authorization: Bearer` exactly like the master
+  token, and resolving to `Principal::DeviceToken`
+  ([12-identity-and-connectivity.md](12-identity-and-connectivity.md#the-principal)).
+- `auth_token = false` disables all authentication, passkeys included. One flag must
+  never half-disable the other.
+
+#### An RP ID is a domain, never an IP
+
+WebAuthn binds every credential to a relying-party ID, which must be a registrable
+domain. Two consequences that are not configurable away:
+
+| Origin | RP ID | Passkeys? |
+|---|---|---|
+| `http://localhost:<port>` | `localhost` | **yes** — trustworthy origin, registrable domain |
+| `http://127.0.0.1:<port>` | — | **no** — an RP ID cannot be an IP address |
+| `https://<host>.ts.net` | `<host>.ts.net` | **yes**, enrolled separately from `localhost` |
+| `http://<lan-ip>:<port>` | — | **no** — not a trustworthy origin |
+| `tauri://localhost` | — | **no** — the shell reads the token file instead |
+
+So the startup URL prints `localhost`, not `127.0.0.1` — the **bind address is
+unchanged**, loopback as always; only the printed string differs. And a credential
+enrolled at one origin cannot authenticate at another, so each remote hostname is
+enrolled once. That is the anti-phishing property working correctly, not a defect.
 
 ## Add a strict Content-Security-Policy
 
@@ -248,6 +287,9 @@ print by accident. Therefore:
 | Internet-wide exposure | Loopback bind; Tailscale Serve (tailnet-only) as default remote path |
 | Forged identity headers | Trust forwarded identity only because the listener is loopback-only |
 | Token theft via timing | Constant-time comparison |
+| Stolen passkey session token | 30-day expiry + revocation per device; deleting a passkey cascades to its sessions ([17](17-passkey-login.md#session-lifetime)) |
+| Cloned authenticator | WebAuthn signature-counter regression check ([17](17-passkey-login.md#edge-cases)) |
+| Another OS user enrolling their own passkey | Enrollment requires an authenticated caller; on a fresh daemon that is the `0600` token |
 | Credential leak via metadata | No `env` column; overrides redacted; never logged |
 | Log exfiltration | `/log` shares live-attach authorization; `0600` files |
 | Command injection | argv array; no shell string construction anywhere |
