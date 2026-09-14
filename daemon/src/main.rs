@@ -149,16 +149,12 @@ async fn main() -> Result<()> {
     write_port_file(&data_dir, bound_addr.port())?;
     info!(addr = %bound_addr, "teleportd listening");
 
+    let url_host = url_host(&bound_addr);
     if config.auth_token {
-        println!(
-            "http://{}:{}/?token={}",
-            bound_addr.ip(),
-            bound_addr.port(),
-            token
-        );
+        println!("http://{}:{}/?token={}", url_host, bound_addr.port(), token);
     } else {
         info!("auth disabled by config");
-        println!("http://{}:{}", bound_addr.ip(), bound_addr.port());
+        println!("http://{}:{}", url_host, bound_addr.port());
     }
 
     let log_limits = LogLimits {
@@ -440,6 +436,33 @@ async fn run_gc_pass(
     }
 }
 
+/// The host to print in the startup URL. A loopback bind prints `localhost`,
+/// not `127.0.0.1`, because **`WebAuthn` refuses an IP address as a
+/// relying-party ID** -- a passkey cannot be enrolled or used on an
+/// IP-literal origin, so the URL a user actually opens has to be the
+/// `localhost` one (docs/06-security.md#an-rp-id-is-a-domain-never-an-ip).
+/// `localhost` is equally a trustworthy origin for the secure-context rules
+/// the rest of the SPA already depends on, so nothing else has to change.
+///
+/// **The bind address is untouched.** This is a display concern only; the
+/// listener is still whatever `--listen` resolved to
+/// (docs/06-security.md#listener).
+///
+/// A non-loopback bind -- the `--i-know-what-im-doing` path -- keeps its
+/// literal address: `localhost` would resolve to the wrong machine entirely
+/// for the remote user that flag exists to serve.
+fn url_host(addr: &SocketAddr) -> String {
+    if addr.ip().is_loopback() {
+        "localhost".to_string()
+    } else if addr.is_ipv6() {
+        // A v6 literal needs brackets to be a legal URL authority; the v4
+        // path below would produce `http://::1:7337`, which is not parseable.
+        format!("[{}]", addr.ip())
+    } else {
+        addr.ip().to_string()
+    }
+}
+
 /// Resolves once Ctrl+C, (Unix only) SIGTERM, or an authenticated
 /// `POST /api/v1/shutdown` (docs/11-mvp-plan.md#m10) is received. The HTTP
 /// trigger exists mainly for Windows, which has no SIGTERM equivalent
@@ -477,4 +500,49 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
         () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn addr(ip: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(
+            ip.parse::<IpAddr>().expect("valid IP literal in test"),
+            port,
+        )
+    }
+
+    #[test]
+    fn loopback_v4_prints_localhost() {
+        // The whole point: an IP literal cannot be a WebAuthn RP ID.
+        assert_eq!(url_host(&addr("127.0.0.1", 7337)), "localhost");
+    }
+
+    #[test]
+    fn any_loopback_v4_address_prints_localhost() {
+        // 127.0.0.0/8 is all loopback, not just .0.1.
+        assert_eq!(url_host(&addr("127.0.0.53", 7337)), "localhost");
+    }
+
+    #[test]
+    fn loopback_v6_prints_localhost() {
+        assert_eq!(
+            url_host(&SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 7337)),
+            "localhost"
+        );
+    }
+
+    #[test]
+    fn non_loopback_v4_keeps_its_literal_address() {
+        // --i-know-what-im-doing: `localhost` would point the remote user at
+        // their own machine.
+        assert_eq!(url_host(&addr("192.168.1.10", 7337)), "192.168.1.10");
+    }
+
+    #[test]
+    fn non_loopback_v6_is_bracketed_so_the_url_parses() {
+        assert_eq!(url_host(&addr("2001:db8::1", 7337)), "[2001:db8::1]");
+    }
 }
