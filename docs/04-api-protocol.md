@@ -109,7 +109,7 @@ every payload later.
 | Field | Required | Rules |
 |---|---|---|
 | `kind` | yes | `"shell"` \| `"agent"` \| `"command"` |
-| `preset` | no | preset id; when present, supplies defaults for `command`/`args`/`env` that explicit fields override |
+| `preset` | no | preset id; when present, supplies defaults for `command`/`args`/`env` that explicit fields override, and is the only way to set `login_shell` (see [`GET /api/v1/presets`](#get-apiv1presets)) |
 | `command` | yes unless a preset supplies it | resolved via `PATH`; must resolve to an existing executable |
 | `args` | no | **array of strings**, never a shell string |
 | `cwd` | yes | must exist and be a directory |
@@ -237,9 +237,9 @@ commands. See [06-security.md](06-security.md).
 ```json
 {
   "presets": [
-    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex" },
-    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude" },
-    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal" }
+    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex", "login_shell": true },
+    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude", "login_shell": true },
+    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal", "login_shell": false }
   ]
 }
 ```
@@ -247,6 +247,31 @@ commands. See [06-security.md](06-security.md).
 Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
 and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
 needed to spawn the first Claude/Codex CLI.**
+
+**`login_shell`** (`#[serde(default)]`, so absent means `false`) runs this preset's
+command through the user's login shell rather than exec'ing it directly — see
+[03-pty-layer.md](03-pty-layer.md#spawn) for the mechanism and why a background-service
+daemon needs it. It is a **preset-only** field: `POST /api/v1/sessions` does not accept
+it, because a caller passing a raw `command` can already ask for `"$SHELL"` itself. Three
+consequences worth stating rather than discovering:
+
+- **The session row keeps the logical command.** `GET /api/v1/sessions` reports
+  `"command": "claude"`, not `/bin/zsh`, and `05-persistence.md`'s `command`/`argv_json`
+  columns store the same. A list that showed `/bin/zsh` for every agent session would be
+  useless, and the columns are display/relaunch metadata — nothing respawns from them
+  (`05-persistence.md#restart-recovery` marks recovered sessions `lost`). A client
+  relaunching a session carries the `preset` id forward, which is what carries
+  `login_shell` with it; a preset-less raw-`command` session never had the flag to lose.
+- **The `422` for an unresolvable executable still holds.** `command` under
+  `login_shell` is resolved by asking the login shell (`$SHELL -lc 'command -v …'`), not
+  by scanning the daemon's own `$PATH` — which is precisely the `$PATH` this flag exists
+  to stop trusting. Costs one extra short-lived shell per create; the alternative, letting
+  the wrapper shell fail with `command not found` inside the PTY, regresses a clean `422`
+  into a session that flickers to `exited` (`#post-apiv1sessions`).
+- **`presets.toml` written before this existed keeps the old behavior.** The field
+  defaults to `false`, and the daemon does not rewrite an existing file
+  (`presets.rs::load_or_create` only generates on first run, deliberately). Turning it on
+  for an already-installed daemon is a one-line edit per preset.
 
 ### `GET /api/v1/browse`
 

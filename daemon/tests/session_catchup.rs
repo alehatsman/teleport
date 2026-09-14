@@ -132,6 +132,7 @@ fn spawn_backlog_then_trickle(
                 env: &[],
                 cols: 80,
                 rows: 24,
+                login_shell: false,
             },
             "shell",
             None,

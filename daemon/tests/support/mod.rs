@@ -244,6 +244,7 @@ pub(crate) fn create_shell_session(
         env: &[],
         cols: 80,
         rows: 24,
+        login_shell: false,
     };
     let session = daemon
         .state

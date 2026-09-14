@@ -453,6 +453,9 @@ async fn create_session(
             ApiError::BadRequest("command is required unless a preset supplies it".to_string())
         })?;
     let args = resolve_args(req.args, preset);
+    // Preset-only, deliberately: a caller passing a raw `command` can already
+    // ask for `"$SHELL"` itself (docs/04-api-protocol.md#get-apiv1presets).
+    let login_shell = preset.is_some_and(|p| p.login_shell);
     let env: Vec<(String, String)> = req.env.into_iter().collect();
     let cwd = PathBuf::from(req.cwd);
     let (cols, rows, kind, preset_id) = (req.cols, req.rows, req.kind, req.preset);
@@ -473,6 +476,7 @@ async fn create_session(
             env: &env,
             cols,
             rows,
+            login_shell,
         };
         state.sessions.create(&spec, kind, preset_id)
     })
@@ -1052,6 +1056,7 @@ mod tests {
             command: "$SHELL".to_string(),
             args: args.iter().map(ToString::to_string).collect(),
             icon: "terminal".to_string(),
+            login_shell: false,
         }
     }
 

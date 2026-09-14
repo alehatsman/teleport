@@ -40,6 +40,7 @@ fn spec<'a>(args: &'a [String], cwd: &'a PathBuf) -> SpawnSpec<'a> {
         env: &[],
         cols: 80,
         rows: 24,
+        login_shell: false,
     }
 }
 

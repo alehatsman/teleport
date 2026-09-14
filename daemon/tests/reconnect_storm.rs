@@ -130,6 +130,7 @@ fn spawn_hot_session(manager: &SessionManager) -> Arc<Session> {
                 env: &[],
                 cols: 80,
                 rows: 24,
+                login_shell: false,
             },
             "shell",
             None,

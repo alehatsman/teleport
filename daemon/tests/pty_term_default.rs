@@ -70,6 +70,7 @@ fn spawn_sh(script: &str, env: &[(String, String)]) -> (pty::SpawnedSession, Rec
         env,
         cols: 80,
         rows: 24,
+        login_shell: false,
     };
     let spawned = pty::spawn(&spec, move |chunk| {
         #[expect(

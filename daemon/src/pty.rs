@@ -146,6 +146,12 @@ pub struct SpawnSpec<'a> {
     /// daemon environment in here -- pass only explicit overrides
     /// (docs/03-pty-layer.md#spawn).
     pub env: &'a [(String, String)],
+    /// Exec `program` *through the user's login shell* rather than directly,
+    /// so it inherits the environment their dotfiles build rather than the
+    /// bare one launchd/systemd hands a background service
+    /// (docs/03-pty-layer.md#spawn). Ignored on Windows, which has no
+    /// login-shell convention.
+    pub login_shell: bool,
     /// Initial PTY size.
     pub cols: u16,
     /// Initial PTY size.
@@ -169,6 +175,61 @@ pub struct SpawnedSession {
     pub pid: Option<u32>,
 }
 
+/// The user's login shell, for [`SpawnSpec::login_shell`] and for the
+/// `"$SHELL"` placeholder `presets.toml` may use as a command
+/// (`presets::Preset::resolved_command`). One resolution, one fallback, one
+/// place -- the two callers were otherwise about to grow their own copies of
+/// the same `var("SHELL")`-or-`/bin/sh` line.
+#[cfg(unix)]
+pub fn login_shell_path() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// Windows has no login shell; this is the interpreter `"$SHELL"` resolves to
+/// there, and [`SpawnSpec::login_shell`] never uses it (see
+/// [`login_shell_wrapper`]).
+#[cfg(windows)]
+pub fn login_shell_path() -> String {
+    std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+}
+
+/// Builds the `(shell, argv)` pair that runs `spec.program` under a login
+/// shell, or `None` when the spec didn't ask for one (or we're on Windows,
+/// which has no login-shell convention -- the flag is ignored rather than an
+/// error, so one `presets.toml` stays portable across a user's machines).
+///
+/// The shell string is the *fixed literal* `exec "$0" "$@"`: no request data
+/// is ever interpolated into shell source, so docs/06-security.md's
+/// argv-array-never-a-shell-string rule still holds. `sh -c script name
+/// args...` binds `name` to `$0` and `args...` to `$@` as separate argv
+/// entries, which `exec` then passes through untouched -- POSIX behaviour
+/// that zsh and bash both implement.
+///
+/// `-l`, not `-i`: a login shell sources the profile files that build the
+/// environment, while an interactive one also loads prompt/completion/plugins
+/// -- startup cost and stray output that has no business in an agent's PTY.
+fn login_shell_wrapper(spec: &SpawnSpec<'_>) -> Option<(String, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        let _ = spec;
+        None
+    }
+    #[cfg(unix)]
+    {
+        if !spec.login_shell {
+            return None;
+        }
+        let mut argv = vec![
+            "-l".to_string(),
+            "-c".to_string(),
+            r#"exec "$0" "$@""#.to_string(),
+            spec.program.to_string(),
+        ];
+        argv.extend_from_slice(spec.args);
+        Some((login_shell_path(), argv))
+    }
+}
+
 /// Spawns `spec` behind a fresh pty and starts the four session threads.
 /// `on_output` runs synchronously on the reader thread for every chunk read
 /// -- see the module-level "M1 scope boundary" note on why, and its
@@ -187,8 +248,15 @@ pub fn spawn(
         })
         .context("openpty")?;
 
-    let mut cmd = CommandBuilder::new(spec.program);
-    cmd.args(spec.args);
+    let mut cmd = if let Some((shell, argv)) = login_shell_wrapper(spec) {
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.args(argv);
+        cmd
+    } else {
+        let mut cmd = CommandBuilder::new(spec.program);
+        cmd.args(spec.args);
+        cmd
+    };
     cmd.cwd(spec.cwd);
     // `CommandBuilder::new` already inherited the daemon's own environment
     // (docs/03-pty-layer.md#spawn), TERM included -- fine for `up.sh`/a
