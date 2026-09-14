@@ -42,6 +42,27 @@ That's it — no separate build step, no config required to start. The web UI le
 open a shell or spawn an agent preset, and the session keeps running whether or not
 anything is attached to watch it.
 
+## Add your own agent
+
+The launcher's presets live in `<data_dir>/presets.toml`, written with the built-in
+defaults on first run. Add an entry and it shows up in the launcher — no rebuild:
+
+```toml
+[[presets]]
+id = "myagent"
+label = "My Agent"
+command = "myagent"
+args = []
+icon = "terminal"
+login_shell = true          # resolve the command through your login shell's PATH
+resume_args = ["--resume"]  # optional: offer "Resume" on a closed session
+```
+
+`resume_args` is the only thing teleport knows about an agent's capabilities — leave it
+out and no Resume action is offered. See
+[docs/04-api-protocol.md](docs/04-api-protocol.md#get-apiv1presets) for the full field
+list.
+
 ## Use over Tailscale (phone/remote)
 
 `teleportd` only binds `127.0.0.1`; Tailscale Serve proxies it to your tailnet over

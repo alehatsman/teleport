@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { Session } from "@/api/types"
+import type { Preset, Session } from "@/api/types"
 import {
   BELL_RECENCY_MS,
+  canResume,
   displayAge,
   displayCwd,
   displayOutcome,
@@ -10,6 +11,7 @@ import {
   needsAttention,
   outcomeFailed,
   recentCwds,
+  resumablePresetIds,
   stateTone,
   viewerStatus,
 } from "./sessionDisplay"
@@ -191,5 +193,38 @@ describe("viewerStatus", () => {
       tone: "warning",
       label: "Lost",
     })
+  })
+})
+
+describe("resumablePresetIds / canResume", () => {
+  function preset(id: string, resume_args?: string[]): Preset {
+    return { id, label: id, command: id, args: [], icon: id, resume_args }
+  }
+
+  // The rule that used to be `preset === "claude"` spelled out in two
+  // components. Which agents resume is presets.toml's business now.
+  it("selects presets by their resume_args, not by id", () => {
+    const ids = resumablePresetIds([
+      preset("claude", ["--resume"]),
+      preset("codex", []),
+      preset("shell"),
+      preset("someagent", ["session", "resume"]),
+    ])
+    expect([...ids].sort()).toEqual(["claude", "someagent"])
+  })
+
+  it("treats an absent resume_args as not resumable, for an older daemon", () => {
+    expect(resumablePresetIds([preset("claude")]).size).toBe(0)
+  })
+
+  it("offers resume only for a closed session on a resumable preset", () => {
+    const resumable = new Set(["claude"])
+    expect(canResume(session({ state: "exited", preset: "claude" }), resumable)).toBe(true)
+    expect(canResume(session({ state: "lost", preset: "claude" }), resumable)).toBe(true)
+    // Still running: there is nothing to resume, the session is right there.
+    expect(canResume(session({ state: "running", preset: "claude" }), resumable)).toBe(false)
+    expect(canResume(session({ state: "exited", preset: "codex" }), resumable)).toBe(false)
+    // A raw command or shell session carries no preset at all.
+    expect(canResume(session({ state: "exited", preset: null }), resumable)).toBe(false)
   })
 })

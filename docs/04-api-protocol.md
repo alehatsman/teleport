@@ -258,9 +258,9 @@ commands. See [06-security.md](06-security.md).
 ```json
 {
   "presets": [
-    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex", "login_shell": true },
-    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude", "login_shell": true },
-    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal", "login_shell": false }
+    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex", "login_shell": true, "resume_args": [] },
+    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude", "login_shell": true, "resume_args": ["--resume"] },
+    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal", "login_shell": false, "resume_args": [] }
   ]
 }
 ```
@@ -268,6 +268,27 @@ commands. See [06-security.md](06-security.md).
 Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
 and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
 needed to spawn the first Claude/Codex CLI.**
+
+**`resume_args`** (`#[serde(default)]`, so absent means empty) is how this agent is told
+to continue a previous conversation — `["--resume"]` for Claude Code. Empty means "this
+agent has no resume story", and the UI offers no Resume action for it.
+
+This field is the **seam that keeps harness knowledge out of the daemon and off the
+wire.** teleport does not know that `claude` resumes and `codex` may not; it reads that
+from `presets.toml`. Before it existed, the web UI compared `preset === "claude"` in two
+components and built `["--resume", id]` inline — adding a second agent meant editing
+TypeScript. Now it means editing a TOML file you own.
+
+Rules, so the field stays boring:
+
+- **teleport never parses a session id.** When one is known it is appended to
+  `resume_args` verbatim; it is the agent's own opaque identifier, and a bad one surfaces
+  as that agent's own error in the terminal, exactly as running it by hand would.
+- **Any argv shape works.** `["--resume"]`, `["session", "resume"]` — nothing assumes a
+  single flag, so an agent that resumes via a subcommand needs no code change.
+- **`codex` ships with an empty `resume_args`** deliberately, rather than a guess: a
+  wrong flag turns a Resume button into a failed spawn. Adding it is one line in
+  `presets.toml` once someone verifies it against a real binary.
 
 **`login_shell`** (`#[serde(default)]`, so absent means `false`) runs this preset's
 command through the user's login shell rather than exec'ing it directly — see

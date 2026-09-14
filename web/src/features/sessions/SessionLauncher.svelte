@@ -36,16 +36,23 @@
 
   let launching = $state(false)
   let launchError: string | null = $state(null)
-  // claude-preset-only, and deliberately not persisted/prefilled like cwd
-  // is -- resuming is a one-off action on a specific launch, not a habit
-  // worth remembering for the next one. Set in onMount below, not from
-  // `resumeSession` directly here, so it's a plain one-time read rather
-  // than a reactive dependency on a prop this component never revisits.
+  // Shown only for a preset that declares `resume_args`, and deliberately
+  // not persisted/prefilled like cwd is -- resuming is a one-off action on
+  // a specific launch, not a habit worth remembering for the next one. Set
+  // in onMount below, not from `resumeSession` directly here, so it's a
+  // plain one-time read rather than a reactive dependency on a prop this
+  // component never revisits.
   let resumeSessionId = $state("")
+  // The selected preset's own resume argv, empty when it has none. The one
+  // thing this form knows about an agent's capabilities -- no preset id is
+  // compared anywhere in this component (docs/04-api-protocol.md
+  // #get-apiv1presets).
+  let resumeArgs = $derived(presets.find((p) => p.id === selectedPreset)?.resume_args ?? [])
+  let canResume = $derived(resumeArgs.length > 0)
   // True when the launcher was opened by "Resume" on a closed session.
   // Kept apart from `resumeSessionId` being non-empty: a restore with no
-  // known id still resumes -- via Claude Code's own picker -- and that is
-  // the common case now (see launchRequest.ts).
+  // known id still resumes -- via the agent's own picker -- and that is the
+  // common case now (see launchRequest.ts).
   let resumeRequested = $derived(resumeSession !== null)
   let firstFieldEl: HTMLSelectElement | undefined = $state()
   let showBrowser = $state(false)
@@ -55,7 +62,10 @@
       // "Resume this" on a closed session -- set up to continue that exact
       // conversation instead of making the id be found, copied, and pasted
       // in by hand.
-      selectedPreset = "claude"
+      // The preset the closed session actually ran under, not a hardcoded
+      // one: "Resume" is only offered for a session whose preset declares
+      // `resume_args` (SessionRow), so this is always resumable.
+      if (resumeSession.preset) selectedPreset = resumeSession.preset
       resumeSessionId = resumeSession.claude_resume_id ?? ""
       cwd = resumeSession.cwd
     } else if (!cwd && recentCwds[0] !== undefined) {
@@ -101,6 +111,7 @@
         customCommand,
         cwd,
         homeDir,
+        resumeArgs,
         resumeSessionId,
         resumeRequested,
       })
@@ -139,24 +150,24 @@
       />
     </label>
   {/if}
-  {#if selectedPreset === "claude"}
+  {#if canResume}
     <label class="launcher__field">
       Resume session ID (optional)
       {#if resumeRequested}
         <!-- A restore with no id in hand is the normal case: Claude Code
-             stopped emitting the link this is read from. Say what Launch
-             will actually do rather than leaving a blank field looking
-             like a failure. -->
+             stopped emitting the link this is read from (#69). Say what
+             Launch will actually do rather than leaving a blank field
+             looking like a failure. -->
         <span class="launcher__hint">
           {resumeSessionId
             ? "Continues this exact conversation."
-            : "Blank — Claude Code will list this folder's conversations to pick from."}
+            : "Blank — the agent will list this folder's conversations to pick from."}
         </span>
       {/if}
-      <!-- No format validation -- this is Claude Code's own opaque
+      <!-- No format validation -- this is the agent's own opaque
            conversation id, not something teleport has any business
-           parsing. A bad id surfaces as `claude --resume`'s own error,
-           same as any other agent CLI failure, right in the terminal. -->
+           parsing. A bad id surfaces as the agent's own error, right in
+           the terminal, same as any other CLI failure. -->
       <input
         type="text"
         bind:value={resumeSessionId}

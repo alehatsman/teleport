@@ -1213,6 +1213,7 @@ mod tests {
             args: args.iter().map(ToString::to_string).collect(),
             icon: "terminal".to_string(),
             login_shell: false,
+            resume_args: vec![],
         }
     }
 
