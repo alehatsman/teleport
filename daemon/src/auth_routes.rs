@@ -392,9 +392,11 @@ pub async fn register_start(
     // Excluding what is already enrolled turns "add a passkey twice" into a
     // clear message from the authenticator instead of a UNIQUE violation
     // after the user has already touched their key.
+    // No `.into()`: 0.6's `CredentialID` is a plain `Vec<u8>`, where 0.5's
+    // was a `Base64UrlSafeData` wrapper.
     let exclude = existing
         .iter()
-        .map(|row| row.credential_id.clone().into())
+        .map(|row| row.credential_id.clone())
         .collect();
 
     let (options, registration) = webauthn
@@ -452,7 +454,7 @@ pub async fn register_finish(
 
     let row = PasskeyRow {
         id: ulid::Ulid::new().to_string(),
-        credential_id: passkey.cred_id().as_ref().to_vec(),
+        credential_id: AsRef::<[u8]>::as_ref(passkey.cred_id()).to_vec(),
         rp_id: rp_id.to_string(),
         credential: serde_json::to_string(&passkey)
             .map_err(|e| ApiError::Internal(format!("serializing the credential: {e}")))?,
@@ -561,7 +563,10 @@ pub async fn login_finish(
         })?;
 
     let row = db
-        .get_passkey_by_credential_id(result.cred_id().as_ref().to_vec(), rp_id.to_string())
+        .get_passkey_by_credential_id(
+            AsRef::<[u8]>::as_ref(result.cred_id()).to_vec(),
+            rp_id.to_string(),
+        )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::Auth(crate::auth::AuthError::Unauthorized))?;

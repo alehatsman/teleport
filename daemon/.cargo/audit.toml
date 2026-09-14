@@ -1,0 +1,25 @@
+# cargo-audit config. Separate from `config.toml`, which rq/sync-config owns --
+# do not fold these into that file, it gets overwritten.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 -- "Marvin Attack: potential key recovery through
+    # timing sidechannels" in `rsa`, reached via
+    # webauthn-rs -> webauthn-rs-core. Medium (5.9), and `cargo audit` says
+    # "No fixed upgrade is available": there is no patched 0.9.x, and 0.10 is
+    # itself a prerelease.
+    #
+    # Not reachable in this usage. Marvin is a timing sidechannel in RSA
+    # *private-key* operations -- decryption and signing. teleport is a
+    # WebAuthn relying party: it verifies assertions with the authenticator's
+    # *public* key and never holds, generates or signs with an RSA private
+    # key. webauthn-rs-core's entire RSA surface is three public-key types
+    # (`RS256PublicKey`, `RS256Signature`, `RS256VerifyingKey`, its
+    # `crypto.rs`); there is no `RsaPrivateKey`, `.decrypt()`, `SigningKey`
+    # or key generation anywhere in the crate.
+    #
+    # Revisit when `rsa` 0.10 is released and webauthn-rs picks it up. Until
+    # then this is an ignore with a reason, not a blanket audit suppression --
+    # every other advisory still fails the build (issue #87).
+    "RUSTSEC-2023-0071",
+]
