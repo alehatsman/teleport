@@ -89,7 +89,6 @@ pub struct AppState {
     pub bound_port: u16,
     /// `WebAuthn` instances, RP policy and in-flight ceremonies
     /// (docs/17-passkey-login.md).
-    #[cfg(unix)]
     pub passkeys: crate::auth_routes::PasskeyState,
 }
 
@@ -302,7 +301,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // SPA already handles a `/auth/status` that does not answer: `chooseScreen`
     // treats a null status as "use the token path", which is exactly right
     // there (docs/09-frontend.md).
-    #[cfg(unix)]
     let router = router
         .route("/api/v1/auth/status", get(crate::auth_routes::status))
         .route(

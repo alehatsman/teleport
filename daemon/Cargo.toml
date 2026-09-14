@@ -58,20 +58,19 @@ rust-embed         = { version = "8", optional = true }
 mime_guess         = { version = "2", optional = true }
 url = "2.5.8"
 uuid = "1.26.1"
+# 0.6, not 0.5, specifically for the crypto backend: 0.5.x hard-depends on
+# `openssl` + `openssl-sys`, which has no prebuilt path on Windows and does
+# not cross-compile to x86_64 macOS, and broke both (issue #87). 0.6 is pure
+# Rust -- p256/ecdsa/rsa/aes-gcm, zero `-sys` crates in the whole subtree --
+# so the dependency is portable everywhere teleport ships and needs no C
+# toolchain to build or to cross-check.
+webauthn-rs = "0.6.1-dev"
 
 [features]
 embedded-web = ["dep:rust-embed", "dep:mime_guess"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# Unix-only, and not by preference: `webauthn-rs` hard-depends on `openssl` +
-# `openssl-sys` (non-optional, no rustls feature in 0.5.x), which has no
-# prebuilt path on Windows -- `daemon (windows-latest)` fails in openssl-sys'
-# build script before it reaches a line of our code (issue #87). Rather than
-# vendor a C build into every release, passkey login is a unix capability and
-# a Windows daemon serves the token path only, which docs/17-passkey-login.md
-# already treats as a first-class credential that never goes away.
-webauthn-rs = "0.5"
 
 [dev-dependencies]
 # M4 protocol tests drive `api.rs` in-process (no real socket needed) and

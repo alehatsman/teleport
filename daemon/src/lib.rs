@@ -6,7 +6,6 @@
 
 pub mod api;
 pub mod auth;
-#[cfg(unix)]
 pub mod auth_routes;
 pub mod auth_store;
 pub mod config;

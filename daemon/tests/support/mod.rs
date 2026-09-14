@@ -198,12 +198,8 @@ pub(crate) async fn spawn_with_web_assets(config: Config, web: WebAssets) -> Dae
         &config.allowed_origins,
         &config.allowed_hosts,
     );
-    // Cloned before `config` is moved into the state below. Only the
-    // passkey field reads them, so they follow its `cfg` (issue #87) --
-    // otherwise `-D warnings` trips on two unused bindings on Windows.
-    #[cfg(unix)]
+    // Cloned before `config` is moved into the state below.
     let config_origins = config.allowed_origins.clone();
-    #[cfg(unix)]
     let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
@@ -223,11 +219,6 @@ pub(crate) async fn spawn_with_web_assets(config: Config, web: WebAssets) -> Dae
         shutdown: Arc::new(tokio::sync::Notify::new()),
         ws_tickets: TicketStore::new(),
         bound_port: addr.port(),
-        // Unix-only, same as the field (issue #87): `webauthn-rs` does not
-        // build on Windows, so a Windows test harness boots a daemon whose
-        // only credential is the bearer token -- which is what a Windows
-        // daemon actually is.
-        #[cfg(unix)]
         passkeys: teleportd::auth_routes::PasskeyState::new(
             addr.port(),
             &config_origins,
