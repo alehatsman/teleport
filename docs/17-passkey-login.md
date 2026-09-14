@@ -1,8 +1,9 @@
 # 17 — Passkey login (single owner)
 
-> **Status: proposed.** No code exists for this. This doc is the spec; it must be
-> accepted, and the deltas in [Doc deltas](#doc-deltas) applied, before `auth.rs`
-> or `web/` change.
+> **Status: implemented**, except the manual browser matrix in
+> [Validation](#validation), which needs a real authenticator and a human.
+> Steps 1-6 of [Implementation order](#implementation-order) have landed on
+> `feat/passkey-login`.
 
 ## Why this doc exists at all
 
@@ -123,7 +124,7 @@ treatment as `state.db` already has.
 -- The single owner. Exactly zero or one row; enforced by the CHECK.
 CREATE TABLE IF NOT EXISTS owner (
   id            INTEGER PRIMARY KEY CHECK (id = 1),
-  user_handle   BLOB    NOT NULL,   -- 32 random bytes, the WebAuthn user handle
+  user_handle   BLOB    NOT NULL,   -- a UUID's 16 bytes; see the note below
   user_name     TEXT    NOT NULL,   -- what the user typed; shown in the authenticator
   created_at_ms INTEGER NOT NULL
 );
@@ -154,6 +155,13 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 
 `ON DELETE CASCADE`: deleting a passkey signs out every session it created. That is the
 expected meaning of "remove this device."
+
+> **Deviation from this spec's first draft, recorded rather than made silently:**
+> `user_handle` was specified as 32 random bytes and is implemented as a UUID's 16.
+> `webauthn-rs` types the user handle as a `Uuid` at its API boundary, so 32 arbitrary
+> bytes could not be passed through without a cast that would have to be undone on every
+> read. The handle is still opaque, still generated once, still never reused -- only
+> narrower.
 
 **In-memory only, never persisted:** the registration and authentication *challenges*.
 Same shape and same reasoning as `TicketStore` (`auth.rs`) — a 60-second, single-use
