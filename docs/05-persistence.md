@@ -113,6 +113,12 @@ resumable-conversation link (OSC 8). Neither is a teleport concept and neither i
 versioned contract; an agent that stops emitting them just leaves both null
 ([04-api-protocol.md](04-api-protocol.md#get-apiv1sessions)).
 
+> **That caveat has already come true for one of them.** Claude Code stopped emitting
+> the OSC 8 link as of v2.1.236, so `claude_resume_id` is null on every session it
+> produces today; only the OSC 0 title still arrives. Degrading to null rather than
+> breaking is the design working, but the field now carries nothing — see
+> [#69](https://github.com/alehatsman/teleport/issues/69) for removing the read path.
+
 They are persisted, unlike `last_bell_ms`/`idle_since_ms`, because of **when** they are
 useful. `claude_resume_id` exists to relaunch a conversation whose session can no longer
 be attached to, and the most common way a session reaches that state is a daemon restart
@@ -128,20 +134,29 @@ An attention signal answers "does this running session need you *now*" and is wo
 once the session is closed, which is why those stay live-only. These two are the
 opposite: they matter most after the session is gone.
 
-Write cadence, same discipline as `output_bytes`
-([When `output_bytes` is written](#when-output_bytes-is-written)):
+Write cadence — the same *discipline* as `output_bytes`
+([When `output_bytes` is written](#when-output_bytes-is-written)), but not the same
+clock:
 
 - Never on the per-chunk path. The reader loop records the new value in memory and marks
-  the pair dirty; the write happens from the **existing throttled branch**, at most once
-  per second per session, and only when something actually changed. A program that
-  rewrites its title in a loop costs one write per second, not one per update.
+  the pair dirty; the write happens on **its own leading-edge throttle**, not
+  `output_bytes`'. The first change after a quiet second goes out immediately; further
+  changes inside that second are deferred. A program that rewrites its title in a loop
+  costs one write per second, not one per update.
+- Leading edge, not trailing, and on a separate clock from `output_bytes` deliberately.
+  An agent's banner emits its sequences milliseconds apart, so a trailing throttle
+  persisted the first and dropped the rest; and `output_bytes`' clock restarts on every
+  write, which on a busy session would defer every OSC change by up to a second.
+- Whatever the throttle defers is picked up by `Session::flush_agent_meta`, called from
+  the 5-second idle sweep (`main.rs`) and from the exit listener. This is the case that
+  matters: a banner that sets a title and then goes quiet produces no further output to
+  carry a deferred write, and an idle agent is exactly the state a restart catches.
 - Once more when the session reaches `exited`/`lost` through this process, so a final
-  title is not left up to a second stale.
+  title is not left stale.
 - A write only ever *sets* a field it has a value for (`COALESCE(?, title)`); it never
-  clears one. A session that emitted a resume id once and never again keeps it.
+  clears one. A session that emitted a value once and never again keeps it.
 - A daemon killed between a change and the next flush loses up to one second of title
-  churn. The resume id does not churn — Claude Code emits it in its banner, once — so in
-  practice the field the restore path depends on is durable well before any restart.
+  churn — bounded by the idle sweep above, which flushes a quiet session regardless.
 
 Recovery needs no special case: the columns are ordinary session columns, they survive
 the `running → lost` update untouched, and `GET /api/v1/sessions` serves them from the
