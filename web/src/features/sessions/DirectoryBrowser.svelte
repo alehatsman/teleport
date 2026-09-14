@@ -129,6 +129,11 @@
     overflow-y: auto;
   }
   .browser__entry {
+    /* Flex items default to flex-shrink: 1, so once the entries overflow
+       the list's max-height the column squashes every row instead of
+       scrolling -- text gets clipped mid-glyph. Rows keep their natural
+       height; .browser__list scrolls. */
+    flex: none;
     text-align: left;
     background: none;
     border: none;
@@ -153,6 +158,7 @@
     color: var(--muted);
   }
   .browser__empty {
+    flex: none;
     margin: 0;
     padding: 0.45rem 0.6rem;
     color: var(--muted);
