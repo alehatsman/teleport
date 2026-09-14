@@ -93,16 +93,25 @@ impl FromRequestParts<Arc<AppState>> for Principal {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> {
-        let query_token = query_param(parts.uri.query().unwrap_or(""), "token");
-        std::future::ready(
-            auth::resolve(
+        // Owned, not borrowed: the async block below takes `parts` with it,
+        // and a `&str` into `parts.uri` cannot survive that move.
+        let query_token = query_param(parts.uri.query().unwrap_or(""), "token").map(str::to_string);
+        // Async, unlike the rest of this extractor's history, because a
+        // passkey session is a SQLite lookup
+        // (docs/17-passkey-login.md#principal-mapping). The master-token
+        // path inside still never awaits anything.
+        async move {
+            auth::resolve_with_sessions(
                 &parts.headers,
-                query_token,
+                query_token.as_deref(),
                 &state.token,
                 state.config.auth_token,
+                state.db.as_ref(),
+                crate::now_ms(),
             )
-            .map_err(ApiError::from),
-        )
+            .await
+            .map_err(ApiError::from)
+        }
     }
 }
 
