@@ -42,6 +42,7 @@ fn spec<'a>(args: &'a [String], cols: u16, rows: u16, cwd: &'a PathBuf) -> Spawn
         env: &[],
         cols,
         rows,
+        login_shell: false,
     }
 }
 

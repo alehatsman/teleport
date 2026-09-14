@@ -2,6 +2,7 @@
   import type { Session } from "@/api/types"
   import StatusDot from "@/ui/StatusDot.svelte"
   import {
+    canResume,
     displayAge,
     displayCwd,
     displayOutcome,
@@ -44,6 +45,7 @@
     selectMode,
     selected,
     onToggleSelected,
+    resumablePresets,
   }: {
     session: Session
     now: number
@@ -57,6 +59,8 @@
     selectMode: boolean
     selected: boolean
     onToggleSelected: (id: string) => void
+    /** Preset ids the daemon says can resume (`resume_args`). */
+    resumablePresets: Set<string>
   } = $props()
 
   let isDeletable = $derived(session.state === "exited" || session.state === "lost")
@@ -205,12 +209,11 @@
       {/if}
       <span class="session-row__age" title={new Date(session.created_at_ms).toLocaleString()}>{displayAge(session.created_at_ms, now)}</span>
     </a>
-    <!-- Not gated on `claude_resume_id`: Claude Code stopped emitting the
-         OSC 8 link that field is read from, so gating on it hid the action
-         on every real session. A claude session can always be resumed --
-         with the exact conversation when the id is known, through Claude
-         Code's own picker for that folder when it isn't (launchRequest.ts). -->
-    {#if !selectMode && isDeletable && (session.claude_resume_id || session.preset === "claude")}
+    <!-- Gated on the preset's own `resume_args`, not on a preset id and not
+         on `claude_resume_id`: the id is null on every real session (#69),
+         and which agents can resume is presets.toml's business, not this
+         component's (sessionDisplay.ts#canResume). -->
+    {#if !selectMode && canResume(session, resumablePresets)}
       <button type="button" class="session-row__resume" onclick={() => onResume(session)}>
         ↻ Resume
       </button>

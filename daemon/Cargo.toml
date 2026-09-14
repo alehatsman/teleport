@@ -46,11 +46,25 @@ parking_lot        = "0.12"
 # getrandom/getentropy/BCryptGenRandom; already pulled in transitively via
 # ulid -> rand.
 getrandom          = "0.2"
+# Session tokens are stored as sha256(token), never as the token
+# (docs/17-passkey-login.md#data-model). RustCrypto, no_std-capable, no
+# transitive weight worth arguing about -- and hand-rolling SHA-256 to save a
+# dependency would be a strictly worse trade.
+sha2               = "0.10"
 # `embedded-web` feature only (docs/16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature).
 # Optional so a normal `cargo build`/`cargo test` never needs `web/dist` to
 # exist and never bakes in stale assets.
 rust-embed         = { version = "8", optional = true }
 mime_guess         = { version = "2", optional = true }
+url = "2.5.8"
+uuid = "1.26.1"
+# 0.6, not 0.5, specifically for the crypto backend: 0.5.x hard-depends on
+# `openssl` + `openssl-sys`, which has no prebuilt path on Windows and does
+# not cross-compile to x86_64 macOS, and broke both (issue #87). 0.6 is pure
+# Rust -- p256/ecdsa/rsa/aes-gcm, zero `-sys` crates in the whole subtree --
+# so the dependency is portable everywhere teleport ships and needs no C
+# toolchain to build or to cross-check.
+webauthn-rs = "0.6.1-dev"
 
 [features]
 embedded-web = ["dep:rust-embed", "dep:mime_guess"]

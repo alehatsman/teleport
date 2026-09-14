@@ -3,7 +3,7 @@
   import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
   import { type Location, matchLocations } from "./locations"
 
-  // The full location list, searchable (docs/18-locations.md#stage-2--the-location-picker).
+  // The full location list, searchable (docs/19-locations.md#stage-2--the-location-picker).
   // The launcher's chips are this list's top few hoisted inline; everything
   // past them is only reachable here. `Browse filesystem…` at the bottom
   // swaps in the existing DirectoryBrowser for a directory teleport has

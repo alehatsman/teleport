@@ -5,7 +5,7 @@
 // read from Date.now() here -- a $derived over a non-reactive clock never
 // re-runs, and a pure function that reads the clock is not pure.
 
-import type { Session, SessionState, StreamState } from "@/api/types"
+import type { Preset, Session, SessionState, StreamState } from "@/api/types"
 import type { DotTone } from "@/ui/tones"
 
 export const STATE_LABELS: Record<SessionState, string> = {
@@ -149,4 +149,18 @@ export function viewerStatus(session: Session | null, connection: StreamState): 
   else if (unsettled) tone = "warning-strong"
   else if (!ended && connection === "live") tone = "success"
   return { ended, unsettled, tone, label }
+}
+
+// Which presets can be resumed at all, by id. Derived from the daemon's own
+// `resume_args` rather than a hardcoded "claude" (docs/04-api-protocol.md
+// #get-apiv1presets): teleport has no opinion about which agent has a
+// conversation to go back to, presets.toml does.
+export function resumablePresetIds(presets: Preset[]): Set<string> {
+  return new Set(presets.filter((p) => (p.resume_args?.length ?? 0) > 0).map((p) => p.id))
+}
+
+/** A closed session whose preset declares a way to resume. */
+export function canResume(s: Session, resumable: Set<string>): boolean {
+  if (s.state !== "exited" && s.state !== "lost") return false
+  return s.preset !== null && resumable.has(s.preset)
 }

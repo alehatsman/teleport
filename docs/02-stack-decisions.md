@@ -108,6 +108,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid             = "1"
 clap             = { version = "4", features = ["derive"] }
 directories      = "5"
+webauthn-rs      = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc             = "0.2"
@@ -116,6 +117,15 @@ libc             = "0.2"
 `rusqlite` uses `bundled` so there is no system SQLite dependency at install time.
 `libc` is Unix-only and exists solely for signal delivery in `pty.rs`
 ([03-pty-layer.md](03-pty-layer.md#termination)).
+
+`webauthn-rs` is the largest single addition to this list and the hardest to justify
+against the rule above, so here is the justification: the alternative is hand-writing
+CBOR parsing, COSE key decoding, attestation-statement verification, and ES256/RS256
+signature checking over authenticator data — the cryptographic verification of the
+credential that guards a remote-code-execution control plane
+([06-security.md](06-security.md)). Taking the dependency is the *conservative* choice
+here; writing it ourselves is the adventurous one. Used only by `auth.rs` and the
+`/api/v1/auth/*` routes ([17-passkey-login.md](17-passkey-login.md)).
 
 ### API-shape gotchas for the pinned versions
 

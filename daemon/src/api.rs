@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -35,6 +36,7 @@ use crate::persistence;
 use crate::presets::Preset;
 use crate::pty::SpawnSpec;
 use crate::session::{CreateError, SessionId, SessionManager, SessionState};
+use crate::web_assets::WebAssets;
 
 /// Shared state for every handler and the WS upgrade. One instance, built
 /// once in `main.rs` after the listener is bound (the origin policy needs
@@ -64,10 +66,12 @@ pub struct AppState {
     pub started_at: Instant,
     /// `env!("CARGO_PKG_VERSION")`, reported by `/health`.
     pub version: &'static str,
-    /// Built SPA assets (`web/dist`), if found at startup
-    /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
-    /// run dev` workflow, which never touches this router at all.
-    pub web_dist: Option<PathBuf>,
+    /// Where the SPA is served from -- an explicit `--web-dist` or the
+    /// `<data_dir>/web/current` slot, resolved per request so a
+    /// `teleport ui upgrade` takes effect without a restart
+    /// (docs/18-ui-upgrades.md). Serves nothing during the normal `npm run
+    /// dev` workflow, which never touches this router at all.
+    pub web: WebAssets,
     /// Wakes `main.rs`'s `shutdown_signal()` future
     /// (docs/11-mvp-plan.md#m10) -- the one trigger `POST /api/v1/shutdown`
     /// has. `notify_one()` is remembered even if no one is waiting yet
@@ -78,6 +82,14 @@ pub struct AppState {
     /// Backs `POST /api/v1/ws-ticket` and `ws.rs`'s upgrade check
     /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
     pub ws_tickets: auth::TicketStore,
+    /// The port the listener actually bound, for the `localhost` URL
+    /// `/auth/status` hands back when an origin cannot do `WebAuthn`. Never
+    /// the 7337 default -- the fallback is ephemeral
+    /// (docs/08-packaging.md#port-discovery--do-not-hardcode-7337).
+    pub bound_port: u16,
+    /// `WebAuthn` instances, RP policy and in-flight ceremonies
+    /// (docs/17-passkey-login.md).
+    pub passkeys: crate::auth_routes::PasskeyState,
 }
 
 /// `Principal` as an axum extractor: every handler that needs one declares
@@ -93,16 +105,25 @@ impl FromRequestParts<Arc<AppState>> for Principal {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> {
-        let query_token = query_param(parts.uri.query().unwrap_or(""), "token");
-        std::future::ready(
-            auth::resolve(
+        // Owned, not borrowed: the async block below takes `parts` with it,
+        // and a `&str` into `parts.uri` cannot survive that move.
+        let query_token = query_param(parts.uri.query().unwrap_or(""), "token").map(str::to_string);
+        // Async, unlike the rest of this extractor's history, because a
+        // passkey session is a SQLite lookup
+        // (docs/17-passkey-login.md#principal-mapping). The master-token
+        // path inside still never awaits anything.
+        async move {
+            auth::resolve_with_sessions(
                 &parts.headers,
-                query_token,
+                query_token.as_deref(),
                 &state.token,
                 state.config.auth_token,
+                state.db.as_ref(),
+                crate::now_ms(),
             )
-            .map_err(ApiError::from),
-        )
+            .await
+            .map_err(ApiError::from)
+        }
     }
 }
 
@@ -143,7 +164,7 @@ pub enum ApiError {
     /// for the status-code mapping.
     Create(CreateError),
     /// The pin cap is reached and the request would add one more -- `429`
-    /// (docs/18-locations.md#post-apiv1locationspins).
+    /// (docs/19-locations.md#post-apiv1locationspins).
     PinsFull(usize),
     /// A route that needs the metadata store on a daemon that has none.
     /// Only reachable in test fixtures built without a `Db`
@@ -237,7 +258,7 @@ impl IntoResponse for ApiError {
 /// Applies [`OriginPolicy::check`] -- callers use this only on mutating
 /// routes and the WS upgrade (docs/06-security.md#browser-origin-defense);
 /// GET routes rely on [`Principal`] alone.
-fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     state.origin_policy.check(headers).map_err(ApiError::from)
 }
 
@@ -274,7 +295,7 @@ const CSP_DIRECTIVES: &[&str] = &[
 /// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
 /// router `main.rs` serves and `tests/support` boots for in-process tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route(
@@ -290,7 +311,55 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(list_pins).post(add_pin).delete(remove_pin),
         )
         .route("/api/v1/shutdown", post(shutdown))
-        .route("/api/v1/ws-ticket", post(create_ws_ticket))
+        .route("/api/v1/ws-ticket", post(create_ws_ticket));
+
+    // docs/17-passkey-login.md#api-surface. `status` and the two `login/*`
+    // routes are unauthenticated by necessity -- a client has no credential
+    // before it logs in -- but every one of these is Origin-checked inside
+    // its handler, unlike `/health`.
+    //
+    // Absent on Windows, where `webauthn-rs` cannot build (issue #87). The
+    // SPA already handles a `/auth/status` that does not answer: `chooseScreen`
+    // treats a null status as "use the token path", which is exactly right
+    // there (docs/09-frontend.md).
+    let router = router
+        .route("/api/v1/auth/status", get(crate::auth_routes::status))
+        .route(
+            "/api/v1/auth/passkey/register/start",
+            post(crate::auth_routes::register_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/register/finish",
+            post(crate::auth_routes::register_finish),
+        )
+        .route(
+            "/api/v1/auth/passkey/login/start",
+            post(crate::auth_routes::login_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/login/finish",
+            post(crate::auth_routes::login_finish),
+        )
+        .route(
+            "/api/v1/auth/passkeys",
+            get(crate::auth_routes::list_passkeys),
+        )
+        .route(
+            "/api/v1/auth/passkeys/{id}",
+            axum::routing::patch(crate::auth_routes::rename_passkey)
+                .delete(crate::auth_routes::delete_passkey),
+        )
+        .route(
+            "/api/v1/auth/sessions",
+            get(crate::auth_routes::list_sessions),
+        )
+        .route(
+            "/api/v1/auth/sessions/{id}",
+            axum::routing::delete(crate::auth_routes::delete_session),
+        )
+        .route("/api/v1/auth/logout", post(crate::auth_routes::logout));
+
+    router
         .fallback(spa_fallback)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -307,32 +376,76 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// checked explicitly and kept a `404` -- a typo'd API path must never
 /// silently come back as an HTML document.
 ///
-/// Disk-backed `--web-dist` is checked first and, when present, always wins
-/// -- even in an `embedded-web` build -- so pointing `--web-dist` at a fresh
-/// `npm run build` output overrides the baked-in bundle without a daemon
-/// rebuild. Only when no disk path is configured does an `embedded-web`
-/// build serve its embedded bundle instead of falling through to `404`
+/// Two exceptions to "unknown paths get the shell", both from
+/// docs/18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained:
+/// a request under `/assets/` is a content-addressed file or a `404`,
+/// never the shell (an HTML body with `Content-Type: text/html` where a
+/// tab expected JavaScript fails with a parse error that says nothing
+/// about what happened), and a miss there is retried against the retained
+/// version directories, which is how a tab that predates the last UI flip
+/// keeps working.
+///
+/// Where the files come from is [`WebAssets`]'s decision, made here rather
+/// than at startup. Disk always wins over the embedded bundle -- even in an
+/// `embedded-web` build -- so a fresh `npm run build` or a flipped slot
+/// overrides a baked-in bundle with no daemon rebuild and no restart
 /// (docs/16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature).
 async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    if req.uri().path().starts_with("/api/") {
+    let path = req.uri().path().to_owned();
+    if path.starts_with("/api/") {
         return route_not_found();
     }
-    let Some(dist) = &state.web_dist else {
+    let is_asset = path.starts_with(ASSETS_PREFIX);
+
+    // Rebuilt per attempt: the retained-version retry needs a second
+    // request, and `ServeDir` consumes the one it's given. Every request
+    // reaching this fallback is a bodyless GET/HEAD, so dropping the body
+    // loses nothing.
+    let (parts, _body) = req.into_parts();
+    let rebuild = || Request::from_parts(parts.clone(), Body::empty());
+
+    let Some(dir) = state.web.resolve() else {
         #[cfg(feature = "embedded-web")]
         {
-            return crate::embedded_web::serve(req.uri().path());
+            return with_cache_headers(&path, crate::embedded_web::serve(&path, is_asset));
         }
         #[cfg(not(feature = "embedded-web"))]
         {
             return route_not_found();
         }
     };
-    // `.fallback()`, not `.not_found_service()` -- the latter pins the
-    // response to `404` even when the shell serves fine, and a client
-    // deep-linking to `/sessions/<id>` on reload must get a normal `200`,
-    // not a `404` with an HTML body.
-    let serve_dir = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
-    match serve_dir.oneshot(req).await {
+
+    let mut response = serve_from(&dir, rebuild(), is_asset).await;
+    if is_asset && response.status() == StatusCode::NOT_FOUND {
+        for retained in state.web.retained_versions() {
+            let retry = serve_from(&retained, rebuild(), true).await;
+            if retry.status() != StatusCode::NOT_FOUND {
+                response = retry;
+                break;
+            }
+        }
+    }
+    with_cache_headers(&path, response)
+}
+
+/// One `ServeDir` pass over `dir`. `shell_fallback` is off for `/assets/*`
+/// so a miss stays a `404` the caller can retry elsewhere.
+///
+/// `.fallback()`, not `.not_found_service()` -- the latter pins the
+/// response to `404` even when the shell serves fine, and a client
+/// deep-linking to `/sessions/<id>` on reload must get a normal `200`,
+/// not a `404` with an HTML body.
+async fn serve_from(dir: &std::path::Path, req: Request, is_asset: bool) -> Response {
+    let serve_dir = ServeDir::new(dir);
+    let result = if is_asset {
+        serve_dir.oneshot(req).await
+    } else {
+        serve_dir
+            .fallback(ServeFile::new(dir.join("index.html")))
+            .oneshot(req)
+            .await
+    };
+    match result {
         Ok(response) => response.into_response(),
         // `ServeDir`'s service is infallible; kept as a match, not an
         // `.unwrap()`, so a future tower-http version that adds a real error
@@ -340,6 +453,44 @@ async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Respo
         Err(err) => match err {},
     }
 }
+
+/// Cache policy for the UI (docs/18-ui-upgrades.md#cache-headers).
+/// Mandatory, not polish: without it a browser applies *heuristic* caching
+/// to `index.html`, which pins a tab to the old bundle for hours and makes
+/// a correct slot flip look broken.
+///
+/// `/assets/*` is content-hashed by Vite -- a given URL's bytes never
+/// change -- so it is cached forever. The shell names those hashed assets
+/// and must be revalidated every load; it is recognised by the response's
+/// own content type rather than by path, which catches both `/` and every
+/// client-side route the fallback answers with the shell.
+fn with_cache_headers(path: &str, mut response: Response) -> Response {
+    let value = if path.starts_with(ASSETS_PREFIX) {
+        IMMUTABLE_CACHE
+    } else if is_html(&response) {
+        // "revalidate", not "don't store" -- the 304 is cheap.
+        "no-cache"
+    } else {
+        return response;
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    response
+}
+
+fn is_html(response: &Response) -> bool {
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"))
+}
+
+/// Vite's output directory for content-hashed chunks, and the only path
+/// prefix with special rules here.
+pub(crate) const ASSETS_PREFIX: &str = "/assets/";
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// A `404` for a path that is neither a registered route nor (when a
 /// `web_dist` is configured) a client-side one the SPA shell can take over.
@@ -406,6 +557,11 @@ async fn health(
         if let Some(base) = directories::BaseDirs::new() {
             body["home_dir"] = base.home_dir().display().to_string().into();
         }
+        // The release tag the UI slot points at, so the app can offer a
+        // reload when it changes under a running daemon
+        // (docs/18-ui-upgrades.md#telling-the-client). `null` when serving
+        // the embedded bundle or an explicit `--web-dist`.
+        body["ui_version"] = state.web.ui_version().into();
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
         body["sessions_running"] = state
@@ -474,6 +630,9 @@ async fn create_session(
             ApiError::BadRequest("command is required unless a preset supplies it".to_string())
         })?;
     let args = resolve_args(req.args, preset);
+    // Preset-only, deliberately: a caller passing a raw `command` can already
+    // ask for `"$SHELL"` itself (docs/04-api-protocol.md#get-apiv1presets).
+    let login_shell = preset.is_some_and(|p| p.login_shell);
     let env: Vec<(String, String)> = req.env.into_iter().collect();
     let cwd = PathBuf::from(req.cwd);
     let (cols, rows, kind, preset_id) = (req.cols, req.rows, req.kind, req.preset);
@@ -494,6 +653,7 @@ async fn create_session(
             env: &env,
             cols,
             rows,
+            login_shell,
         };
         state.sessions.create(&spec, kind, preset_id)
     })
@@ -939,7 +1099,7 @@ fn resolve_dir(requested: &std::path::Path) -> Result<PathBuf, ApiError> {
 }
 
 /// Refuse to pin past this many directories
-/// (docs/18-locations.md#post-apiv1locationspins). A shortlist that needs
+/// (docs/19-locations.md#post-apiv1locationspins). A shortlist that needs
 /// scrolling has stopped being one; the frecency ranking already covers the
 /// long tail.
 pub const MAX_PINS: usize = 50;
@@ -969,7 +1129,7 @@ struct PinQuery {
     path: String,
 }
 
-/// `GET /api/v1/locations/pins` (docs/18-locations.md#get-apiv1locationspins).
+/// `GET /api/v1/locations/pins` (docs/19-locations.md#get-apiv1locationspins).
 /// A pinned directory that has since been deleted or unmounted is still
 /// listed -- hiding it would leave no way to unpin it, and launching there
 /// fails with the same `422` any other bad `cwd` gets.
@@ -1170,6 +1330,8 @@ mod tests {
             command: "$SHELL".to_string(),
             args: args.iter().map(ToString::to_string).collect(),
             icon: "terminal".to_string(),
+            login_shell: false,
+            resume_args: vec![],
         }
     }
 

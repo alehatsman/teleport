@@ -29,6 +29,28 @@ pub struct Preset {
     pub args: Vec<String>,
     /// Icon name for the UI; not interpreted here.
     pub icon: String,
+    /// How this agent is told to resume a previous conversation, e.g.
+    /// `["--resume"]`. Empty means "this agent has no resume story", and the
+    /// UI offers no Resume action for it -- which is the honest default for
+    /// an arbitrary command.
+    ///
+    /// This is the seam that keeps harness knowledge out of the daemon and
+    /// out of the wire: teleport does not know that `claude` resumes and a
+    /// plain shell does not, it reads that from `presets.toml`
+    /// (docs/11-mvp-plan.md#m8--agent-presets anticipated exactly this
+    /// field). A session id, when one is known, is appended to these args by
+    /// the caller; teleport never parses or validates it -- it is the
+    /// agent's own opaque identifier.
+    #[serde(default)]
+    pub resume_args: Vec<String>,
+    /// Run `command` through the user's login shell instead of exec'ing it
+    /// directly, so it inherits the environment their dotfiles build
+    /// (docs/03-pty-layer.md#spawn, docs/04-api-protocol.md#get-apiv1presets).
+    /// `#[serde(default)]` -- a `presets.toml` written before this field
+    /// existed keeps the old direct-exec behavior rather than silently
+    /// changing how every already-installed daemon spawns its agents.
+    #[serde(default)]
+    pub login_shell: bool,
 }
 
 impl Preset {
@@ -38,14 +60,7 @@ impl Preset {
     /// this, but no built-in or realistic custom preset needs one.
     pub fn resolved_command(&self) -> String {
         if self.command == "$SHELL" {
-            #[cfg(unix)]
-            {
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-            }
-            #[cfg(windows)]
-            {
-                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-            }
+            crate::pty::login_shell_path()
         } else {
             self.command.clone()
         }
@@ -60,12 +75,21 @@ struct PresetsFile {
 
 fn default_presets() -> Vec<Preset> {
     vec![
+        // The two agent presets exec a named binary with no shell in
+        // between, so they -- and only they -- need `login_shell` to see the
+        // user's real PATH/EDITOR/LANG (docs/03-pty-layer.md#spawn).
         Preset {
             id: "codex".to_string(),
             label: "Codex".to_string(),
             command: "codex".to_string(),
             args: vec![],
             icon: "codex".to_string(),
+            login_shell: true,
+            // Deliberately empty rather than guessed: codex's resume flag
+            // has not been verified against a real binary here, and a wrong
+            // flag turns a Resume button into a failed spawn. One line in
+            // `presets.toml` adds it once someone checks.
+            resume_args: vec![],
         },
         Preset {
             id: "claude".to_string(),
@@ -73,13 +97,24 @@ fn default_presets() -> Vec<Preset> {
             command: "claude".to_string(),
             args: vec![],
             icon: "claude".to_string(),
+            login_shell: true,
+            // Bare `--resume` opens Claude Code's own picker for the folder.
+            // Deliberately not `--continue`, which resumes the most recent
+            // conversation in the directory without asking -- restoring four
+            // agents that worked in one repo would point all four at one
+            // conversation.
+            resume_args: vec!["--resume".to_string()],
         },
+        // Already `$SHELL -l`: wrapping a login shell in a login shell buys
+        // nothing but a second startup.
         Preset {
             id: "shell".to_string(),
             label: "Shell".to_string(),
             command: "$SHELL".to_string(),
             args: vec!["-l".to_string()],
             icon: "terminal".to_string(),
+            login_shell: false,
+            resume_args: vec![],
         },
     ]
 }
@@ -217,6 +252,51 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A `presets.toml` written before `login_shell` existed must keep the
+    /// old direct-exec behavior rather than silently changing how an
+    /// already-installed daemon spawns its agents -- the field is
+    /// `#[serde(default)]` for exactly this
+    /// (docs/04-api-protocol.md#get-apiv1presets).
+    #[test]
+    fn an_older_presets_file_without_login_shell_defaults_to_off() {
+        let dir = scratch_dir("no-login-shell-field");
+        fs::write(
+            dir.join("presets.toml"),
+            r#"
+            [[presets]]
+            id = "claude"
+            label = "Claude Code"
+            command = "claude"
+            icon = "claude"
+            "#,
+        )
+        .unwrap();
+        let presets = load_or_create(&dir).expect("load");
+        assert!(!presets[0].login_shell);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The agent presets exec a named binary with no shell in between, so
+    /// they are the ones that need the login shell; `shell` is already
+    /// `$SHELL -l` and wrapping it would buy nothing but a second startup.
+    #[test]
+    fn only_the_agent_defaults_ask_for_a_login_shell() {
+        let by_id = |id: &str| -> bool {
+            default_presets()
+                .into_iter()
+                .find(|p| p.id == id)
+                .expect("built-in preset")
+                .login_shell
+        };
+        assert!(by_id("claude"));
+        assert!(by_id("codex"));
+        assert!(!by_id("shell"));
+    }
+
     /// M4 review: same gap, for an empty command.
     #[test]
     fn an_empty_preset_command_is_a_clean_error() {
@@ -254,6 +334,8 @@ mod tests {
             command: "$SHELL".into(),
             args: vec![],
             icon: "terminal".into(),
+            login_shell: false,
+            resume_args: vec![],
         };
         std::env::set_var("SHELL", "/bin/zsh");
         assert_eq!(preset.resolved_command(), "/bin/zsh");

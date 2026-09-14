@@ -1527,6 +1527,12 @@ custom VPN or TLS stack
 custom username/password system
 ```
 
+`custom username/password system` is the one entry on this list that is **permanent**,
+not deferred. It was requested and refused; passkeys shipped instead, which is what
+[06-security.md](06-security.md#authentication) always said the mechanism should be. See
+[17-passkey-login.md](17-passkey-login.md) — that feature adds no password, so this line
+needs no amendment.
+
 If one of these is proposed mid-build, it goes on the list for v2 — the session-broker
 design in [01-architecture.md](01-architecture.md#if-daemon-crash-survival-ever-becomes-a-requirement)
 is the sketch for the first of them.
@@ -1543,6 +1549,7 @@ Nothing here starts until the MVP ships. Order matters — each step is provable
 next one is built.
 
 ```text
+0. passkey login                  stop pasting tokens into phones    → doc 17
 1. terminal-state snapshots       makes tailed attach clean          → doc 04
 2. native app shells              WebView terminal, reuse everything → doc 13
 3. identity + device directory    login and a machine list, no relay → doc 14

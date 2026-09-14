@@ -92,7 +92,7 @@ pub async fn upgrade(
     let Ok(session_id) = id.parse::<SessionId>() else {
         return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
     };
-    if let Err(e) = auth::resolve_ws(
+    if let Err(e) = auth::resolve_ws_with_sessions(
         &state.ws_tickets,
         session_id,
         q.ticket.as_deref(),
@@ -100,7 +100,11 @@ pub async fn upgrade(
         q.token.as_deref(),
         &state.token,
         state.config.auth_token,
-    ) {
+        state.db.as_ref(),
+        crate::now_ms(),
+    )
+    .await
+    {
         return crate::api::ApiError::from(e).into_response();
     }
     if q.after.is_some() && q.tail.is_some() {

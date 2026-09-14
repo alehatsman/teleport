@@ -34,6 +34,18 @@ DELETE /api/v1/locations/pins
 
 POST   /api/v1/shutdown
 POST   /api/v1/ws-ticket
+
+GET    /api/v1/auth/status
+POST   /api/v1/auth/passkey/register/start
+POST   /api/v1/auth/passkey/register/finish
+POST   /api/v1/auth/passkey/login/start
+POST   /api/v1/auth/passkey/login/finish
+GET    /api/v1/auth/passkeys
+PATCH  /api/v1/auth/passkeys/{id}
+DELETE /api/v1/auth/passkeys/{id}
+GET    /api/v1/auth/sessions
+DELETE /api/v1/auth/sessions/{id}
+POST   /api/v1/auth/logout
 ```
 
 Everything else is the SPA, served from the same origin at `/`.
@@ -70,7 +82,8 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "home_dir": "/Users/aleh",
   "pid": 41003,
   "uptime_ms": 913402,
-  "sessions_running": 3
+  "sessions_running": 3,
+  "ui_version": "v0.4.1"
 }
 ```
 
@@ -83,6 +96,14 @@ persisted, resolved fresh on every call) exists purely so the UI can collapse a 
 ([09-frontend.md](09-frontend.md#sessionssvelte)); as identifying as `device_name` (it
 reveals the username via the path), same gate. `null`/omitted if unresolvable — the UI
 falls back to showing the path in full, same as it always has.
+
+`ui_version` is the release tag `<data_dir>/web/current` points at — read by
+`readlink`-ing the slot on each call, so it reflects the bundle the *next* request will
+be served, not the one this process started with. `null` when the daemon is serving its
+embedded bundle or an explicit `--web-dist` (a dev tree has no release version and must
+not pretend otherwise). It changes under a running daemon, because
+[`teleport ui upgrade`](18-ui-upgrades.md) flips the slot without restarting anything;
+the web app watches it and *offers* a reload rather than taking one.
 
 `api_versions` and `capabilities` exist for **version skew**, which is unavoidable once
 native apps ship: an App Store build can be months behind a daemon the user updated this
@@ -113,7 +134,7 @@ every payload later.
 | Field | Required | Rules |
 |---|---|---|
 | `kind` | yes | `"shell"` \| `"agent"` \| `"command"` |
-| `preset` | no | preset id; when present, supplies defaults for `command`/`args`/`env` that explicit fields override |
+| `preset` | no | preset id; when present, supplies defaults for `command`/`args`/`env` that explicit fields override, and is the only way to set `login_shell` (see [`GET /api/v1/presets`](#get-apiv1presets)) |
 | `command` | yes unless a preset supplies it | resolved via `PATH`; must resolve to an existing executable |
 | `args` | no | **array of strings**, never a shell string |
 | `cwd` | yes | must exist and be a directory |
@@ -241,9 +262,9 @@ commands. See [06-security.md](06-security.md).
 ```json
 {
   "presets": [
-    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex" },
-    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude" },
-    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal" }
+    { "id": "codex", "label": "Codex", "command": "codex", "args": [], "icon": "codex", "login_shell": true, "resume_args": [] },
+    { "id": "claude", "label": "Claude Code", "command": "claude", "args": [], "icon": "claude", "login_shell": true, "resume_args": ["--resume"] },
+    { "id": "shell", "label": "Shell", "command": "$SHELL", "args": ["-l"], "icon": "terminal", "login_shell": false, "resume_args": [] }
   ]
 }
 ```
@@ -251,6 +272,52 @@ commands. See [06-security.md](06-security.md).
 Loaded from `presets.toml` in the data dir. A preset supplies executable, argv defaults
 and presentation metadata. **No scheduler, agent protocol, MCP layer or provider SDK is
 needed to spawn the first Claude/Codex CLI.**
+
+**`resume_args`** (`#[serde(default)]`, so absent means empty) is how this agent is told
+to continue a previous conversation — `["--resume"]` for Claude Code. Empty means "this
+agent has no resume story", and the UI offers no Resume action for it.
+
+This field is the **seam that keeps harness knowledge out of the daemon and off the
+wire.** teleport does not know that `claude` resumes and `codex` may not; it reads that
+from `presets.toml`. Before it existed, the web UI compared `preset === "claude"` in two
+components and built `["--resume", id]` inline — adding a second agent meant editing
+TypeScript. Now it means editing a TOML file you own.
+
+Rules, so the field stays boring:
+
+- **teleport never parses a session id.** When one is known it is appended to
+  `resume_args` verbatim; it is the agent's own opaque identifier, and a bad one surfaces
+  as that agent's own error in the terminal, exactly as running it by hand would.
+- **Any argv shape works.** `["--resume"]`, `["session", "resume"]` — nothing assumes a
+  single flag, so an agent that resumes via a subcommand needs no code change.
+- **`codex` ships with an empty `resume_args`** deliberately, rather than a guess: a
+  wrong flag turns a Resume button into a failed spawn. Adding it is one line in
+  `presets.toml` once someone verifies it against a real binary.
+
+**`login_shell`** (`#[serde(default)]`, so absent means `false`) runs this preset's
+command through the user's login shell rather than exec'ing it directly — see
+[03-pty-layer.md](03-pty-layer.md#spawn) for the mechanism and why a background-service
+daemon needs it. It is a **preset-only** field: `POST /api/v1/sessions` does not accept
+it, because a caller passing a raw `command` can already ask for `"$SHELL"` itself. Three
+consequences worth stating rather than discovering:
+
+- **The session row keeps the logical command.** `GET /api/v1/sessions` reports
+  `"command": "claude"`, not `/bin/zsh`, and `05-persistence.md`'s `command`/`argv_json`
+  columns store the same. A list that showed `/bin/zsh` for every agent session would be
+  useless, and the columns are display/relaunch metadata — nothing respawns from them
+  (`05-persistence.md#restart-recovery` marks recovered sessions `lost`). A client
+  relaunching a session carries the `preset` id forward, which is what carries
+  `login_shell` with it; a preset-less raw-`command` session never had the flag to lose.
+- **The `422` for an unresolvable executable still holds.** `command` under
+  `login_shell` is resolved by asking the login shell (`$SHELL -lc 'command -v …'`), not
+  by scanning the daemon's own `$PATH` — which is precisely the `$PATH` this flag exists
+  to stop trusting. Costs one extra short-lived shell per create; the alternative, letting
+  the wrapper shell fail with `command not found` inside the PTY, regresses a clean `422`
+  into a session that flickers to `exited` (`#post-apiv1sessions`).
+- **`presets.toml` written before this existed keeps the old behavior.** The field
+  defaults to `false`, and the daemon does not rewrite an existing file
+  (`presets.rs::load_or_create` only generates on first run, deliberately). Turning it on
+  for an already-installed daemon is a one-line edit per preset.
 
 ### `GET /api/v1/browse`
 
@@ -296,7 +363,7 @@ mount).
 ```
 
 Directories the user pinned to the top of the launcher's location list
-([18-locations.md](18-locations.md#pins)), newest first. A pin whose directory has since
+([19-locations.md](19-locations.md#pins)), newest first. A pin whose directory has since
 been deleted or unmounted is still listed — dropping it would leave no way to unpin it,
 and launching there fails with the same `422` any other bad `cwd` gets.
 
@@ -366,6 +433,46 @@ in a URL that lands in proxy logs, browser history, or `Referer`. Requires the s
 to exist (`404`, same as every other `{id}`-taking route) and the same Origin check as
 any other mutating route. Issued tickets are in-memory only, per-daemon-process; a
 restart invalidates every outstanding one.
+
+### `/api/v1/auth/*`
+
+Passkey login, specified in full in [17-passkey-login.md](17-passkey-login.md#api-surface).
+Two rules matter at this layer:
+
+- **`GET /auth/status` and the two `login/*` routes are unauthenticated** -- a
+  freshly-loaded SPA has no credential yet and must still learn which screen to render,
+  and the login ceremony is by definition pre-credential.
+- **Every `/auth/*` route, including those three, is Origin-checked.** `/health`'s
+  exemption ([above](#get-apiv1health)) does not extend here: `/health` exists so a
+  desktop shell can probe before holding a credential and returns nothing an attacker
+  wants, whereas these routes mint and revoke credentials.
+
+`GET /auth/status` is the only one a client calls before it has anything:
+
+```json
+{
+  "passkey_supported": true,
+  "rp_id": "localhost",
+  "enrolled": true,
+  "token_url_hint": null
+}
+```
+
+`passkey_supported` is false for any origin whose RP ID would be an IP address or a
+non-trustworthy scheme ([06-security.md](06-security.md#an-rp-id-is-a-domain-never-an-ip));
+`token_url_hint` then carries the `localhost` URL to switch to. `enrolled` is scoped to
+*this* `rp_id` -- a passkey registered at `localhost` does not make a tailnet hostname
+enrolled.
+
+`POST /auth/passkey/login/finish` returns the session credential:
+
+```json
+{ "token": "<hex>", "expires_at_ms": 1789000000000, "session_id": "01K..." }
+```
+
+Presented thereafter as `Authorization: Bearer <token>`, exactly like the master token,
+including on `POST /ws-ticket`. Failed assertions are always `unauthorized` -- the daemon
+never distinguishes "no such credential" from "bad signature" in a response body.
 
 ## WebSocket protocol
 
@@ -778,5 +885,5 @@ error.
 | `session_closing` | input during termination | disable input |
 | `slow_consumer` | queue overflow (WS close 1013) | reconnect with backoff from last offset |
 | `bad_origin` | Origin/Host rejected | hard failure, do not retry |
-| `unauthorized` | missing or invalid credential | prompt for the token / re-pair |
+| `unauthorized` | missing or invalid credential | show the login screen (passkey, else the token) / re-pair |
 | `too_many_pins` | pin cap (50) reached | tell the user to unpin something; do not retry |

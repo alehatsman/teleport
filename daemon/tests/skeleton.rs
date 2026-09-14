@@ -112,9 +112,13 @@ fn first_run_creates_expected_files_and_prints_url() {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
+    // `localhost`, not `127.0.0.1`: a WebAuthn relying-party ID cannot be
+    // an IP address, so the URL the user actually opens has to be the one a
+    // passkey can be enrolled against (docs/17-passkey-login.md, and
+    // main.rs::url_host). The bind address is unchanged and still loopback.
     assert_eq!(
         line.trim(),
-        format!("http://127.0.0.1:{port}/?token={token}")
+        format!("http://localhost:{port}/?token={token}")
     );
 
     #[cfg(unix)]

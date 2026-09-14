@@ -32,6 +32,13 @@ test("a resume id survives a daemon restart and is still one click away", async 
       headers: { "content-type": "application/json", authorization: `Bearer ${daemon.token}` },
       body: JSON.stringify({
         kind: "claude",
+        // `preset` *and* an explicit `command`: the command wins for spawning
+        // (api.rs `resolve_command`) so this can fake the banner, while the
+        // row still carries `preset: "claude"` the way a real launcher-created
+        // session does. The Resume action is gated on the preset's own
+        // `resume_args` (#69 follow-up), so a session with no preset at all --
+        // which the launcher never produces -- correctly offers nothing.
+        preset: "claude",
         command: "/bin/sh",
         args: ["-c", BANNER],
         cwd: "/tmp",

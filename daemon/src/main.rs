@@ -21,6 +21,7 @@ use teleportd::api::{build_router, AppState};
 use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::log::LogLimits;
 use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
+use teleportd::web_assets::WebAssets;
 use teleportd::{config, now_ms, presets};
 
 mod service;
@@ -57,12 +58,19 @@ struct Cli {
     #[arg(long)]
     i_know_what_im_doing: bool,
 
-    /// Built SPA assets to serve at `/` (docs/08-packaging.md#build-pipeline).
-    /// Relative to the current working directory. Missing is not an error --
-    /// the `npm run dev` workflow ([09](../docs/09-frontend.md#dev-workflow))
+    /// Built SPA assets to serve at `/` (docs/08-packaging.md#build-pipeline),
+    /// e.g. a fresh `npm run build` output during development.
+    ///
+    /// Unset by default, and deliberately: the old `web/dist` default was
+    /// *cwd-relative*, so it resolved under `cargo run` from the repo root
+    /// and never under launchd/systemd, where cwd is `/`. Unset means an
+    /// installed daemon is governed by the `<data_dir>/web/current` slot
+    /// (docs/18-ui-upgrades.md#the-slot) and a developer by this flag,
+    /// which is what each actually wants. Missing is not an error -- the
+    /// `npm run dev` workflow ([09](../docs/09-frontend.md#dev-workflow))
     /// never touches this path.
-    #[arg(long, default_value = "web/dist")]
-    web_dist: PathBuf,
+    #[arg(long)]
+    web_dist: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -149,16 +157,12 @@ async fn main() -> Result<()> {
     write_port_file(&data_dir, bound_addr.port())?;
     info!(addr = %bound_addr, "teleportd listening");
 
+    let url_host = url_host(&bound_addr);
     if config.auth_token {
-        println!(
-            "http://{}:{}/?token={}",
-            bound_addr.ip(),
-            bound_addr.port(),
-            token
-        );
+        println!("http://{}:{}/?token={}", url_host, bound_addr.port(), token);
     } else {
         info!("auth disabled by config");
-        println!("http://{}:{}", bound_addr.ip(), bound_addr.port());
+        println!("http://{}:{}", url_host, bound_addr.port());
     }
 
     let log_limits = LogLimits {
@@ -184,21 +188,39 @@ async fn main() -> Result<()> {
         &config.allowed_hosts,
     );
 
-    let web_dist = if cli.web_dist.is_dir() {
-        info!(path = %cli.web_dist.display(), "serving web UI");
-        Some(cli.web_dist.clone())
-    } else {
-        // A binary built with `--features embedded-web` still serves the UI
-        // from its own baked-in bundle when `--web-dist` doesn't resolve to
-        // a real directory (docs/16-release-pipeline.md) -- the log line
-        // says which is actually about to happen.
-        if cfg!(feature = "embedded-web") {
-            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving embedded web UI");
-        } else {
-            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving API only");
+    // Built from the port actually bound plus config, before the state it
+    // goes into (docs/17-passkey-login.md). One `Webauthn` instance per
+    // usable RP ID; an origin that cannot host a passkey simply gets none.
+    // Unix-only: `webauthn-rs` does not build on Windows (issue #87), where
+    // the bearer token is the whole credential story.
+    let passkeys = teleportd::auth_routes::PasskeyState::new(
+        bound_addr.port(),
+        &config.allowed_origins,
+        &config.allowed_hosts,
+    );
+    if config.auth_token && config.auth_passkey {
+        info!(rp_ids = ?passkeys.policy.rp_ids(), "passkey login available");
+    }
+
+    // Both candidate paths are *remembered*, not checked: whether either
+    // resolves is decided per request, so a `teleport ui upgrade` that
+    // creates the slot for the first time takes effect without a restart
+    // -- the exact restart docs/18-ui-upgrades.md exists to avoid.
+    let web = WebAssets::new(cli.web_dist.clone(), Some(data_dir.join("web")));
+    match (&cli.web_dist, web.resolve()) {
+        (Some(_), Some(path)) => info!(path = %path.display(), "serving web UI from --web-dist"),
+        (None, Some(path)) => {
+            info!(path = %path.display(), version = ?web.ui_version(), "serving web UI from the version slot");
         }
-        None
-    };
+        // A binary built with `--features embedded-web` still serves the UI
+        // from its own baked-in bundle when neither disk path resolves
+        // (docs/16-release-pipeline.md) -- the log line says which is
+        // actually about to happen.
+        (_, None) if cfg!(feature = "embedded-web") => {
+            info!("no web UI on disk; serving the embedded web UI");
+        }
+        (_, None) => info!("no web UI on disk and none embedded; serving API only"),
+    }
 
     // The one trigger `POST /api/v1/shutdown` has (docs/11-mvp-plan.md#m10):
     // shared into `AppState` so the handler can wake `shutdown_signal()`
@@ -215,9 +237,11 @@ async fn main() -> Result<()> {
         config,
         started_at: Instant::now(),
         version: env!("CARGO_PKG_VERSION"),
-        web_dist,
+        web,
         shutdown: Arc::clone(&shutdown_trigger),
         ws_tickets: TicketStore::new(),
+        bound_port: bound_addr.port(),
+        passkeys,
     });
     spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
@@ -371,6 +395,15 @@ fn spawn_gc_task(
         loop {
             interval.tick().await;
             run_gc_pass(&db, &sessions_root, retain_days, &live).await;
+            // Expired login sessions ride the same pass rather than a
+            // second timer (docs/17-passkey-login.md#session-lifetime).
+            // They are already unusable -- expiry is enforced in the lookup
+            // query -- so this is housekeeping, not enforcement.
+            match db.sweep_expired_auth_sessions(now_ms()).await {
+                Ok(0) => {}
+                Ok(n) => info!(count = n, "swept expired login sessions"),
+                Err(e) => warn!(error = %e, "sweeping expired login sessions failed"),
+            }
         }
     });
 }
@@ -440,6 +473,33 @@ async fn run_gc_pass(
     }
 }
 
+/// The host to print in the startup URL. A loopback bind prints `localhost`,
+/// not `127.0.0.1`, because **`WebAuthn` refuses an IP address as a
+/// relying-party ID** -- a passkey cannot be enrolled or used on an
+/// IP-literal origin, so the URL a user actually opens has to be the
+/// `localhost` one (docs/06-security.md#an-rp-id-is-a-domain-never-an-ip).
+/// `localhost` is equally a trustworthy origin for the secure-context rules
+/// the rest of the SPA already depends on, so nothing else has to change.
+///
+/// **The bind address is untouched.** This is a display concern only; the
+/// listener is still whatever `--listen` resolved to
+/// (docs/06-security.md#listener).
+///
+/// A non-loopback bind -- the `--i-know-what-im-doing` path -- keeps its
+/// literal address: `localhost` would resolve to the wrong machine entirely
+/// for the remote user that flag exists to serve.
+fn url_host(addr: &SocketAddr) -> String {
+    if addr.ip().is_loopback() {
+        "localhost".to_string()
+    } else if addr.is_ipv6() {
+        // A v6 literal needs brackets to be a legal URL authority; the v4
+        // path below would produce `http://::1:7337`, which is not parseable.
+        format!("[{}]", addr.ip())
+    } else {
+        addr.ip().to_string()
+    }
+}
+
 /// Resolves once Ctrl+C, (Unix only) SIGTERM, or an authenticated
 /// `POST /api/v1/shutdown` (docs/11-mvp-plan.md#m10) is received. The HTTP
 /// trigger exists mainly for Windows, which has no SIGTERM equivalent
@@ -477,4 +537,49 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
         () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn addr(ip: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(
+            ip.parse::<IpAddr>().expect("valid IP literal in test"),
+            port,
+        )
+    }
+
+    #[test]
+    fn loopback_v4_prints_localhost() {
+        // The whole point: an IP literal cannot be a WebAuthn RP ID.
+        assert_eq!(url_host(&addr("127.0.0.1", 7337)), "localhost");
+    }
+
+    #[test]
+    fn any_loopback_v4_address_prints_localhost() {
+        // 127.0.0.0/8 is all loopback, not just .0.1.
+        assert_eq!(url_host(&addr("127.0.0.53", 7337)), "localhost");
+    }
+
+    #[test]
+    fn loopback_v6_prints_localhost() {
+        assert_eq!(
+            url_host(&SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 7337)),
+            "localhost"
+        );
+    }
+
+    #[test]
+    fn non_loopback_v4_keeps_its_literal_address() {
+        // --i-know-what-im-doing: `localhost` would point the remote user at
+        // their own machine.
+        assert_eq!(url_host(&addr("192.168.1.10", 7337)), "192.168.1.10");
+    }
+
+    #[test]
+    fn non_loopback_v6_is_bracketed_so_the_url_parses() {
+        assert_eq!(url_host(&addr("2001:db8::1", 7337)), "[2001:db8::1]");
+    }
 }

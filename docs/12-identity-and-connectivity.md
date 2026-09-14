@@ -17,7 +17,7 @@ Get that right in M4 and stages 2 and 3 are additive. Get it wrong and auth is a
 | **Ships in** | MVP (M0–M8) | MVP (M9) | v2 |
 | **Reachability** | `127.0.0.1` only | Tailscale Serve / Cloudflare Tunnel | Outbound relay |
 | **Who can connect** | any OS user on the host who holds the token | tailnet members / Access-approved | account members |
-| **Credential** | bearer token, `0600` in the data dir | same token + transport identity | account session + device credential |
+| **Credential** | bearer token, `0600` in the data dir, **or** a passkey session ([17](17-passkey-login.md)) | same, + transport identity | account session + device credential |
 | **Principal** | `LocalUser` | `LocalUser` or `DeviceToken` | `Account { user, device }` |
 | **Cloud needed** | no | no (user's own Tailscale/CF) | yes ([14-cloud-backend.md](14-cloud-backend.md)) |
 | **Native apps work** | on-host only | yes, over the tailnet | yes, anywhere |
@@ -35,8 +35,10 @@ enum Principal {
     /// user boundary. See 06-security.md#loopback-is-not-a-user-boundary.
     LocalUser,
 
-    /// Presented a valid bearer token from <data_dir>/token.
-    /// Used by native apps in stage 2, CLI tools, and scripts.
+    /// A credential issued to one device rather than read from the shared
+    /// token file: a passkey login session (17-passkey-login.md), whose
+    /// token_id is its `auth_sessions` row id. Also the shape native apps
+    /// and CLI tools take in stage 2.
     DeviceToken { token_id: String },
 
     /// Stage 3. Established by the cloud backend and carried through the relay.

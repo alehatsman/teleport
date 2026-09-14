@@ -1,6 +1,6 @@
 // A "location" is a directory teleport can launch a session in: one the
 // session history already knows, or one that was pinned
-// (docs/18-locations.md). Pure helpers, no reactive state, `now` always
+// (docs/19-locations.md). Pure helpers, no reactive state, `now` always
 // passed in (web/CLAUDE.md) -- the ranking is a function of the clock, so a
 // helper reading Date.now() itself would silently freeze inside a $derived.
 

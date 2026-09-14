@@ -45,7 +45,7 @@ web/
             ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
             ├── locations.ts            # pure: frecency ranking + query matching over launch dirs
             ├── locations.test.ts
-            ├── LocationPicker.svelte   # searchable location list + pin toggles (18-locations.md)
+            ├── LocationPicker.svelte   # searchable location list + pin toggles (19-locations.md)
             ├── DirectoryBrowser.svelte # inline cwd picker, opened from the picker (GET /api/v1/browse)
             ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
             ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
@@ -98,7 +98,7 @@ five components composed together, each small enough to read in one sitting:
     is explicitly "never clobber a mid-typed value... across a reopen") — losing it would
     have been a silent behavior change from splitting the file, not a simplification.
 - **`LocationPicker.svelte`** — the launcher's "Choose…" panel
-  ([18-locations.md](18-locations.md#stage-2--the-location-picker)): a search box over
+  ([19-locations.md](19-locations.md#stage-2--the-location-picker)): a search box over
   every known location, a pin star per row, and `Browse filesystem…` at the bottom, which
   swaps in `DirectoryBrowser`. Props: `value: string` (the cwd in the field, marked
   selected), `locations: Location[]`, `onSelect: (path: string) => void`, `onTogglePin:
@@ -134,7 +134,7 @@ five components composed together, each small enough to read in one sitting:
 Helpers with no reactive state are plain modules beside the components, unit-tested
 without mounting anything (UI.md rule 27): **`locations.ts`** (the `Location` type,
 `knownLocations()`'s frecency ranking and `matchLocations()`'s query filter —
-[18-locations.md](18-locations.md)), **`sessionDisplay.ts`** (state labels and
+[19-locations.md](19-locations.md)), **`sessionDisplay.ts`** (state labels and
 tones, `displayAge`/`displayCwd`/`displayOutcome`, `needsAttention`, the list filter,
 `recentCwds`, and `viewerStatus()` — the record-first/socket-second rule for the viewer
 header) and **`launchRequest.ts`** (`buildLaunchRequest()`: launcher fields to a
@@ -284,6 +284,61 @@ uses the short-lived, session-scoped ticket that comes back instead
 ([06-security.md](06-security.md#token-on-the-websocket-upgrade), mitigation 2) — the
 long-lived token itself never appears in a `ws://…` URL.
 
+### Credential precedence, and the login screen
+
+With passkeys ([17-passkey-login.md](17-passkey-login.md)) there are two credentials that
+look identical on the wire -- both are `Authorization: Bearer <hex>` -- so `identity.ts`
+needs one rule, applied in this order:
+
+```text
+1. a stored passkey session token   ← preferred; renewable without the startup URL
+2. a ?token= captured from the URL  ← the bootstrap and the recovery path
+3. nothing                          ← render the login screen
+```
+
+A passkey session token supersedes a captured `?token=` rather than the other way round:
+a user who opens an old bookmarked `?token=` URL should not silently drop back to the
+master credential.
+
+The SPA calls `GET /api/v1/auth/status` before rendering and picks one of three screens:
+
+| `status` | Screen |
+|---|---|
+| `passkey_supported && enrolled` | **Sign in with a passkey** -- one button, no username field |
+| `passkey_supported && !enrolled` | **Set up a passkey** -- reachable only once a token already authenticates the caller |
+| `!passkey_supported` | the token path, plus `token_url_hint` as a link: "open this on `localhost` to use a passkey" |
+
+The third row is the one to get right. Never present a passkey button that cannot work
+and let the ceremony fail -- on `127.0.0.1`, on a LAN IP, or in a browser without
+WebAuthn, say *why* and show the URL that does work. Probe `navigator.credentials`
+itself; do not infer support from the origin alone.
+
+A `401` mid-session returns to the login screen **without losing the current route**, so
+signing back in lands you on the terminal you were already watching.
+
+### Managing credentials after the first one
+
+The setup screen above is a first-run *nudge* -- gated on nothing being enrolled for this
+origin, so it disappears the moment it succeeds. Management lives at its own route,
+`#/settings`, reached from the session-list header and never gated on enrollment state
+(issue [#72](https://github.com/alehatsman/teleport/issues/72): it was reachable exactly
+once, which left four shipped endpoints with no consumer).
+
+A route, not a modal, for the same reason `#/sessions/<id>` is one: the back button and a
+pasted link both have to work. It holds two sections --
+
+- **Passkeys**: enroll, rename in place, remove. The per-origin rule means adding a
+  second credential on an origin you already enrolled is routine, not exotic.
+- **Signed-in devices**: every live passkey session, current first, each revocable. This
+  is the only way to revoke a lost device short of deleting the passkey it signed in
+  with, which takes every other device on that credential down too. Revoking your own
+  session confirms first and then signs out for real, rather than leaving the tab polling
+  `401`s.
+
+Signing out re-derives the credential from storage rather than assuming there is none: a
+user who also holds the master token stays in the app, because that token is a
+permanently supported credential and not a fallback to be cleared.
+
 ## Geometry
 
 There is exactly one PTY size per session and only the controller sets it. Observers
@@ -381,6 +436,27 @@ The phone uses the **same SPA**. No separate mobile API, no native app.
 Reconnection is normal, not an error. Show a subtle inline indicator (a colored dot plus
 `live` / `reconnecting` / `lost`). Never a modal. Never a full-screen error that hides
 the terminal contents the user is trying to read.
+
+## The "New UI available" offer
+
+The web bundle can be replaced under a running daemon
+([18-ui-upgrades.md](18-ui-upgrades.md)), so a long-lived tab can be running code the
+daemon is no longer serving. `Sessions.svelte` polls `GET /health` on a slow timer
+(30s — a UI flip happens on human timescales, and re-asking on the 3s list interval
+would triple this page's request count for nothing), remembers the first `ui_version` it
+saw, and shows a dismissible `.notice` when a later one differs.
+
+Two deliberate limits:
+
+- **It offers a reload; it never takes one.** A reload discards unsent keystrokes and
+  scroll position. The reconnect is safe — the PTYs live in the daemon and the socket
+  replays from its last offset ([04](04-api-protocol.md#reconnect)) — but the timing is
+  still the user's call.
+- **List view only.** The session view is not the place to interrupt someone mid-task,
+  and the offer is still waiting when they come back to the list.
+
+`ui_version` is `null` under `npm run dev` and under `--web-dist`, so nothing about this
+fires during development.
 
 ## Dev workflow
 

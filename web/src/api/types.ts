@@ -66,6 +66,21 @@ export interface Preset {
   command: string
   args: string[]
   icon: string
+  /**
+   * Daemon-side spawn detail, mirrored here only so this file stays a faithful
+   * copy of `GET /api/v1/presets` (docs/04-api-protocol.md#get-apiv1presets) --
+   * the UI has nothing to do with it. Optional because a daemon older than the
+   * field omits it entirely.
+   */
+  login_shell?: boolean
+  /**
+   * How this agent is told to resume a previous conversation, e.g.
+   * `["--resume"]`. Empty (or absent, on a daemon older than the field)
+   * means it has no resume story, and no Resume action is offered. This is
+   * the only thing the UI knows about any agent's capabilities -- there is
+   * deliberately no preset id anywhere in the resume path.
+   */
+  resume_args?: string[]
 }
 
 export interface PresetsResponse {
@@ -86,7 +101,7 @@ export interface BrowseResponse {
   entries: BrowseEntry[]
 }
 
-/** One pinned launcher directory (docs/18-locations.md#pins). */
+/** One pinned launcher directory (docs/19-locations.md#pins). */
 export interface Pin {
   path: string
   pinned_at_ms: number
@@ -113,6 +128,13 @@ export interface HealthResponse {
   platform?: string
   /** The daemon's own home directory -- lets the UI collapse a session's `cwd` to `~/...`. */
   home_dir?: string
+  /**
+   * The release tag `<data_dir>/web/current` points at
+   * (docs/18-ui-upgrades.md#telling-the-client). Absent or null when the
+   * daemon is serving its embedded bundle or an explicit `--web-dist`, so a
+   * change in it means the UI on disk was flipped under this tab.
+   */
+  ui_version?: string | null
   pid?: number
   uptime_ms?: number
   sessions_running?: number
@@ -194,3 +216,48 @@ export type ClientMessage =
 
 /** `stream.ts`'s own connection-state machine -- not part of the wire protocol. */
 export type StreamState = "connecting" | "replaying" | "live" | "reconnecting" | "closed"
+
+// --- Passkey login (docs/17-passkey-login.md#api-surface) ---
+
+/** `GET /auth/status`. Drives which of three login screens renders. */
+export interface AuthStatus {
+  /** Whether this origin has a usable relying-party ID at all. */
+  passkey_supported: boolean
+  rp_id: string | null
+  /** Scoped to `rp_id` -- enrolment at another origin does not count here. */
+  enrolled: boolean
+  /** The `localhost` URL to switch to, sent only when unsupported. */
+  token_url_hint: string | null
+}
+
+/** A started ceremony. `options` goes straight to `navigator.credentials`. */
+export interface CeremonyStart<T> {
+  challenge_id: string
+  options: T
+}
+
+/** What a successful assertion mints. Used exactly like the master token. */
+export interface LoginResponse {
+  token: string
+  expires_at_ms: number
+  session_id: string
+}
+
+export interface PasskeySummary {
+  id: string
+  rp_id: string
+  label: string
+  created_at_ms: number
+  last_used_ms: number | null
+}
+
+export interface AuthSessionSummary {
+  id: string
+  passkey_id: string
+  label: string
+  created_at_ms: number
+  expires_at_ms: number
+  last_seen_ms: number
+  /** True for the session making the request. */
+  current: boolean
+}

@@ -6,6 +6,12 @@ mod attach;
 mod connect;
 mod http;
 mod identity;
+// The slot is a `current` symlink flipped by rename(2), and every file it
+// writes is mode 0600 -- both unix-only primitives. Windows keeps the
+// subcommand (so `--help` still documents it) and refuses at runtime rather
+// than pretending; see the `Command::Ui` arm in `main`.
+#[cfg(unix)]
+mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +67,12 @@ enum Command {
     /// Attach to a session -- puts this terminal in raw mode and bridges it
     /// to the session 1:1, byte for byte.
     Attach { id: String },
+    /// Manage the web UI this machine's daemon serves, without restarting
+    /// it (docs/18-ui-upgrades.md).
+    Ui {
+        #[command(subcommand)]
+        action: UiAction,
+    },
     /// Terminate a session.
     Kill {
         id: String,
@@ -68,6 +80,21 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum UiAction {
+    /// What the daemon is actually serving, and what else is retained.
+    Status,
+    /// Download a UI bundle and flip the slot to it. The daemon picks it up
+    /// on the next request -- no restart, no session lost.
+    Upgrade {
+        /// Release tag, e.g. v0.4.1. Defaults to the latest release.
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Point the slot back at the previously installed version.
+    Rollback,
 }
 
 #[tokio::main]
@@ -80,6 +107,35 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // `ui` is pure local filesystem work on <data_dir>/web and must run
+    // whether or not a daemon is up -- resolving a connection first would
+    // make "upgrade the UI" fail on a stopped daemon for no reason.
+    if let Command::Ui { action } = &cli.command {
+        #[cfg(unix)]
+        {
+            ui::reject_remote(cli.url.as_deref())?;
+            let data_dir = connect::data_dir(cli.data_dir.clone())?;
+            return match action {
+                UiAction::Status => {
+                    ui::status(&data_dir);
+                    Ok(())
+                }
+                UiAction::Upgrade { version } => ui::upgrade(&data_dir, version.clone()).await,
+                UiAction::Rollback => ui::rollback(&data_dir),
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = action;
+            anyhow::bail!(
+                "`teleport ui` is not supported on this platform yet: the version slot is a \
+                 symlink flipped by rename(2) (docs/18-ui-upgrades.md#the-slot). Windows \
+                 daemons still serve their embedded UI, which upgrades with the binary."
+            );
+        }
+    }
+
     let conn = connect::resolve(cli.url, cli.token, cli.data_dir.clone())?;
 
     match cli.command {
@@ -116,6 +172,8 @@ async fn main() -> Result<()> {
             }
         }
         Command::Kill { id, purge } => kill(&conn, &id, purge).await,
+        // Handled above, before the connection is resolved.
+        Command::Ui { .. } => unreachable!("ui is dispatched before connection resolution"),
     }
 }
 

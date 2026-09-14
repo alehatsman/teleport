@@ -13,6 +13,7 @@
     selectMode,
     selectedIds,
     onToggleSelected,
+    resumablePresets,
   }: {
     sessions: Session[]
     now: number
@@ -24,6 +25,7 @@
     selectMode: boolean
     selectedIds: Set<string>
     onToggleSelected: (id: string) => void
+    resumablePresets: Set<string>
   } = $props()
 
   // Swipe-reveal exclusivity: only one row's action button is ever revealed
@@ -48,6 +50,7 @@
       {selectMode}
       selected={selectedIds.has(session.id)}
       {onToggleSelected}
+      {resumablePresets}
     />
   {/each}
 </ul>

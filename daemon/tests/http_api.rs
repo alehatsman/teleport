@@ -495,7 +495,7 @@ async fn bad_origin_on_a_mutating_request_is_rejected() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-// --- pinned locations (docs/18-locations.md#pins) -----------------------------
+// --- pinned locations (docs/19-locations.md#pins) -----------------------------
 
 /// A scratch directory tree plus the daemon that stores pins about it. Both
 /// live under one root so a single `remove_dir_all` cleans up.
@@ -592,7 +592,7 @@ async fn unpinning_uses_the_stored_path_and_is_idempotent() {
 
     // Deleted out from under the daemon first: a pin whose directory is gone
     // is exactly the one someone needs to remove, so DELETE must not try to
-    // resolve it (docs/18-locations.md#delete-apiv1locationspinspath).
+    // resolve it (docs/19-locations.md#delete-apiv1locationspinspath).
     std::fs::remove_dir_all(&project).unwrap();
     let uri = format!(
         "/api/v1/locations/pins?path={}",

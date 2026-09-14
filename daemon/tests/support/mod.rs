@@ -33,6 +33,7 @@ use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::config::Config;
 use teleportd::device::Device;
 use teleportd::session::{Attach, Replay, ReplayStep, SessionManager};
+use teleportd::web_assets::WebAssets;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -176,7 +177,7 @@ pub(crate) async fn spawn(config: Config) -> Daemon {
 
 /// Like [`spawn`], but with a real SQLite store behind `AppState::db` -- for
 /// the routes that have nowhere to read or write without one (the pin routes,
-/// docs/18-locations.md#pins). Its files land under `dir`, which the caller
+/// docs/19-locations.md#pins). Its files land under `dir`, which the caller
 /// owns and cleans up.
 pub(crate) async fn spawn_with_db(config: Config, dir: &std::path::Path) -> Daemon {
     let (db, _) = teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
@@ -192,6 +193,17 @@ pub(crate) async fn spawn_with_web_dist(
     web_dist: Option<PathBuf>,
     db: Option<teleportd::persistence::Db>,
 ) -> Daemon {
+    spawn_with_web_assets(config, WebAssets::new(web_dist, None), db).await
+}
+
+/// Like [`spawn_with_web_dist`], but takes the whole [`WebAssets`] -- for
+/// the version-slot tests (docs/18-ui-upgrades.md), which need a
+/// `<data_dir>/web` root rather than a fixed dist directory.
+pub(crate) async fn spawn_with_web_assets(
+    config: Config,
+    web: WebAssets,
+    db: Option<teleportd::persistence::Db>,
+) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -204,6 +216,9 @@ pub(crate) async fn spawn_with_web_dist(
         &config.allowed_origins,
         &config.allowed_hosts,
     );
+    // Cloned before `config` is moved into the state below.
+    let config_origins = config.allowed_origins.clone();
+    let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
         db,
@@ -218,9 +233,15 @@ pub(crate) async fn spawn_with_web_dist(
         config,
         started_at: Instant::now(),
         version: "test",
-        web_dist,
+        web,
         shutdown: Arc::new(tokio::sync::Notify::new()),
         ws_tickets: TicketStore::new(),
+        bound_port: addr.port(),
+        passkeys: teleportd::auth_routes::PasskeyState::new(
+            addr.port(),
+            &config_origins,
+            &config_hosts,
+        ),
     });
 
     let app = teleportd::api::build_router(Arc::clone(&state));
@@ -258,6 +279,7 @@ pub(crate) fn create_shell_session(
         env: &[],
         cols: 80,
         rows: 24,
+        login_shell: false,
     };
     let session = daemon
         .state

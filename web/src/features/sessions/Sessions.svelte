@@ -19,9 +19,15 @@
   import SessionList from "@/features/sessions/SessionList.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
   import { knownLocations, type Location } from "./locations"
-  import { filterSessions, isActiveStatus, type StatusFilter } from "./sessionDisplay"
+  import {
+    filterSessions,
+    isActiveStatus,
+    resumablePresetIds,
+    type StatusFilter,
+  } from "./sessionDisplay"
 
-  let { onOpen }: { onOpen: (id: string) => void } = $props()
+  let { onOpen, openSettings }: { onOpen: (id: string) => void; openSettings: () => void } =
+    $props()
 
   let sessions: Session[] = $state([])
   // Refreshed on every poll so the per-row age ticks over without each
@@ -29,6 +35,9 @@
   // re-runs). Coarse on purpose -- ages are shown at minute granularity.
   let now = $state(Date.now())
   let presets: Preset[] = $state([])
+  // Recomputed when presets load; every row asks this rather than each
+  // scanning the preset list itself (sessionDisplay.ts#resumablePresetIds).
+  const resumablePresets = $derived(resumablePresetIds(presets))
   let loading = $state(true)
   let loadError: string | null = $state(null)
   // Has any session-list fetch ever succeeded? Gates the "No sessions yet"
@@ -127,6 +136,18 @@
   // every cwd un-collapsed until a full reload.
   let healthLoaded = $state(false)
 
+  // The UI version this tab booted against, and whether the daemon is now
+  // serving a different one -- `teleport ui upgrade` flips the slot under a
+  // running daemon (docs/18-ui-upgrades.md), so the bundle can change
+  // without anything here noticing. Offered as a reload, never taken
+  // automatically: a reload throws away unsent keystrokes and scroll
+  // position, and deciding that for someone mid-session is exactly what
+  // this product exists not to do. Shown on the list only -- the session
+  // view is not the place to interrupt someone, and the offer is still
+  // waiting when they come back.
+  let bootUiVersion: string | null = null
+  let uiUpdateAvailable = $state(false)
+
   let showLauncher = $state(false)
   // Owned by Sessions.svelte, not SessionLauncher, and passed down bindable --
   // these three outlive the launcher panel's own mount/unmount cycle
@@ -144,7 +165,7 @@
 
   // Ranked working directories for the launcher. Derived from the session
   // list already polled -- no extra request, and it re-ranks as `now` ticks
-  // over (docs/18-locations.md#frecency).
+  // over (docs/19-locations.md#frecency).
   let pins: string[] = $state([])
   // Kept apart from `loadError`: the poll clears that one every 3s, which
   // would wipe a "couldn't pin" message before it was read.
@@ -152,6 +173,11 @@
   let locations: Location[] = $derived(knownLocations(sessions, pins, homeDir, now))
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  // Health is polled far more slowly than the session list: it exists here
+  // to notice a UI flip, which happens on human timescales, and re-asking
+  // every 3s would triple this page's request count for nothing.
+  const HEALTH_POLL_MS = 30_000
+  let healthTimer: ReturnType<typeof setInterval> | null = null
 
   onMount(async () => {
     await Promise.all([refresh(), loadPresets(), loadHealthInfo(), loadPins()])
@@ -160,10 +186,12 @@
     // open decision -- polling is the pragmatic interim answer for M5, not
     // a considered final one. Flagged, not silently closed.
     pollTimer = setInterval(refresh, 3000)
+    healthTimer = setInterval(() => void loadHealthInfo(), HEALTH_POLL_MS)
   })
 
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer)
+    if (healthTimer) clearInterval(healthTimer)
   })
 
   async function refresh() {
@@ -202,6 +230,13 @@
       deviceName = res.device_name ?? null
       homeDir = res.home_dir ?? null
       healthLoaded = true
+      const uiVersion = res.ui_version ?? null
+      // Nothing to compare against when the daemon serves the embedded
+      // bundle or a dev tree -- it reports null, and null never "changes".
+      if (uiVersion !== null) {
+        if (bootUiVersion === null) bootUiVersion = uiVersion
+        else if (uiVersion !== bootUiVersion) uiUpdateAvailable = true
+      }
     } catch {
       // Same call the app already makes for other things; if it's failing
       // there's a bigger problem than the title, and that surfaces
@@ -310,14 +345,25 @@
       <span class="sessions__prompt" aria-hidden="true">&rsaquo;</span>teleport{#if deviceName}<span
           class="sessions__host">&nbsp;(host: {deviceName})</span>{/if}
     </h1>
-    <button
-      class="btn btn--primary sessions__new-btn"
-      onclick={openLauncher}
-      aria-expanded={showLauncher}
-      aria-controls="launcher-panel"
-    >
-      New session
-    </button>
+    <div class="sessions__header-actions">
+      <button
+        class="btn sessions__settings-btn"
+        type="button"
+        onclick={openSettings}
+        aria-label="Settings"
+        title="Settings"
+      >
+        &#9881;
+      </button>
+      <button
+        class="btn btn--primary sessions__new-btn"
+        onclick={openLauncher}
+        aria-expanded={showLauncher}
+        aria-controls="launcher-panel"
+      >
+        New session
+      </button>
+    </div>
   </header>
 
   <main>
@@ -326,6 +372,20 @@
     {/if}
     {#if pinError}
       <ErrorBanner message={pinError} />
+    {/if}
+
+    {#if uiUpdateAvailable}
+      <div class="notice">
+        New UI available.
+        <button class="notice__link" onclick={() => window.location.reload()}>
+          Reload
+        </button>
+        <button
+          class="notice__dismiss"
+          onclick={() => (uiUpdateAvailable = false)}
+          aria-label="Dismiss">&times;</button
+        >
+      </div>
     {/if}
 
     {#if showLauncher}
@@ -394,6 +454,7 @@
         {selectMode}
         {selectedIds}
         onToggleSelected={toggleSelected}
+        {resumablePresets}
       />
     {/if}
   </main>
@@ -416,6 +477,28 @@
     max-width: var(--content-max-width);
     margin: 0 auto;
   }
+  .sessions__header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    /* The title is the flex item built to absorb a narrow viewport -- it
+       ellipsizes (see `.sessions__title`). These are two buttons with
+       nowrap labels and a 44px touch floor: shrinking them just overflows
+       their own box, which is exactly what a phone-width header did once
+       this group gained a second button. */
+    flex-shrink: 0;
+  }
+
+  /* Square, so the glyph sits centred rather than in a text-width pill; the
+     44px floor is the same touch-target rule the session rows follow
+     (docs/09-frontend.md). */
+  .sessions__settings-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 1.125rem;
+    line-height: 1;
+  }
+
   .sessions__header {
     display: flex;
     align-items: center;

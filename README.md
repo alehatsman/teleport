@@ -35,12 +35,33 @@ installs it to `~/.local/bin`. Linux and macOS only for now — Windows users gr
 
 ```bash
 teleportd
-# open http://127.0.0.1:7337
+# open http://localhost:7337
 ```
 
 That's it — no separate build step, no config required to start. The web UI lets you
 open a shell or spawn an agent preset, and the session keeps running whether or not
 anything is attached to watch it.
+
+## Add your own agent
+
+The launcher's presets live in `<data_dir>/presets.toml`, written with the built-in
+defaults on first run. Add an entry and it shows up in the launcher — no rebuild:
+
+```toml
+[[presets]]
+id = "myagent"
+label = "My Agent"
+command = "myagent"
+args = []
+icon = "terminal"
+login_shell = true          # resolve the command through your login shell's PATH
+resume_args = ["--resume"]  # optional: offer "Resume" on a closed session
+```
+
+`resume_args` is the only thing teleport knows about an agent's capabilities — leave it
+out and no Resume action is offered. See
+[docs/04-api-protocol.md](docs/04-api-protocol.md#get-apiv1presets) for the full field
+list.
 
 ## Use over Tailscale (phone/remote)
 
@@ -49,7 +70,7 @@ HTTPS — no public exposure, no extra auth to build.
 
 ```bash
 teleportd --listen 127.0.0.1:7337
-# http://127.0.0.1:7337/?token=3f9a1c...          <- printed on start, note the token
+# http://localhost:7337/?token=3f9a1c...          <- printed on start, note the token
 
 tailscale serve --bg http://127.0.0.1:7337
 # Serve config saved. Access via https://mainpc.tail1234.ts.net/
@@ -59,6 +80,26 @@ Add your tailnet hostname to `allowed_hosts`/`allowed_origins` in
 `<data_dir>/config.toml`, then open `https://mainpc.tail1234.ts.net/?token=...` from
 your phone. See [docs/07-remote-access.md](docs/07-remote-access.md) for details, ACLs,
 and the Cloudflare Tunnel alternative.
+
+## Sign in with a passkey
+
+Pasting a 64-character token into a phone gets old. Open the `localhost` URL once with
+the startup token, then **Settings → Passkeys → Add passkey** — Touch ID, Windows Hello,
+a hardware key, or a password manager acting as a WebAuthn provider (1Password, iCloud
+Keychain, Bitwarden). After that it's one tap.
+
+Two things WebAuthn itself dictates, and no setting changes:
+
+- **Use `localhost`, not `127.0.0.1`.** A passkey is bound to a domain and an IP address
+  is not one, so the daemon prints `http://localhost:<port>`. The listener is still
+  loopback-only.
+- **One passkey per address.** The `localhost` passkey will not work at
+  `https://mainpc.tail1234.ts.net` — enroll there once too. A synced provider puts both
+  on every device you own. This is the anti-phishing property, not a bug.
+
+The startup token never goes away: it's what authorizes the first enrollment, and it's
+the way back in if you lose every passkey. Details in
+[docs/17-passkey-login.md](docs/17-passkey-login.md).
 
 ## Screenshots
 

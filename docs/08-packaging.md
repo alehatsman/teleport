@@ -104,6 +104,10 @@ Rules for the updater:
   and make them confirm.
 - Updating the **shell** alone is always safe — the WebView is disposable, which is the
   entire point of keeping the daemon out of the GUI process.
+- Updating the **web UI** alone is always safe too, and does not restart anything: the
+  assets live in a directory the daemon re-reads per request, and `teleport ui upgrade`
+  swaps it atomically ([18-ui-upgrades.md](18-ui-upgrades.md)). A UI-only fix must never
+  be shipped as a daemon restart.
 - A daemon that must restart marks its sessions `lost` / `daemon_restart` like any other
   restart. The UI states the truth; it never pretends a session survived.
 
@@ -140,9 +144,18 @@ daemon/      →  cargo build --release  →  teleportd[.exe]
 desktop/     →  tauri build         →  .dmg / .msi / .AppImage / .deb
 ```
 
-The daemon serves `web/dist` (via `ServeDir` in v1; consider embedding the assets in the
-binary later so `teleportd` is a single self-contained file). SPA fallback: unknown
-non-`/api` paths return `index.html`.
+The daemon serves those assets via `ServeDir`, from whichever of three sources resolves
+first: an explicit `--web-dist` (dev), the `<data_dir>/web/current` slot that
+`teleport ui upgrade` flips ([18](18-ui-upgrades.md#the-slot)), then the bundle embedded
+in the binary ([16](16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature)),
+so `teleportd` is still a single self-contained file on a fresh install. `--web-dist`
+has **no default** — the old cwd-relative `web/dist` resolved under `cargo run` from the
+repo root and never under launchd/systemd, where cwd is `/`.
+
+SPA fallback: unknown non-`/api` paths return `index.html`. One exception: a path under
+`/assets/` is a content-hashed file or a `404`, never the shell — see
+[18](18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained) for why, and for
+how a stale tab's chunks are found in a retained version directory.
 
 Tauri's `externalBin` picks up the target-triple-suffixed daemon binary
 (`teleportd-x86_64-apple-darwin`, etc.). Build the daemon for each target before
