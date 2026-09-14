@@ -108,6 +108,26 @@ Rules:
 - **argv array, never a concatenated shell string.** A shell may be the `command` when
   the user deliberately wants shell parsing — that is their explicit choice, not a
   default. See [06-security.md](06-security.md).
+- **`login_shell` wraps the child in the user's login shell.** `SpawnSpec::login_shell`
+  makes `pty::spawn` exec `$SHELL -l -c 'exec "$0" "$@"' <program> <args…>` rather than
+  `<program>` directly. Added 2026-09-14: teleportd's premise is running as a background
+  service (launchd/systemd), and a service inherits none of the environment a login shell
+  builds — `PATH` beyond the system default, `EDITOR`, `LANG`, language-manager shims,
+  tool-specific vars. The `shell` preset never felt this (`$SHELL -l` rebuilds its own
+  environment on the way in), but `claude`/`codex` exec a named binary with no shell in
+  between and get only what launchd/systemd handed the daemon. The workaround that
+  existed instead — mirroring the user's `PATH` into the service unit by hand — is a
+  second source of truth that silently drifts from their dotfiles and can carry nothing
+  but `PATH`.
+  This does **not** violate the argv-array rule above: the only shell-parsed text is the
+  fixed literal `exec "$0" "$@"`, which contains no request data, and `<program>` /
+  `<args…>` are passed as separate argv entries that `sh -c` binds to `$0`/`$@` without
+  re-parsing. `-l`, not `-i`: a login shell sources the profile files that build the
+  environment, while an interactive shell additionally loads prompt, completion and
+  plugins — startup cost and stray output teleport does not want in an agent's PTY.
+  Windows has no login-shell convention, so `login_shell` is ignored there.
+  Cost is one shell startup per session *create* (~50–150ms); attach and resize are
+  untouched.
 - Drop the `slave` handle in the parent after spawning on Unix, so the master sees EOF
   when the child exits.
 - `cmd.cwd()` must receive a validated, existing directory.

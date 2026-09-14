@@ -66,6 +66,13 @@ export interface Preset {
   command: string
   args: string[]
   icon: string
+  /**
+   * Daemon-side spawn detail, mirrored here only so this file stays a faithful
+   * copy of `GET /api/v1/presets` (docs/04-api-protocol.md#get-apiv1presets) --
+   * the UI has nothing to do with it. Optional because a daemon older than the
+   * field omits it entirely.
+   */
+  login_shell?: boolean
 }
 
 export interface PresetsResponse {

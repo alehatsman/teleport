@@ -29,6 +29,14 @@ pub struct Preset {
     pub args: Vec<String>,
     /// Icon name for the UI; not interpreted here.
     pub icon: String,
+    /// Run `command` through the user's login shell instead of exec'ing it
+    /// directly, so it inherits the environment their dotfiles build
+    /// (docs/03-pty-layer.md#spawn, docs/04-api-protocol.md#get-apiv1presets).
+    /// `#[serde(default)]` -- a `presets.toml` written before this field
+    /// existed keeps the old direct-exec behavior rather than silently
+    /// changing how every already-installed daemon spawns its agents.
+    #[serde(default)]
+    pub login_shell: bool,
 }
 
 impl Preset {
@@ -38,14 +46,7 @@ impl Preset {
     /// this, but no built-in or realistic custom preset needs one.
     pub fn resolved_command(&self) -> String {
         if self.command == "$SHELL" {
-            #[cfg(unix)]
-            {
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-            }
-            #[cfg(windows)]
-            {
-                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-            }
+            crate::pty::login_shell_path()
         } else {
             self.command.clone()
         }
@@ -60,12 +61,16 @@ struct PresetsFile {
 
 fn default_presets() -> Vec<Preset> {
     vec![
+        // The two agent presets exec a named binary with no shell in
+        // between, so they -- and only they -- need `login_shell` to see the
+        // user's real PATH/EDITOR/LANG (docs/03-pty-layer.md#spawn).
         Preset {
             id: "codex".to_string(),
             label: "Codex".to_string(),
             command: "codex".to_string(),
             args: vec![],
             icon: "codex".to_string(),
+            login_shell: true,
         },
         Preset {
             id: "claude".to_string(),
@@ -73,13 +78,17 @@ fn default_presets() -> Vec<Preset> {
             command: "claude".to_string(),
             args: vec![],
             icon: "claude".to_string(),
+            login_shell: true,
         },
+        // Already `$SHELL -l`: wrapping a login shell in a login shell buys
+        // nothing but a second startup.
         Preset {
             id: "shell".to_string(),
             label: "Shell".to_string(),
             command: "$SHELL".to_string(),
             args: vec!["-l".to_string()],
             icon: "terminal".to_string(),
+            login_shell: false,
         },
     ]
 }
@@ -217,6 +226,51 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A `presets.toml` written before `login_shell` existed must keep the
+    /// old direct-exec behavior rather than silently changing how an
+    /// already-installed daemon spawns its agents -- the field is
+    /// `#[serde(default)]` for exactly this
+    /// (docs/04-api-protocol.md#get-apiv1presets).
+    #[test]
+    fn an_older_presets_file_without_login_shell_defaults_to_off() {
+        let dir = scratch_dir("no-login-shell-field");
+        fs::write(
+            dir.join("presets.toml"),
+            r#"
+            [[presets]]
+            id = "claude"
+            label = "Claude Code"
+            command = "claude"
+            icon = "claude"
+            "#,
+        )
+        .unwrap();
+        let presets = load_or_create(&dir).expect("load");
+        assert!(!presets[0].login_shell);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The agent presets exec a named binary with no shell in between, so
+    /// they are the ones that need the login shell; `shell` is already
+    /// `$SHELL -l` and wrapping it would buy nothing but a second startup.
+    #[test]
+    fn only_the_agent_defaults_ask_for_a_login_shell() {
+        let by_id = |id: &str| -> bool {
+            default_presets()
+                .into_iter()
+                .find(|p| p.id == id)
+                .expect("built-in preset")
+                .login_shell
+        };
+        assert!(by_id("claude"));
+        assert!(by_id("codex"));
+        assert!(!by_id("shell"));
+    }
+
     /// M4 review: same gap, for an empty command.
     #[test]
     fn an_empty_preset_command_is_a_clean_error() {
@@ -254,6 +308,7 @@ mod tests {
             command: "$SHELL".into(),
             args: vec![],
             icon: "terminal".into(),
+            login_shell: false,
         };
         std::env::set_var("SHELL", "/bin/zsh");
         assert_eq!(preset.resolved_command(), "/bin/zsh");

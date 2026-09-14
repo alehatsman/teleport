@@ -249,7 +249,7 @@ impl SessionManager {
         if !spec.cwd.is_dir() {
             return Err(CreateError::InvalidCwd(spec.cwd.to_path_buf()));
         }
-        if !resolve_executable(spec.program, spec.cwd) {
+        if !resolve_executable(spec.program, spec.cwd, spec.login_shell) {
             return Err(CreateError::ExecutableNotFound(spec.program.to_string()));
         }
 
@@ -522,7 +522,20 @@ impl SessionManager {
 /// bits beyond "the executable bit is set on Unix" are not checked -- the
 /// exec call itself is the authoritative check for anything subtler, same as
 /// every shell's own `$PATH` lookup.
-fn resolve_executable(command: &str, cwd: &Path) -> bool {
+fn resolve_executable(command: &str, cwd: &Path, login_shell: bool) -> bool {
+    // Under `login_shell` the daemon's own `$PATH` is exactly the thing we
+    // decided not to trust (docs/03-pty-layer.md#spawn) -- scanning it here
+    // would `422` every agent preset on a launchd/systemd-started daemon,
+    // the failure this whole flag exists to fix. Ask the shell that will
+    // actually run the command instead. One extra short-lived shell per
+    // create, on the blocking pool `api.rs` already put this call on; the
+    // alternative -- skip the check and let the wrapper shell print
+    // `command not found` into the PTY -- regresses a clean `422` into a
+    // session that flickers to `exited`
+    // (docs/04-api-protocol.md#post-apiv1sessions).
+    if login_shell && cfg!(unix) {
+        return resolves_in_login_shell(command, cwd);
+    }
     let path = Path::new(command);
     if path.components().count() > 1 {
         // A literal path (contains a separator). A relative one resolves
@@ -541,6 +554,32 @@ fn resolve_executable(command: &str, cwd: &Path) -> bool {
         return false;
     };
     std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)))
+}
+
+/// Asks the user's login shell whether `command` resolves, the same way the
+/// wrapper in `pty::spawn` will. `command -v` is a POSIX builtin (zsh and
+/// bash both have it), and the command name goes in as `$1` -- a separate
+/// argv entry -- so nothing interpolates into shell source.
+///
+/// A user profile that hangs hangs this probe too; that same profile would
+/// hang the session spawn a moment later, so the failure mode is not new,
+/// only earlier and quieter. Any non-zero exit or spawn error is a "no".
+#[cfg(unix)]
+fn resolves_in_login_shell(command: &str, cwd: &Path) -> bool {
+    std::process::Command::new(pty::login_shell_path())
+        .args([
+            "-l",
+            "-c",
+            r#"command -v -- "$1" >/dev/null 2>&1"#,
+            "teleportd-probe",
+            command,
+        ])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success())
 }
 
 #[cfg(unix)]
@@ -703,9 +742,10 @@ mod tests {
         // to nothing -- only resolving against the session's `cwd` finds it.
         assert!(!resolve_executable(
             "./run.sh",
-            &std::env::temp_dir().join("not-the-right-place")
+            &std::env::temp_dir().join("not-the-right-place"),
+            false
         ));
-        assert!(resolve_executable("./run.sh", &dir));
+        assert!(resolve_executable("./run.sh", &dir, false));
 
         #[expect(
             clippy::let_underscore_must_use,
