@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte"
   import { describeError } from "@/api/api"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
-  import DirectoryBrowser from "@/features/sessions/DirectoryBrowser.svelte"
+  import LocationPicker from "@/features/sessions/LocationPicker.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
   import { buildLaunchRequest } from "./launchRequest"
   import { LOCATION_CHIPS_MAX, type Location } from "./locations"
@@ -21,6 +21,7 @@
     locations,
     homeDir,
     resumeSession,
+    onTogglePin,
     onLaunch,
     onClose,
   }: {
@@ -31,6 +32,7 @@
     locations: Location[]
     homeDir: string | null
     resumeSession: Session | null
+    onTogglePin: (path: string, pinned: boolean) => void
     onLaunch: (req: CreateSessionRequest) => Promise<void>
     onClose: () => void
   } = $props()
@@ -49,7 +51,7 @@
   // the common case now (see launchRequest.ts).
   let resumeRequested = $derived(resumeSession !== null)
   let firstFieldEl: HTMLSelectElement | undefined = $state()
-  let showBrowser = $state(false)
+  let showPicker = $state(false)
   // The inline shortlist. The rest of `locations` stays reachable through
   // the datalist and the browser; a chip wall taller than the form is not a
   // shortlist (docs/18-locations.md#stage-1--ranked-labelled-chips).
@@ -75,21 +77,15 @@
 
   function onLauncherKeydown(e: KeyboardEvent) {
     if (e.key !== "Escape") return
-    if (showBrowser) closeBrowser()
+    // Innermost panel first: Escape in the picker closes the picker, not the
+    // whole form the user was halfway through filling in.
+    if (showPicker) showPicker = false
     else onClose()
   }
 
-  function openBrowser() {
-    showBrowser = true
-  }
-
-  function closeBrowser() {
-    showBrowser = false
-  }
-
-  function useBrowsedFolder(path: string) {
+  function usePickedLocation(path: string) {
     cwd = path
-    showBrowser = false
+    showPicker = false
   }
 
   function onLauncherSubmit(e: SubmitEvent) {
@@ -184,7 +180,9 @@
         autocorrect="off"
         spellcheck="false"
       />
-      <button type="button" class="btn launcher__browse-btn" onclick={openBrowser}>Browse…</button>
+      <button type="button" class="btn launcher__browse-btn" onclick={() => (showPicker = true)}>
+        Choose…
+      </button>
     </div>
     {#if locations.length > 0}
       <!-- Full paths here, not the chips' basename+parent split: this one is
@@ -197,8 +195,14 @@
       </datalist>
     {/if}
   </label>
-  {#if showBrowser}
-    <DirectoryBrowser initialPath={cwd || null} onSelect={useBrowsedFolder} onClose={closeBrowser} />
+  {#if showPicker}
+    <LocationPicker
+      value={cwd}
+      {locations}
+      {onTogglePin}
+      onSelect={usePickedLocation}
+      onClose={() => (showPicker = false)}
+    />
   {/if}
   {#if chipLocations.length > 0}
     <!-- datalist above covers typing; these are for tapping -- a
