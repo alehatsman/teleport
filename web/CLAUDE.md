@@ -22,6 +22,14 @@ third top-level layer, and do not put a component at `src/` root — `App.svelte
 `main.ts` and `app.css` are the only root files. Imports use the `@/` alias for `src/`
 (`@/api/api`, `@/features/sessions/Session.svelte`) — no relative `../` across layers.
 
+## Node
+
+`package.json`'s `engines` is `^24.0.0 || >=26.0.0` and `.npmrc` sets
+`engine-strict`, so `npm ci` on anything older refuses outright rather than
+warning. `web/.nvmrc` pins 24 -- `nvm use` in this directory picks it up. A
+system node that predates 24 is the most common reason a fresh worktree fails
+before it has run a single check.
+
 ## Gate
 
 - `npm run lint && npm run typecheck && npm run build && npm test` before calling
