@@ -21,6 +21,7 @@ use teleportd::api::{build_router, AppState};
 use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::log::LogLimits;
 use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
+use teleportd::web_assets::WebAssets;
 use teleportd::{config, now_ms, presets};
 
 mod service;
@@ -57,12 +58,19 @@ struct Cli {
     #[arg(long)]
     i_know_what_im_doing: bool,
 
-    /// Built SPA assets to serve at `/` (docs/08-packaging.md#build-pipeline).
-    /// Relative to the current working directory. Missing is not an error --
-    /// the `npm run dev` workflow ([09](../docs/09-frontend.md#dev-workflow))
+    /// Built SPA assets to serve at `/` (docs/08-packaging.md#build-pipeline),
+    /// e.g. a fresh `npm run build` output during development.
+    ///
+    /// Unset by default, and deliberately: the old `web/dist` default was
+    /// *cwd-relative*, so it resolved under `cargo run` from the repo root
+    /// and never under launchd/systemd, where cwd is `/`. Unset means an
+    /// installed daemon is governed by the `<data_dir>/web/current` slot
+    /// (docs/18-ui-upgrades.md#the-slot) and a developer by this flag,
+    /// which is what each actually wants. Missing is not an error -- the
+    /// `npm run dev` workflow ([09](../docs/09-frontend.md#dev-workflow))
     /// never touches this path.
-    #[arg(long, default_value = "web/dist")]
-    web_dist: PathBuf,
+    #[arg(long)]
+    web_dist: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -184,21 +192,25 @@ async fn main() -> Result<()> {
         &config.allowed_hosts,
     );
 
-    let web_dist = if cli.web_dist.is_dir() {
-        info!(path = %cli.web_dist.display(), "serving web UI");
-        Some(cli.web_dist.clone())
-    } else {
-        // A binary built with `--features embedded-web` still serves the UI
-        // from its own baked-in bundle when `--web-dist` doesn't resolve to
-        // a real directory (docs/16-release-pipeline.md) -- the log line
-        // says which is actually about to happen.
-        if cfg!(feature = "embedded-web") {
-            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving embedded web UI");
-        } else {
-            info!(path = %cli.web_dist.display(), "no built web UI at this path; serving API only");
+    // Both candidate paths are *remembered*, not checked: whether either
+    // resolves is decided per request, so a `teleport ui upgrade` that
+    // creates the slot for the first time takes effect without a restart
+    // -- the exact restart docs/18-ui-upgrades.md exists to avoid.
+    let web = WebAssets::new(cli.web_dist.clone(), Some(data_dir.join("web")));
+    match (&cli.web_dist, web.resolve()) {
+        (Some(_), Some(path)) => info!(path = %path.display(), "serving web UI from --web-dist"),
+        (None, Some(path)) => {
+            info!(path = %path.display(), version = ?web.ui_version(), "serving web UI from the version slot");
         }
-        None
-    };
+        // A binary built with `--features embedded-web` still serves the UI
+        // from its own baked-in bundle when neither disk path resolves
+        // (docs/16-release-pipeline.md) -- the log line says which is
+        // actually about to happen.
+        (_, None) if cfg!(feature = "embedded-web") => {
+            info!("no web UI on disk; serving the embedded web UI");
+        }
+        (_, None) => info!("no web UI on disk and none embedded; serving API only"),
+    }
 
     // The one trigger `POST /api/v1/shutdown` has (docs/11-mvp-plan.md#m10):
     // shared into `AppState` so the handler can wake `shutdown_signal()`
@@ -215,7 +227,7 @@ async fn main() -> Result<()> {
         config,
         started_at: Instant::now(),
         version: env!("CARGO_PKG_VERSION"),
-        web_dist,
+        web,
         shutdown: Arc::clone(&shutdown_trigger),
         ws_tickets: TicketStore::new(),
     });

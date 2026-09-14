@@ -18,17 +18,23 @@ use rust_embed::RustEmbed;
 #[folder = "../web/dist"]
 struct Assets;
 
-/// Serves `path` from the embedded bundle, falling back to `index.html` for
-/// anything not found -- the same SPA client-side-routing rule
+/// Serves `path` from the embedded bundle, falling back to `index.html`
+/// for anything not found -- the same SPA client-side-routing rule
 /// `api.rs::spa_fallback` applies to the disk-backed `ServeDir` path.
-pub fn serve(path: &str) -> Response {
+///
+/// `is_asset` turns that fallback off for `/assets/*`, matching the disk
+/// path's rule (docs/18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained):
+/// a content-hashed chunk is its bytes or a `404`, never an HTML document.
+pub fn serve(path: &str, is_asset: bool) -> Response {
     let path = path.trim_start_matches('/');
-    let (served_path, file) = match Assets::get(path) {
-        Some(file) => (path, file),
-        None => match Assets::get("index.html") {
-            Some(file) => ("index.html", file),
-            None => return StatusCode::NOT_FOUND.into_response(),
-        },
+    let shell = || Assets::get("index.html").map(|file| ("index.html", file));
+    let found = match Assets::get(path) {
+        Some(file) => Some((path, file)),
+        None if is_asset => None,
+        None => shell(),
+    };
+    let Some((served_path, file)) = found else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     let mime = mime_guess::from_path(served_path).first_or_octet_stream();
     (

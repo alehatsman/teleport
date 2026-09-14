@@ -52,7 +52,7 @@ Resolution order for what `/` serves:
 
 | # | Source | When |
 |---|---|---|
-| 1 | `--web-dist <path>` | Given explicitly. The dev workflow; unchanged. |
+| 1 | `--web-dist <path>` | Given explicitly **and** it resolves to a directory. The dev workflow; unchanged. |
 | 2 | `<data_dir>/web/current` | It resolves to a directory. |
 | 3 | Embedded bundle | Neither above resolves, in an `embedded-web` build. |
 | 4 | `404` | Neither above resolves, in a plain build (`npm run dev` workflow). |
@@ -85,11 +85,13 @@ fetches anything (see [Why the CLI, not the daemon](#why-the-cli-not-the-daemon)
 
 ```text
 1. resolve release tag (latest, or --version vX.Y.Z)
-2. download teleport-web-<tag>.tar.gz + checksums.txt
-3. verify sha256 against checksums.txt        ← abort here leaves everything untouched
-4. extract to <data_dir>/web/.staging-<tag>/  ← never over a retained dir
-5. sanity-check the extracted tree            ← index.html exists and is non-empty
-6. rename .staging-<tag> -> <tag>
+2. if <tag>/ is already installed, skip to 7   ← re-extracting would mean deleting a
+                                                  directory the daemon may be serving
+3. download teleport-web-<tag>.tar.gz + checksums.txt
+4. verify sha256 against checksums.txt        ← abort here leaves everything untouched
+5. extract to <data_dir>/web/.staging-<tag>/  ← never over a retained dir
+6. sanity-check the extracted tree            ← index.html exists and is non-empty
+   then rename .staging-<tag> -> <tag>
 7. symlink+rename <tag> over current          ← atomic; this is the upgrade
 8. prune retained versions beyond the newest 3
 ```
@@ -100,7 +102,8 @@ serves the new bundle. **Nothing signals the daemon and nothing restarts.**
 
 Steps 1–6 are all recoverable: any failure leaves `current` pointing where it did, and a
 `.staging-*` directory to delete. Step 7 is the only irreversible one and it is a single
-syscall.
+syscall. Step 8 runs after the flip, so a failure there has already left the upgrade
+itself complete.
 
 ### Stale tabs, and why old versions are retained
 
@@ -122,14 +125,24 @@ Two rules:
   so the directory scan sits on the miss path and costs nothing in steady state. No
   watcher, no in-process index, no invalidation.
 
-Three retained versions is a guess, tunable by config. What it buys: a tab open across
-two upgrades still works. What it costs: ~1.2 MB.
+Three retained versions is a guess (`RETAINED_VERSIONS` in `cli/src/ui.rs`). What it
+buys: a tab open across two upgrades still works. What it costs: ~1.2 MB.
+
+Retention and rollback order versions by directory **mtime**, i.e. install order, not by
+name: version names don't sort (`v1.10.0` < `v1.9.0` lexically), and what both operations
+actually mean is "the one before this one". The daemon's own miss-path scan orders by
+name instead, because there it only needs to be deterministic — a hashed asset present in
+two retained versions is the same bytes either way.
 
 ### Rollback
 
-`teleport ui rollback` re-points `current` at the newest retained version older than the
-current one. One `rename(2)`, same atomicity, no download. This is why a flip retains the
-previous directory rather than replacing it in place.
+`teleport ui rollback` re-points `current` at the version installed immediately before
+the current one. One `rename(2)`, same atomicity, no download. This is why a flip retains
+the previous directory rather than replacing it in place.
+
+It steps *backwards* specifically, rather than "to some other version": at the oldest
+retained version it stops and says so. Picking "the newest one that isn't current" would
+make a second rollback walk forward again, and the two commands would just toggle.
 
 ## Cache headers
 
@@ -166,6 +179,9 @@ keystrokes and scroll position, and deciding that for someone mid-session is exa
 kind of thing this product exists not to do. A reload is cheap and safe — the PTYs are in
 the daemon, and the socket reconnects with replay from its last offset
 ([04-api-protocol.md](04-api-protocol.md#reconnect)) — but it is still the user's call.
+
+The poll is on its own 30s timer, not the 3s session-list one, and the offer appears on
+the list view only ([09-frontend.md](09-frontend.md#the-new-ui-available-offer)).
 
 ## Version skew is normal now
 
@@ -238,6 +254,10 @@ teleport ui upgrade [--version vX.Y.Z]
 teleport ui rollback
 ```
 
+`teleport ui` is dispatched before the CLI resolves a daemon connection: it is
+filesystem work on `<data_dir>/web` and must run whether or not a daemon is up. Failing
+"upgrade the UI" because the daemon is stopped would be absurd.
+
 `ui status` exists so the first question after a failed upgrade — "what is it actually
 serving?" — has an answer that isn't `ls -l` on a symlink.
 
@@ -252,9 +272,9 @@ serving?" — has an answer that isn't `ls -l` on a symlink.
 ## Testing
 
 Per [10-testing.md](10-testing.md)'s division: the daemon gets the serving behavior, the
-CLI gets the file manipulation, and one e2e proves they meet.
+CLI gets the file manipulation, and one e2e proves they meet. All of the below exist.
 
-Daemon:
+Daemon (`daemon/src/web_assets.rs` unit tests, `daemon/tests/web_static.rs`):
 - A flip **while serving** — request, `rename(2)` a new `current` into place, request
   again, second response is the new bundle. No restart anywhere in the test.
 - A daemon started with **no slot at all** picks up the first-ever `current` created
@@ -265,17 +285,26 @@ Daemon:
   never `text/html`.
 - `index.html` carries `no-cache`; `/assets/*` carries `immutable`.
 - `/health`'s `ui_version` matches the slot, and is `null` under `--web-dist`.
+- A **dangling** `current` (its target pruned) resolves to nothing, so the daemon falls
+  back to the embedded bundle instead of serving 404s forever.
 
-CLI:
-- A checksum mismatch aborts with `current` unchanged and no partial directory left
-  behind.
-- A tarball entry that escapes the staging directory is rejected.
-- Retention keeps exactly the newest 3 and never prunes `current`.
-- `rollback` returns to the previous version and is idempotent at the oldest retained.
+CLI (`cli/src/ui.rs` unit tests):
+- A checksum mismatch aborts, and an archive absent from `checksums.txt` is an error.
+- A tarball entry that escapes the staging directory is rejected, as is a symlink entry
+  and an archive with no files at all.
+- Extraction strips the tag directory and writes `0600` files into a `0700` directory.
+- Retention keeps exactly the newest 3 behind the live one and never prunes `current`.
+- `rollback` returns to the previous version and stops at the oldest retained.
 - `--url` at a non-loopback host refuses.
 
-E2E: with a session open in the browser, flip the slot, reload the page, and assert the
-**session is still live and attachable** — the actual claim this whole document makes.
+E2E (`web/e2e/ui-upgrade.spec.ts`, against a daemon started with **no** `--web-dist` so
+it resolves the slot the way an installed one does):
+- With a session open, controlled and live, the slot is flipped, `/health` reports the
+  new version, the daemon's pid is unchanged and its socket never dropped. After a
+  reload the page is on the new bundle, the session is still live, still controlled, and
+  a typed command still reaches the PTY that predates the upgrade.
+- A stale tab's hashed chunk still loads after the flip, with `immutable` on it, and a
+  chunk that exists nowhere is a `404` that is not HTML.
 
 ## Open questions
 
@@ -285,6 +314,10 @@ E2E: with a session open in the browser, flip the slot, reload the page, and ass
   pass (it already has one for sessions, [05](05-persistence.md#garbage-collection))
   would also catch dirs left by an interrupted upgrade. Deferred until interrupted
   upgrades are observed to actually leave litter.
+- **No release carries the artifact yet.** `teleport ui upgrade` cannot be exercised
+  end to end against a real release until a tag is cut with the new
+  `teleport-web-<tag>.tar.gz` in it. Everything up to and including the flip is covered
+  by tests that build their own tarball; only the two `GET`s against github.com are not.
 - **Desktop shell.** The Tauri build ([08](08-packaging.md)) bundles its own daemon
   sidecar; whether its tray offers "upgrade UI" separately, or the shell simply inherits
   whatever the slot holds, is not decided here.

@@ -77,10 +77,15 @@ async function waitForHealth(baseURL: string, timeoutMs: number): Promise<void> 
  * page's WebSocket can only ever reconnect to the port it was loaded from.
  */
 export async function startDaemon(
-  opts: { dataDir?: string; port?: number } = {}
+  opts: { dataDir?: string; port?: number; webDist?: string | null } = {}
 ): Promise<DaemonHandle> {
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "teleport-e2e-"))
-  const webDist = join(import.meta.dirname, "..", "..", "dist")
+  // `webDist: null` starts the daemon with no --web-dist at all, so the UI
+  // comes from the <data_dir>/web/current slot instead -- what an installed
+  // daemon actually does (docs/18-ui-upgrades.md#the-slot), and the only way
+  // ui-upgrade.spec.ts can flip the bundle under a running process.
+  const webDist =
+    opts.webDist === undefined ? join(import.meta.dirname, "..", "..", "dist") : opts.webDist
   const portFile = join(dataDir, "port")
   if (existsSync(portFile)) {
     // Reusing a data dir: the daemon only ever *writes* this file, so a
@@ -107,8 +112,7 @@ export async function startDaemon(
       `127.0.0.1:${opts.port ?? 0}`,
       "--data-dir",
       dataDir,
-      "--web-dist",
-      webDist,
+      ...(webDist === null ? [] : ["--web-dist", webDist]),
     ],
     // `detached: true` makes this process its own process-group leader
     // (POSIX only -- fine here, Windows is a different lane, see

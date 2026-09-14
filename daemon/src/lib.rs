@@ -15,6 +15,7 @@ pub mod persistence;
 pub mod presets;
 pub mod pty;
 pub mod session;
+pub mod web_assets;
 pub mod ws;
 
 /// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field

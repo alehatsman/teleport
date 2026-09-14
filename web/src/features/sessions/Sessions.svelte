@@ -128,6 +128,18 @@
   // every cwd un-collapsed until a full reload.
   let healthLoaded = $state(false)
 
+  // The UI version this tab booted against, and whether the daemon is now
+  // serving a different one -- `teleport ui upgrade` flips the slot under a
+  // running daemon (docs/18-ui-upgrades.md), so the bundle can change
+  // without anything here noticing. Offered as a reload, never taken
+  // automatically: a reload throws away unsent keystrokes and scroll
+  // position, and deciding that for someone mid-session is exactly what
+  // this product exists not to do. Shown on the list only -- the session
+  // view is not the place to interrupt someone, and the offer is still
+  // waiting when they come back.
+  let bootUiVersion: string | null = null
+  let uiUpdateAvailable = $state(false)
+
   let showLauncher = $state(false)
   // Owned by Sessions.svelte, not SessionLauncher, and passed down bindable --
   // these three outlive the launcher panel's own mount/unmount cycle
@@ -146,6 +158,11 @@
   let recentCwds: string[] = $derived(deriveRecentCwds(sessions))
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  // Health is polled far more slowly than the session list: it exists here
+  // to notice a UI flip, which happens on human timescales, and re-asking
+  // every 3s would triple this page's request count for nothing.
+  const HEALTH_POLL_MS = 30_000
+  let healthTimer: ReturnType<typeof setInterval> | null = null
 
   onMount(async () => {
     await Promise.all([refresh(), loadPresets(), loadHealthInfo()])
@@ -154,10 +171,12 @@
     // open decision -- polling is the pragmatic interim answer for M5, not
     // a considered final one. Flagged, not silently closed.
     pollTimer = setInterval(refresh, 3000)
+    healthTimer = setInterval(() => void loadHealthInfo(), HEALTH_POLL_MS)
   })
 
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer)
+    if (healthTimer) clearInterval(healthTimer)
   })
 
   async function refresh() {
@@ -196,6 +215,13 @@
       deviceName = res.device_name ?? null
       homeDir = res.home_dir ?? null
       healthLoaded = true
+      const uiVersion = res.ui_version ?? null
+      // Nothing to compare against when the daemon serves the embedded
+      // bundle or a dev tree -- it reports null, and null never "changes".
+      if (uiVersion !== null) {
+        if (bootUiVersion === null) bootUiVersion = uiVersion
+        else if (uiVersion !== bootUiVersion) uiUpdateAvailable = true
+      }
     } catch {
       // Same call the app already makes for other things; if it's failing
       // there's a bigger problem than the title, and that surfaces
@@ -286,6 +312,20 @@
   <main>
     {#if loadError}
       <ErrorBanner message={loadError} />
+    {/if}
+
+    {#if uiUpdateAvailable}
+      <div class="notice">
+        New UI available.
+        <button class="notice__link" onclick={() => window.location.reload()}>
+          Reload
+        </button>
+        <button
+          class="notice__dismiss"
+          onclick={() => (uiUpdateAvailable = false)}
+          aria-label="Dismiss">&times;</button
+        >
+      </div>
     {/if}
 
     {#if showLauncher}

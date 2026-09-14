@@ -33,6 +33,7 @@ use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::config::Config;
 use teleportd::device::Device;
 use teleportd::session::{Attach, Replay, ReplayStep, SessionManager};
+use teleportd::web_assets::WebAssets;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -178,6 +179,13 @@ pub(crate) async fn spawn(config: Config) -> Daemon {
 /// tests, which need a router that actually serves `web/dist`
 /// (docs/08-packaging.md#build-pipeline).
 pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> Daemon {
+    spawn_with_web_assets(config, WebAssets::new(web_dist, None)).await
+}
+
+/// Like [`spawn_with_web_dist`], but takes the whole [`WebAssets`] -- for
+/// the version-slot tests (docs/18-ui-upgrades.md), which need a
+/// `<data_dir>/web` root rather than a fixed dist directory.
+pub(crate) async fn spawn_with_web_assets(config: Config, web: WebAssets) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -204,7 +212,7 @@ pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf
         config,
         started_at: Instant::now(),
         version: "test",
-        web_dist,
+        web,
         shutdown: Arc::new(tokio::sync::Notify::new()),
         ws_tickets: TicketStore::new(),
     });
