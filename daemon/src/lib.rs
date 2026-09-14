@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod auth_routes;
 pub mod auth_store;
 pub mod config;
 pub mod device;

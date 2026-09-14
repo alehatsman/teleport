@@ -56,6 +56,9 @@ sha2               = "0.10"
 # exist and never bakes in stale assets.
 rust-embed         = { version = "8", optional = true }
 mime_guess         = { version = "2", optional = true }
+webauthn-rs = "0.5"
+url = "2.5.8"
+uuid = "1.26.1"
 
 [features]
 embedded-web = ["dep:rust-embed", "dep:mime_guess"]

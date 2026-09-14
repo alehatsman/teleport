@@ -78,6 +78,14 @@ pub struct AppState {
     /// Backs `POST /api/v1/ws-ticket` and `ws.rs`'s upgrade check
     /// (docs/06-security.md#token-on-the-websocket-upgrade, mitigation 2).
     pub ws_tickets: auth::TicketStore,
+    /// The port the listener actually bound, for the `localhost` URL
+    /// `/auth/status` hands back when an origin cannot do `WebAuthn`. Never
+    /// the 7337 default -- the fallback is ephemeral
+    /// (docs/08-packaging.md#port-discovery--do-not-hardcode-7337).
+    pub bound_port: u16,
+    /// `WebAuthn` instances, RP policy and in-flight ceremonies
+    /// (docs/17-passkey-login.md).
+    pub passkeys: crate::auth_routes::PasskeyState,
 }
 
 /// `Principal` as an axum extractor: every handler that needs one declares
@@ -229,7 +237,7 @@ impl IntoResponse for ApiError {
 /// Applies [`OriginPolicy::check`] -- callers use this only on mutating
 /// routes and the WS upgrade (docs/06-security.md#browser-origin-defense);
 /// GET routes rely on [`Principal`] alone.
-fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     state.origin_policy.check(headers).map_err(ApiError::from)
 }
 
@@ -279,6 +287,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/browse", get(browse))
         .route("/api/v1/shutdown", post(shutdown))
         .route("/api/v1/ws-ticket", post(create_ws_ticket))
+        // docs/17-passkey-login.md#api-surface. `status` and the two
+        // `login/*` routes are unauthenticated by necessity -- a client has
+        // no credential before it logs in -- but every one of these is
+        // Origin-checked inside its handler, unlike `/health`.
+        .route("/api/v1/auth/status", get(crate::auth_routes::status))
+        .route(
+            "/api/v1/auth/passkey/register/start",
+            post(crate::auth_routes::register_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/register/finish",
+            post(crate::auth_routes::register_finish),
+        )
+        .route(
+            "/api/v1/auth/passkey/login/start",
+            post(crate::auth_routes::login_start),
+        )
+        .route(
+            "/api/v1/auth/passkey/login/finish",
+            post(crate::auth_routes::login_finish),
+        )
+        .route(
+            "/api/v1/auth/passkeys",
+            get(crate::auth_routes::list_passkeys),
+        )
+        .route(
+            "/api/v1/auth/passkeys/{id}",
+            axum::routing::patch(crate::auth_routes::rename_passkey)
+                .delete(crate::auth_routes::delete_passkey),
+        )
+        .route(
+            "/api/v1/auth/sessions",
+            get(crate::auth_routes::list_sessions),
+        )
+        .route(
+            "/api/v1/auth/sessions/{id}",
+            axum::routing::delete(crate::auth_routes::delete_session),
+        )
+        .route("/api/v1/auth/logout", post(crate::auth_routes::logout))
         .fallback(spa_fallback)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,

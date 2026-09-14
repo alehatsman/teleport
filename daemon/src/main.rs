@@ -180,6 +180,18 @@ async fn main() -> Result<()> {
         &config.allowed_hosts,
     );
 
+    // Built from the port actually bound plus config, before the state it
+    // goes into (docs/17-passkey-login.md). One `Webauthn` instance per
+    // usable RP ID; an origin that cannot host a passkey simply gets none.
+    let passkeys = teleportd::auth_routes::PasskeyState::new(
+        bound_addr.port(),
+        &config.allowed_origins,
+        &config.allowed_hosts,
+    );
+    if config.auth_token && config.auth_passkey {
+        info!(rp_ids = ?passkeys.policy.rp_ids(), "passkey login available");
+    }
+
     let web_dist = if cli.web_dist.is_dir() {
         info!(path = %cli.web_dist.display(), "serving web UI");
         Some(cli.web_dist.clone())
@@ -214,6 +226,8 @@ async fn main() -> Result<()> {
         web_dist,
         shutdown: Arc::clone(&shutdown_trigger),
         ws_tickets: TicketStore::new(),
+        bound_port: bound_addr.port(),
+        passkeys,
     });
     spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
@@ -367,6 +381,15 @@ fn spawn_gc_task(
         loop {
             interval.tick().await;
             run_gc_pass(&db, &sessions_root, retain_days, &live).await;
+            // Expired login sessions ride the same pass rather than a
+            // second timer (docs/17-passkey-login.md#session-lifetime).
+            // They are already unusable -- expiry is enforced in the lookup
+            // query -- so this is housekeeping, not enforcement.
+            match db.sweep_expired_auth_sessions(now_ms()).await {
+                Ok(0) => {}
+                Ok(n) => info!(count = n, "swept expired login sessions"),
+                Err(e) => warn!(error = %e, "sweeping expired login sessions failed"),
+            }
         }
     });
 }

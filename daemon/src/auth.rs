@@ -118,6 +118,11 @@ pub fn resolve_ws(
     resolve(headers, query_token, expected_token, auth_required)
 }
 
+/// How stale `auth_sessions.last_seen_ms` may get before a request pays for
+/// updating it. One hour is plenty for a list whose only job is telling a
+/// human which of their devices is still signed in.
+const LAST_SEEN_THROTTLE_MS: i64 = 60 * 60 * 1000;
+
 /// `sha256(token)` -- how a login session is addressed in SQLite. The token
 /// itself is never stored (docs/17-passkey-login.md#data-model), so this is
 /// the only form the daemon keeps at rest, and lookup is an indexed exact
@@ -165,7 +170,15 @@ pub async fn resolve_with_sessions(
         .lookup_auth_session(token_digest(presented), now_ms)
         .await
     {
-        Ok(Some(row)) => Ok(Principal::DeviceToken { token_id: row.id }),
+        Ok(Some(row)) => {
+            // Throttled by the stored value itself rather than by a timer:
+            // a "signed-in devices" list is not worth a disk write on every
+            // request (docs/17-passkey-login.md#session-lifetime).
+            if now_ms.saturating_sub(row.last_seen_ms) >= LAST_SEEN_THROTTLE_MS {
+                db.note_auth_session_seen(&row.id, now_ms);
+            }
+            Ok(Principal::DeviceToken { token_id: row.id })
+        }
         Ok(None) => Err(AuthError::Unauthorized),
         Err(e) => {
             // A database error is not an authorization decision. Fail
