@@ -152,6 +152,11 @@ mod tests {
         dir
     }
 
+    /// Every caller is a `cfg(unix)` test (they all need `point_current_at`
+    /// below), so on Windows this is dead code and `-D warnings` says so.
+    /// Same gate, same reason as `point_current_at`: "needs symlinks", not a
+    /// platform being dropped.
+    #[cfg(unix)]
     fn version(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).expect("create version dir");

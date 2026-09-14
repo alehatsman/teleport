@@ -582,6 +582,19 @@ fn resolves_in_login_shell(command: &str, cwd: &Path) -> bool {
         .is_ok_and(|st| st.success())
 }
 
+/// Windows has no login-shell convention, so `SpawnSpec::login_shell` is
+/// ignored when spawning there (`pty::login_shell_wrapper`) and
+/// `resolve_executable`'s `cfg!(unix)` guard keeps this unreachable. It
+/// exists because that guard is a *runtime* bool -- the call still has to
+/// compile on Windows, which it did not between the login-shell merge and
+/// [#74](https://github.com/alehatsman/teleport/issues/74). `false` is the
+/// safe answer if the guard is ever loosened: a `422` the user can read,
+/// not a session that spawns and dies.
+#[cfg(not(unix))]
+fn resolves_in_login_shell(_command: &str, _cwd: &Path) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
