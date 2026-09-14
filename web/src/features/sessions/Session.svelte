@@ -8,7 +8,7 @@
   import SessionHeader from "@/features/sessions/SessionHeader.svelte"
   import Terminal from "@/features/sessions/Terminal.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
-  import { viewerStatus } from "./sessionDisplay"
+  import { displayTitle, viewerStatus } from "./sessionDisplay"
 
   let { sessionId, onBack }: { sessionId: string; onBack: () => void } = $props()
 
@@ -186,7 +186,7 @@
 
 <div class="session">
   <SessionHeader
-    title={session?.command ?? sessionId}
+    title={displayTitle(session, sessionId)}
     tone={status.tone}
     pulse={status.unsettled}
     statusLabel={status.label}

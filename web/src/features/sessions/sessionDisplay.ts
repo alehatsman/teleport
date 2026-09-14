@@ -123,6 +123,19 @@ export function displayCwd(path: string, homeDir: string | null): string {
   return path
 }
 
+// The one primary label for a session, shared by the list row and the
+// viewer header: `title` is the agent's own live terminal-title update
+// (e.g. "✳ Fix login bug") -- once it exists it's strictly more informative
+// than the bare executable name, so it replaces `command` wherever a
+// session identifies itself. Falls back to the id for a session record that
+// failed to load (Session.svelte's sessionError path).
+export function displayTitle(
+  session: Pick<Session, "title" | "command"> | null,
+  fallback: string
+): string {
+  return session?.title || session?.command || fallback
+}
+
 /** What the viewer header says about one session: record first, socket second. */
 export type ViewerStatus = {
   /** The process is gone (exited or lost) -- nothing left to control. */

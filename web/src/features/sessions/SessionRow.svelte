@@ -5,6 +5,7 @@
     displayAge,
     displayCwd,
     displayOutcome,
+    displayTitle,
     needsAttention,
     outcomeFailed,
     STATE_LABELS,
@@ -184,7 +185,7 @@
         class="session-row__command"
         title={session.title ? `${session.command} ${session.args.join(" ")}`.trim() : undefined}
       >
-        {session.title || session.command}
+        {displayTitle(session, session.command)}
       </span>
       {#if !session.title && session.args.length > 0}
         <!-- Only next to the raw command: it reads as "claude --resume …",
