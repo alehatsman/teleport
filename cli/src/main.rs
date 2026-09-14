@@ -6,6 +6,11 @@ mod attach;
 mod connect;
 mod http;
 mod identity;
+// The slot is a `current` symlink flipped by rename(2), and every file it
+// writes is mode 0600 -- both unix-only primitives. Windows keeps the
+// subcommand (so `--help` still documents it) and refuses at runtime rather
+// than pretending; see the `Command::Ui` arm in `main`.
+#[cfg(unix)]
 mod ui;
 
 use std::collections::HashMap;
@@ -107,16 +112,28 @@ async fn main() -> Result<()> {
     // whether or not a daemon is up -- resolving a connection first would
     // make "upgrade the UI" fail on a stopped daemon for no reason.
     if let Command::Ui { action } = &cli.command {
-        ui::reject_remote(cli.url.as_deref())?;
-        let data_dir = connect::data_dir(cli.data_dir.clone())?;
-        return match action {
-            UiAction::Status => {
-                ui::status(&data_dir);
-                Ok(())
-            }
-            UiAction::Upgrade { version } => ui::upgrade(&data_dir, version.clone()).await,
-            UiAction::Rollback => ui::rollback(&data_dir),
-        };
+        #[cfg(unix)]
+        {
+            ui::reject_remote(cli.url.as_deref())?;
+            let data_dir = connect::data_dir(cli.data_dir.clone())?;
+            return match action {
+                UiAction::Status => {
+                    ui::status(&data_dir);
+                    Ok(())
+                }
+                UiAction::Upgrade { version } => ui::upgrade(&data_dir, version.clone()).await,
+                UiAction::Rollback => ui::rollback(&data_dir),
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = action;
+            anyhow::bail!(
+                "`teleport ui` is not supported on this platform yet: the version slot is a \
+                 symlink flipped by rename(2) (docs/18-ui-upgrades.md#the-slot). Windows \
+                 daemons still serve their embedded UI, which upgrades with the binary."
+            );
+        }
     }
 
     let conn = connect::resolve(cli.url, cli.token, cli.data_dir.clone())?;

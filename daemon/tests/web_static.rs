@@ -154,9 +154,15 @@ async fn every_response_carries_the_content_security_policy() {
 }
 
 // --- version slot (docs/18-ui-upgrades.md) ---------------------------------
+//
+// The slot's `current` is a symlink, so every item below needs one and each
+// carries `#[cfg(unix)]`. `cfg(unix)`, not `target_os` -- "this needs
+// symlinks", the same way other fixtures say "this drives /bin/sh", not a
+// platform being dropped (scripts/check-target-os-gates.sh's header).
 
 /// A `<data_dir>/web` slot root with one version directory in it, `current`
 /// pointing at it, and `body` as the content of its one hashed asset.
+#[cfg(unix)]
 fn write_slot(root: &std::path::Path, version: &str, body: &str) {
     let dir = root.join(version);
     std::fs::create_dir_all(dir.join("assets")).expect("create version dir");
@@ -168,6 +174,7 @@ fn write_slot(root: &std::path::Path, version: &str, body: &str) {
 
 /// The upgrade's one irreversible step, exactly as `teleport ui upgrade`
 /// performs it: symlink to a temp name, then `rename(2)` over `current`.
+#[cfg(unix)]
 fn flip(root: &std::path::Path, version: &str) {
     let staged = root.join(".current.staged");
     #[expect(
@@ -179,6 +186,7 @@ fn flip(root: &std::path::Path, version: &str) {
     std::fs::rename(&staged, root.join("current")).expect("rename over current");
 }
 
+#[cfg(unix)]
 fn slot_root(name: &str) -> std::path::PathBuf {
     let dir =
         std::env::temp_dir().join(format!("teleportd-web-slot-{}-{name}", std::process::id()));
@@ -191,6 +199,7 @@ fn slot_root(name: &str) -> std::path::PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn slot_daemon(root: &std::path::Path) -> impl std::future::Future<Output = support::Daemon> {
     support::spawn_with_web_assets(
         support::default_config(),
@@ -201,6 +210,7 @@ fn slot_daemon(root: &std::path::Path) -> impl std::future::Future<Output = supp
 /// The claim the whole design rests on: the bundle changes underneath a
 /// *running* daemon, with no restart and no signal anywhere in this test.
 #[tokio::test]
+#[cfg(unix)]
 async fn flipping_the_slot_changes_what_is_served_without_a_restart() {
     let root = slot_root("flip");
     write_slot(&root, "v1.0.0", "old");
@@ -223,6 +233,7 @@ async fn flipping_the_slot_changes_what_is_served_without_a_restart() {
 /// Resolving once at startup would make the first upgrade need the one
 /// restart this design exists to avoid.
 #[tokio::test]
+#[cfg(unix)]
 async fn a_daemon_started_with_no_slot_picks_up_the_first_one() {
     let root = slot_root("first");
     let daemon = slot_daemon(&root).await;
@@ -243,6 +254,7 @@ async fn a_daemon_started_with_no_slot_picks_up_the_first_one() {
 /// A tab that loaded the previous UI still requests its content-hashed
 /// chunks. They live only in the directory the flip moved off of.
 #[tokio::test]
+#[cfg(unix)]
 async fn a_hashed_asset_from_a_retained_version_is_still_served() {
     let root = slot_root("retained");
     write_slot(&root, "v1.0.0", "old chunk");
@@ -271,6 +283,7 @@ async fn a_hashed_asset_from_a_retained_version_is_still_served() {
 /// asked for JavaScript and got `text/html` fails with a parse error that
 /// says nothing about what happened.
 #[tokio::test]
+#[cfg(unix)]
 async fn a_hashed_asset_that_exists_nowhere_is_a_404_not_the_shell() {
     let root = slot_root("missing-asset");
     write_slot(&root, "v1.0.0", "chunk");
@@ -299,6 +312,7 @@ async fn a_hashed_asset_that_exists_nowhere_is_a_404_not_the_shell() {
 /// the tab to the old bundle, and a correct flip looks broken
 /// (docs/18-ui-upgrades.md#cache-headers).
 #[tokio::test]
+#[cfg(unix)]
 async fn the_shell_revalidates_and_hashed_assets_are_immutable() {
     let root = slot_root("cache");
     write_slot(&root, "v1.0.0", "chunk");
@@ -336,6 +350,7 @@ async fn the_shell_revalidates_and_hashed_assets_are_immutable() {
 
 /// `/health`'s `ui_version` is what the app watches to offer a reload.
 #[tokio::test]
+#[cfg(unix)]
 async fn health_reports_the_slot_version_and_null_for_a_dev_tree() {
     let root = slot_root("health");
     write_slot(&root, "v1.2.3", "chunk");
@@ -362,6 +377,7 @@ async fn health_reports_the_slot_version_and_null_for_a_dev_tree() {
     cleanup(&root);
 }
 
+#[cfg(unix)]
 async fn health_body(router: axum::Router) -> serde_json::Value {
     let request = Request::builder()
         .method("GET")
@@ -373,6 +389,7 @@ async fn health_body(router: axum::Router) -> serde_json::Value {
     serde_json::from_str(&body_string(response).await).expect("json body")
 }
 
+#[cfg(unix)]
 fn cleanup(root: &std::path::Path) {
     #[expect(
         clippy::let_underscore_must_use,

@@ -158,6 +158,11 @@ mod tests {
         dir
     }
 
+    /// Only the `current` *symlink* is unix-only here; nothing in
+    /// `WebAssets` itself is. The tests that need one are gated with it --
+    /// `cfg(unix)`, not `target_os`, so this is "needs symlinks", not a
+    /// platform being dropped (scripts/check-target-os-gates.sh's header).
+    #[cfg(unix)]
     fn point_current_at(root: &Path, name: &str) {
         let staged = root.join(".staged-link");
         std::os::unix::fs::symlink(name, &staged).expect("symlink");
@@ -165,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_explicit_dist_wins_over_the_slot() {
         let root = scratch("explicit-wins");
         let dist = version(&root, "dist");
@@ -180,6 +186,7 @@ mod tests {
     /// A `--web-dist` pointed at a directory that isn't there is a typo or a
     /// tree that hasn't been built yet, not an instruction to serve nothing.
     #[test]
+    #[cfg(unix)]
     fn a_dist_that_does_not_resolve_falls_through_to_the_slot() {
         let root = scratch("dist-missing");
         version(&root, "v1.0.0");
@@ -193,6 +200,7 @@ mod tests {
     /// `resolve` hands back the *symlink*, not its target, so every `open`
     /// re-follows it and a flip lands on the very next request.
     #[test]
+    #[cfg(unix)]
     fn the_slot_resolves_to_the_symlink_not_its_target() {
         let root = scratch("symlink-not-target");
         version(&root, "v1.0.0");
@@ -214,6 +222,7 @@ mod tests {
     /// A `current` left dangling by a prune is not servable, and saying so
     /// falls back to the embedded bundle instead of serving 404s forever.
     #[test]
+    #[cfg(unix)]
     fn a_dangling_current_resolves_to_nothing() {
         let root = scratch("dangling");
         version(&root, "v1.0.0");
@@ -225,6 +234,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn retained_versions_exclude_the_live_one_and_anything_staged() {
         let root = scratch("retained");
         version(&root, "v1.0.0");
@@ -237,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn retained_versions_are_newest_name_first() {
         let root = scratch("retained-order");
         version(&root, "v1.0.0");
@@ -254,6 +265,7 @@ mod tests {
     /// A dev tree has no sibling versions to fall through to, and must not
     /// go looking in whatever directory happens to contain it.
     #[test]
+    #[cfg(unix)]
     fn a_dist_tree_has_no_retained_versions() {
         let root = scratch("dist-no-retained");
         let dist = version(&root, "dist");
