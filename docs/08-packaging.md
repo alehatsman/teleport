@@ -104,6 +104,10 @@ Rules for the updater:
   and make them confirm.
 - Updating the **shell** alone is always safe — the WebView is disposable, which is the
   entire point of keeping the daemon out of the GUI process.
+- Updating the **web UI** alone is always safe too, and does not restart anything: the
+  assets live in a directory the daemon re-reads per request, and `teleport ui upgrade`
+  swaps it atomically ([18-ui-upgrades.md](18-ui-upgrades.md)). A UI-only fix must never
+  be shipped as a daemon restart.
 - A daemon that must restart marks its sessions `lost` / `daemon_restart` like any other
   restart. The UI states the truth; it never pretends a session survived.
 

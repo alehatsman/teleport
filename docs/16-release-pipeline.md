@@ -52,6 +52,18 @@ Linux `aarch64` is deliberately not in the first pass — no arm64 GitHub-hosted
 this repo's plan yet, and cross-compiling `rusqlite`'s bundled SQLite adds real CI
 complexity. Add it if someone asks for it.
 
+## The web bundle also ships on its own
+
+The embedded bundle below stays exactly as it is — a downloaded `teleportd` is still one
+self-contained file. Alongside it the release publishes
+`teleport-web-<tag>.tar.gz`: the *same* `npm run build` output, packaged once, target
+independent, checksummed into the same `checksums.txt`.
+
+It exists so a UI-only change can be shipped without restarting a daemon and killing
+every session under it ([18-ui-upgrades.md](18-ui-upgrades.md), issue
+[#65](https://github.com/alehatsman/teleport/issues/65)). `teleport ui upgrade` consumes
+it; nothing else does, and an install that never runs that command never sees it.
+
 ## Embedding the web UI (`embedded-web` feature)
 
 `daemon/src/main.rs` already resolves the SPA assets to serve at `/` from a `--web-dist`
