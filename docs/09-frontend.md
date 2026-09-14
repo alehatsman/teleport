@@ -77,6 +77,17 @@ five components composed together, each small enough to read in one sitting:
   surfaces as `launchError` here without closing), `onClose: () => void`. Owns:
   `resumeSessionId`/`launching`/`launchError`/browser-open state, the Escape-to-close
   handler, first-field autofocus.
+  - **Restoring a closed session.** "Resume" shows on any closed/`lost` session on the
+    `claude` preset, not only one with a `claude_resume_id`. With an id in hand, Launch
+    runs `claude --resume <id>` and continues that exact conversation. Without one it
+    runs a bare `claude --resume`, which opens Claude Code's own picker for that folder
+    — still a resume, and the *normal* case: Claude Code 2.1.x no longer emits the OSC 8
+    link the id is read from, so gating the action on it hid it on every real session
+    (issue [#65](https://github.com/alehatsman/teleport/issues/65)).
+    Never `--continue`: that takes the most recent conversation in the directory with no
+    prompt, so restoring several agents that were working in the same repo — the usual
+    shape of a fleet of them — would point all of them at one conversation. The rule
+    itself lives in `launchRequest.ts` and is unit-tested there.
   - `cwd`, `selectedPreset` and `customCommand` are **bindable, not local** — they must
     outlive this component's own mount/unmount cycle (it exists only while the panel is
     open) so a value already typed or chosen is never lost on a close+reopen. That

@@ -209,11 +209,12 @@
     showLauncher = true
   }
 
-  /** "Resume this" on a closed session with a known claude_resume_id -- opens the
-      launcher already set up to continue that exact conversation instead of making
-      the id be found, copied, and pasted in by hand. */
+  /** "Resume" on a closed session -- opens the launcher already set up against that
+      session's folder. With a known `claude_resume_id` it continues that exact
+      conversation; without one (the normal case now that Claude Code no longer emits
+      the link) Launch still resumes, through Claude Code's own picker for the folder.
+      Either way the id never has to be found, copied and pasted by hand. */
   function openResumeLauncher(session: Session) {
-    if (!session.claude_resume_id) return
     resumeSessionForLauncher = session
     showLauncher = true
   }

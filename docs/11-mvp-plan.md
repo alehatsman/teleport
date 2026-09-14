@@ -690,7 +690,9 @@ reusing M6's "independently re-verified" language for something narrower.
 > same "the reader loop already scans every byte" reasoning. `Session::title`/
 > `claude_resume_id`, `GET /api/v1/sessions`' `title`/`claude_resume_id`
 > (docs/04-api-protocol.md#get-apiv1sessions) -- both live-only, same tradeoff
-> `last_bell_ms`/`idle_since_ms` already made, not a new one.
+> `last_bell_ms`/`idle_since_ms` already made, not a new one. **Superseded:** both are
+> persisted now (docs/05-persistence.md#agent-reported-metadata) -- live-only made the
+> resume id vanish in the one case it exists for, a daemon restart (issue #65).
 >
 > **Explicitly not a documented contract**: both rest on Claude Code's own current
 > terminal output format, not a versioned API teleport controls. A future CLI build

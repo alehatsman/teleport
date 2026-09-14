@@ -88,7 +88,7 @@ pub use replay::{
 pub use types::{Chunk, SessionEvent, SessionId, SessionLostReason, SessionMeta, SessionState};
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -195,6 +195,16 @@ pub struct Session {
     /// never appeared, same as any other agent/preset that isn't Claude
     /// Code at all.
     claude_resume_id: Arc<Mutex<Option<String>>>,
+    /// Set by the reader thread when an OSC update actually changed
+    /// `title`/`claude_resume_id`, cleared by whoever writes the pair to
+    /// SQLite (docs/05-persistence.md#agent-reported-metadata). The reader
+    /// thread writes leading-edge -- the first change after a quiet second
+    /// goes straight out, so Claude Code's one-shot resume link is durable
+    /// almost immediately -- and [`Session::flush_agent_meta`] picks up
+    /// whatever that throttle deferred.
+    agent_meta_dirty: Arc<AtomicBool>,
+    /// When the pair above last reached SQLite; 0 = never.
+    last_agent_meta_persist_ms: Arc<AtomicI64>,
 }
 
 impl Session {
@@ -426,6 +436,31 @@ impl Session {
     /// link never appeared.
     pub fn claude_resume_id(&self) -> Option<String> {
         self.claude_resume_id.lock().clone()
+    }
+
+    /// Writes `title`/`claude_resume_id` to the session row if an OSC
+    /// update has changed either since the last write; a no-op otherwise
+    /// (docs/05-persistence.md#agent-reported-metadata).
+    ///
+    /// Called from `main.rs`'s idle-sweep tick and from the exit listener,
+    /// never from the reader thread -- that one has its own leading-edge
+    /// write, and this is the trailing half: an agent whose banner sets a
+    /// title and then goes quiet for an hour produces no further output to
+    /// carry the deferred write, and a restart in that hour is exactly when
+    /// the row has to hold it.
+    ///
+    /// The flag is cleared before the values are read. A change landing in
+    /// between only re-sets it -- the reader stores the value *before*
+    /// marking dirty -- so the next tick writes it again rather than
+    /// dropping it.
+    pub fn flush_agent_meta(&self, now_ms: i64) {
+        if !self.agent_meta_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let Some(db) = &self.db else { return };
+        self.last_agent_meta_persist_ms
+            .store(now_ms, Ordering::Relaxed);
+        db.note_agent_meta(&self.id.to_string(), self.title(), self.claude_resume_id());
     }
 
     /// Called from `main.rs`'s idle-sweep task, once per session per tick

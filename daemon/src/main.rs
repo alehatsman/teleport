@@ -346,6 +346,15 @@ fn spawn_idle_sweep_task(state: Arc<AppState>) {
             let now = now_ms();
             for session in state.sessions.list() {
                 session.tick_idle(now, IDLE_THRESHOLD_MS);
+                // The trailing half of the OSC metadata write
+                // (docs/05-persistence.md#agent-reported-metadata): the
+                // reader thread writes the first change straight out and
+                // defers the rest, and a session that goes quiet right
+                // after its banner has no further output to carry them.
+                // Free to ride this tick -- it already walks every live
+                // session on a clock, for the same "only time can tell you
+                // nothing happened" reason.
+                session.flush_agent_meta(now);
             }
         }
     });

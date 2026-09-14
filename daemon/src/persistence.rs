@@ -115,6 +115,12 @@ pub struct SessionRow {
     pub exit_code: Option<i32>,
     /// Why this row is `lost` rather than a clean `exited`, if it is.
     pub lost_reason: Option<String>,
+    /// The agent's own most recent terminal title, if its output ever
+    /// carried one (docs/05-persistence.md#agent-reported-metadata).
+    pub title: Option<String>,
+    /// A Claude Code resumable-conversation id, if its output ever carried
+    /// one (docs/05-persistence.md#agent-reported-metadata).
+    pub claude_resume_id: Option<String>,
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -150,6 +156,8 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         exited_at_ms: row.get("exited_at_ms")?,
         exit_code: row.get("exit_code")?,
         lost_reason: row.get("lost_reason")?,
+        title: row.get("title")?,
+        claude_resume_id: row.get("claude_resume_id")?,
     })
 }
 
@@ -221,6 +229,14 @@ enum Command {
         id: String,
         event_type: &'static str,
         ts_ms: i64,
+    },
+    /// Fire-and-forget, throttled by the caller
+    /// (docs/05-persistence.md#agent-reported-metadata). A `None` field is
+    /// "no value to write", never "clear it".
+    NoteAgentMeta {
+        id: String,
+        title: Option<String>,
+        claude_resume_id: Option<String>,
     },
     Delete {
         id: String,
@@ -402,6 +418,34 @@ impl Db {
         }
     }
 
+    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: the
+    /// agent's own OSC-reported title and Claude resume id
+    /// (docs/05-persistence.md#agent-reported-metadata). Callers throttle;
+    /// this is reached from the reader thread's already-throttled branch,
+    /// never per chunk. A `None` field is not written, so a caller that
+    /// only has a title cannot clear a resume id.
+    pub fn note_agent_meta(
+        &self,
+        id: &str,
+        title: Option<String>,
+        claude_resume_id: Option<String>,
+    ) {
+        if self
+            .tx
+            .try_send(Command::NoteAgentMeta {
+                id: id.to_string(),
+                title,
+                claude_resume_id,
+            })
+            .is_err()
+        {
+            warn!(
+                session_id = id,
+                "db-writer channel full or gone; dropped an agent-metadata update"
+            );
+        }
+    }
+
     /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: records a
     /// `session_events` row (D3, docs/04-api-protocol.md#get-apiv1sessions).
     pub fn note_event(&self, id: &str, event_type: &'static str) {
@@ -462,7 +506,7 @@ impl Db {
 /// open, every migration at an index `>= user_version` runs, then
 /// `user_version` is set to `MIGRATIONS.len()` (docs/05-persistence.md#migrations).
 /// No migration framework, no external tool.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 
 const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -500,6 +544,14 @@ CREATE TABLE IF NOT EXISTS session_events (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, event_id);
+";
+
+/// Agent-reported metadata (docs/05-persistence.md#agent-reported-metadata).
+/// Two nullable columns, no backfill: a row written before this migration
+/// simply never carried either value.
+const SCHEMA_V2: &str = r"
+ALTER TABLE sessions ADD COLUMN title TEXT;
+ALTER TABLE sessions ADD COLUMN claude_resume_id TEXT;
 ";
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -695,60 +747,140 @@ fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Insert(row, reply) => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(insert_session(conn, &row));
             }
             Command::MarkClosing { id, reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(mark_closing(conn, &id));
             }
-            Command::MarkExited { id, exited_at_ms, exit_code, lost_reason, output_bytes, reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
-                let _ = reply.send(mark_exited(conn, &id, exited_at_ms, exit_code, lost_reason, output_bytes));
+            Command::MarkExited {
+                id,
+                exited_at_ms,
+                exit_code,
+                lost_reason,
+                output_bytes,
+                reply,
+            } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(mark_exited(
+                    conn,
+                    &id,
+                    exited_at_ms,
+                    exit_code,
+                    lost_reason,
+                    output_bytes,
+                ));
             }
             Command::NoteOutputBytes { id, output_bytes } => {
-                // Saturating, not truncating: see mark_exited's identical cast.
-                let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
-                if let Err(e) = conn.execute(
-                    "UPDATE sessions SET output_bytes = ?1 WHERE id = ?2",
-                    params![output_bytes, id],
-                ) {
-                    warn!(session_id = id, error = %e, "persisting output_bytes failed");
-                }
+                note_output_bytes(conn, &id, output_bytes);
             }
-            Command::NoteSize { id, cols, rows } => {
-                if let Err(e) = conn.execute(
-                    "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
-                    params![i64::from(cols), i64::from(rows), id],
-                ) {
-                    warn!(session_id = id, error = %e, "persisting cols/rows failed");
-                }
+            Command::NoteSize { id, cols, rows } => note_size(conn, &id, cols, rows),
+            Command::NoteEvent {
+                id,
+                event_type,
+                ts_ms,
+            } => {
+                note_event(conn, &id, event_type, ts_ms);
             }
-            Command::NoteEvent { id, event_type, ts_ms } => {
-                if let Err(e) = conn.execute(
-                    "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, ?3, NULL)",
-                    params![id, ts_ms, event_type],
-                ) {
-                    warn!(session_id = id, event_type, error = %e, "recording session_events row failed");
-                }
+            Command::NoteAgentMeta {
+                id,
+                title,
+                claude_resume_id,
+            } => {
+                note_agent_meta(conn, &id, title.as_deref(), claude_resume_id.as_deref());
             }
             Command::Delete { id, reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(delete_session(conn, &id));
             }
             Command::Get { id, reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(get_session(conn, &id));
             }
             Command::List { reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(list_sessions(conn));
             }
-            Command::GcCandidates { older_than_ms, reply } => {
-                #[expect(clippy::let_underscore_must_use, reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost")]
+            Command::GcCandidates {
+                older_than_ms,
+                reply,
+            } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
                 let _ = reply.send(gc_candidates(conn, older_than_ms));
             }
         }
+    }
+}
+
+/// The fire-and-forget half of [`writer_loop`]: nobody is waiting on a
+/// reply, so a failure is logged and dropped rather than returned. Split
+/// out of the match arms only to keep that loop readable.
+fn note_output_bytes(conn: &Connection, id: &str, output_bytes: u64) {
+    // Saturating, not truncating: see mark_exited's identical cast.
+    let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
+    if let Err(e) = conn.execute(
+        "UPDATE sessions SET output_bytes = ?1 WHERE id = ?2",
+        params![output_bytes, id],
+    ) {
+        warn!(session_id = id, error = %e, "persisting output_bytes failed");
+    }
+}
+
+fn note_size(conn: &Connection, id: &str, cols: u16, rows: u16) {
+    if let Err(e) = conn.execute(
+        "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
+        params![i64::from(cols), i64::from(rows), id],
+    ) {
+        warn!(session_id = id, error = %e, "persisting cols/rows failed");
+    }
+}
+
+fn note_event(conn: &Connection, id: &str, event_type: &'static str, ts_ms: i64) {
+    if let Err(e) = conn.execute(
+        "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, ?3, NULL)",
+        params![id, ts_ms, event_type],
+    ) {
+        warn!(session_id = id, event_type, error = %e, "recording session_events row failed");
+    }
+}
+
+/// `COALESCE`, so a call carrying only one of the two leaves the other
+/// alone: the title and the resume link arrive as independent escape
+/// sequences, and a title update must never erase the id the restore path
+/// reads (docs/05-persistence.md#agent-reported-metadata).
+fn note_agent_meta(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    claude_resume_id: Option<&str>,
+) {
+    if let Err(e) = conn.execute(
+        "UPDATE sessions SET title = COALESCE(?1, title), claude_resume_id = COALESCE(?2, claude_resume_id) WHERE id = ?3",
+        params![title, claude_resume_id, id],
+    ) {
+        warn!(session_id = id, error = %e, "persisting agent-reported metadata failed");
     }
 }
 
@@ -976,6 +1108,84 @@ mod tests {
         let candidates = db.gc_candidates(now_ms() - 1_000).await.unwrap();
         let ids: Vec<&str> = candidates.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["old"]);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/05-persistence.md#agent-reported-metadata: the two sequences
+    /// arrive independently, so a write carrying one must never clear the
+    /// other.
+    #[tokio::test]
+    async fn agent_meta_writes_never_clear_the_field_they_do_not_carry() {
+        let dir = scratch_dir("agent-meta");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        insert(&db, new_row("s1")).await;
+
+        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
+        assert_eq!(fetched.title, None, "nothing has reported one yet");
+        assert_eq!(fetched.claude_resume_id, None);
+
+        // The banner's link, then a title update with no link in hand.
+        db.note_agent_meta("s1", None, Some("session_ABC".to_string()));
+        db.note_agent_meta("s1", Some("Fix the login bug".to_string()), None);
+
+        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
+        assert_eq!(fetched.title.as_deref(), Some("Fix the login bug"));
+        assert_eq!(
+            fetched.claude_resume_id.as_deref(),
+            Some("session_ABC"),
+            "a title-only write must leave the resume id alone -- it is what the restore path reads"
+        );
+
+        // And the reverse order, on a row that already has both.
+        db.note_agent_meta("s1", Some("Now doing something else".to_string()), None);
+        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
+        assert_eq!(fetched.claude_resume_id.as_deref(), Some("session_ABC"));
+        assert_eq!(fetched.title.as_deref(), Some("Now doing something else"));
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A database written by a build from before the agent-metadata columns
+    /// existed: `user_version` is 1, the two columns are absent, and the
+    /// rows in it must survive the upgrade rather than the daemon failing
+    /// to open its own state (docs/05-persistence.md#migrations).
+    #[tokio::test]
+    async fn a_v1_database_gains_the_agent_meta_columns_on_open() {
+        let dir = scratch_dir("migrate-v1");
+        let db_path = dir.join("state.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1i64).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, kind, command, argv_json, cwd, state, cols, rows, created_at_ms)
+                 VALUES ('old1', 'shell', '/bin/sh', '[]', '/tmp', 'exited', 80, 24, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (db, _) = Db::open(&db_path, &dir.join("sessions")).unwrap();
+        let fetched = db
+            .get_session("old1")
+            .await
+            .unwrap()
+            .expect("the pre-migration row must survive");
+        assert_eq!(fetched.title, None);
+        assert_eq!(fetched.claude_resume_id, None);
+
+        db.note_agent_meta("old1", None, Some("session_XYZ".to_string()));
+        let fetched = db.get_session("old1").await.unwrap().expect("row");
+        assert_eq!(fetched.claude_resume_id.as_deref(), Some("session_XYZ"));
+
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort test cleanup; nothing to do if it fails"

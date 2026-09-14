@@ -565,11 +565,11 @@ impl SessionView {
     /// recovered row is never a `Session`). Same reasoning for
     /// `last_bell_ms`/`idle_since_ms`: attention signals are "does this
     /// running session need you," which a closed session never does.
-    /// `title`/`claude_resume_id` are never persisted either (same
-    /// live-only tradeoff), so a session old enough to have fallen out of
-    /// the in-memory map -- GC, or a daemon restart -- loses them too; the
-    /// resume-id specifically is still visible for a while after a session
-    /// exits (GC's own delay, not this), just not forever.
+    /// `title`/`claude_resume_id` *are* persisted, and come straight off
+    /// the row (docs/05-persistence.md#agent-reported-metadata) -- a
+    /// resume id is only ever useful once the session that had it is gone,
+    /// and the usual way it goes is the daemon restarting under it, so
+    /// live-only made the field null in exactly its own use case.
     fn from_row(row: &persistence::SessionRow) -> Self {
         SessionView {
             id: row.id.clone(),
@@ -592,8 +592,8 @@ impl SessionView {
             subscribers: 0,
             last_bell_ms: None,
             idle_since_ms: None,
-            title: None,
-            claude_resume_id: None,
+            title: row.title.clone(),
+            claude_resume_id: row.claude_resume_id.clone(),
         }
     }
 }

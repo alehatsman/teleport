@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,6 +37,14 @@ const OUTPUT_BYTES_PERSIST_INTERVAL_MS: i64 = 1000;
 /// in-memory `last_bell_ms` (what `GET` actually reports) always reflects the
 /// most recent bell regardless of this throttle.
 const BELL_PERSIST_INTERVAL_MS: i64 = 1000;
+
+/// Ceiling on how often a session's OSC-reported title/resume id reach
+/// SQLite (docs/05-persistence.md#agent-reported-metadata). Leading-edge:
+/// the first change after a quiet second is written immediately -- Claude
+/// Code emits its resume link once, in its startup banner, and waiting a
+/// second for a write that may never be prompted again would leave the one
+/// field the restore path needs sitting only in memory.
+const AGENT_META_PERSIST_INTERVAL_MS: i64 = 1000;
 
 /// Refuse to spawn past this many concurrent sessions -- `429`, not an OOM
 /// discovered the hard way (docs/06-security.md#process-spawning). `config.toml`
@@ -316,6 +324,15 @@ impl SessionManager {
         let claude_resume_id = Arc::new(Mutex::new(None));
         let title_for_closure = Arc::clone(&title);
         let resume_id_for_closure = Arc::clone(&claude_resume_id);
+        // Set by the reader thread when an OSC update actually changed a
+        // value, cleared when the throttled branch below flushes it
+        // (docs/05-persistence.md#agent-reported-metadata). Only that one
+        // thread ever touches it, so the read-modify-write below needs no
+        // stronger ordering than the counters beside it.
+        let agent_meta_dirty = Arc::new(AtomicBool::new(false));
+        let meta_dirty_for_closure = Arc::clone(&agent_meta_dirty);
+        let last_agent_meta_persist_ms = Arc::new(AtomicI64::new(0));
+        let meta_persist_for_closure = Arc::clone(&last_agent_meta_persist_ms);
         let mut osc_scanner = osc::OscScanner::default();
         let spawned = pty::spawn(spec, move |bytes| {
             let (events, next_offset) = {
@@ -332,10 +349,24 @@ impl SessionManager {
             // outright: only the most recent title/resume-link is ever
             // useful, there's no history to preserve.
             for update in osc_scanner.feed(bytes) {
+                // Only a real change marks the pair dirty: an agent that
+                // re-emits the same title on every prompt costs nothing,
+                // and the resume id is re-emitted verbatim in every banner
+                // repaint.
                 match update {
-                    osc::OscUpdate::Title(t) => *title_for_closure.lock() = Some(t),
+                    osc::OscUpdate::Title(t) => {
+                        let mut slot = title_for_closure.lock();
+                        if slot.as_deref() != Some(t.as_str()) {
+                            *slot = Some(t);
+                            meta_dirty_for_closure.store(true, Ordering::Relaxed);
+                        }
+                    }
                     osc::OscUpdate::ClaudeResumeId(resume_id) => {
-                        *resume_id_for_closure.lock() = Some(resume_id);
+                        let mut slot = resume_id_for_closure.lock();
+                        if slot.as_deref() != Some(resume_id.as_str()) {
+                            *slot = Some(resume_id);
+                            meta_dirty_for_closure.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -364,6 +395,38 @@ impl SessionManager {
                         .is_ok()
                 {
                     db.note_output_bytes(&id.to_string(), next_offset);
+                }
+                // Leading edge only: the first change after a quiet
+                // second goes out immediately, so Claude Code's one-shot
+                // resume link is on the row almost as soon as it appears.
+                // Anything this defers is picked up by
+                // `Session::flush_agent_meta` from the idle sweep -- a
+                // banner that sets a title and then goes quiet produces no
+                // further output to carry a deferred write, and that is
+                // precisely the state a restart catches an idle agent in
+                // (docs/05-persistence.md#agent-reported-metadata).
+                //
+                // Its own throttle, not `output_bytes`': that clock restarts
+                // on every write, which on a busy session would defer every
+                // OSC change by up to a second.
+                if meta_dirty_for_closure.load(Ordering::Relaxed) {
+                    let last = meta_persist_for_closure.load(Ordering::Relaxed);
+                    if now - last >= AGENT_META_PERSIST_INTERVAL_MS
+                        && meta_persist_for_closure
+                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        meta_dirty_for_closure.store(false, Ordering::Relaxed);
+                        // Values read after the flag is cleared, same
+                        // ordering as `flush_agent_meta`: a change landing
+                        // in between re-sets the flag rather than being
+                        // dropped.
+                        db.note_agent_meta(
+                            &id.to_string(),
+                            title_for_closure.lock().clone(),
+                            resume_id_for_closure.lock().clone(),
+                        );
+                    }
                 }
             }
         });
@@ -418,6 +481,8 @@ impl SessionManager {
             idle_since_ms,
             title,
             claude_resume_id,
+            agent_meta_dirty,
+            last_agent_meta_persist_ms,
         });
         self.sessions.lock().insert(id, Arc::clone(&session));
         spawn_exit_listener(Arc::clone(&session), spawned.exit_rx);
@@ -550,6 +615,13 @@ fn spawn_exit_listener(session: Arc<Session>, exit_rx: std::sync::mpsc::Receiver
                 runtime.exited_at_ms = Some(exited_at_ms);
             }
             session.sync_log();
+            // A last flush of the OSC-reported title/resume id before the
+            // terminal write below -- the reader thread's leading-edge
+            // throttle can be holding a change, and this row is what the
+            // "Resume" action reads once there's no live session left
+            // (docs/05-persistence.md#agent-reported-metadata). A no-op
+            // when nothing changed, which is the common case.
+            session.flush_agent_meta(exited_at_ms);
             // The one terminal-state write a live `Session` ever makes --
             // always `state='exited'`, never `'lost'` (that only happens via
             // restart recovery, on a row with no live `Session` behind it --
