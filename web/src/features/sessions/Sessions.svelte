@@ -22,7 +22,8 @@
     type StatusFilter,
   } from "./sessionDisplay"
 
-  let { onOpen }: { onOpen: (id: string) => void } = $props()
+  let { onOpen, openSettings }: { onOpen: (id: string) => void; openSettings: () => void } =
+    $props()
 
   let sessions: Session[] = $state([])
   // Refreshed on every poll so the per-row age ticks over without each
@@ -299,14 +300,25 @@
       <span class="sessions__prompt" aria-hidden="true">&rsaquo;</span>teleport{#if deviceName}<span
           class="sessions__host">&nbsp;(host: {deviceName})</span>{/if}
     </h1>
-    <button
-      class="btn btn--primary sessions__new-btn"
-      onclick={openLauncher}
-      aria-expanded={showLauncher}
-      aria-controls="launcher-panel"
-    >
-      New session
-    </button>
+    <div class="sessions__header-actions">
+      <button
+        class="btn sessions__settings-btn"
+        type="button"
+        onclick={openSettings}
+        aria-label="Settings"
+        title="Settings"
+      >
+        &#9881;
+      </button>
+      <button
+        class="btn btn--primary sessions__new-btn"
+        onclick={openLauncher}
+        aria-expanded={showLauncher}
+        aria-controls="launcher-panel"
+      >
+        New session
+      </button>
+    </div>
   </header>
 
   <main>
@@ -415,6 +427,22 @@
     max-width: var(--content-max-width);
     margin: 0 auto;
   }
+  .sessions__header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Square, so the glyph sits centred rather than in a text-width pill; the
+     44px floor is the same touch-target rule the session rows follow
+     (docs/09-frontend.md). */
+  .sessions__settings-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 1.125rem;
+    line-height: 1;
+  }
+
   .sessions__header {
     display: flex;
     align-items: center;
