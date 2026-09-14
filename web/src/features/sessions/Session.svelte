@@ -14,6 +14,7 @@
 
   let terminalRef: Terminal | undefined = $state()
   let stream: SessionStream | undefined = $state()
+  let sessionEl: HTMLDivElement | undefined = $state()
 
   let connectionState: StreamState = $state("connecting")
   let hasControl = $state(false)
@@ -108,13 +109,32 @@
     controllerPollTimer = setInterval(pollControllerName, CONTROLLER_POLL_MS)
 
     document.addEventListener("visibilitychange", onVisibilityChange)
+    // `interactive-widget=resizes-content` (index.html) shrinks `100dvh` for
+    // the iOS soft keyboard on Chrome/Android, but Safari on iOS doesn't
+    // support that meta tag -- there `100dvh` stays full-height and the
+    // keyboard just overlays the bottom of it, burying the line you're
+    // typing (the terminal's cursor row, generally its last one) behind the
+    // keys. `visualViewport` tracks the actually-visible area on every
+    // engine, keyboard included, so mirror its height onto `.session`
+    // directly instead of trusting the CSS unit to do it. The existing
+    // ResizeObserver in Terminal.svelte (docs/09-frontend.md#terminalsvelte)
+    // picks this up like any other resize and re-fits/re-letterboxes.
+    window.visualViewport?.addEventListener("resize", onViewportResize)
+    onViewportResize()
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange)
+      window.visualViewport?.removeEventListener("resize", onViewportResize)
       if (toastTimer) clearTimeout(toastTimer)
       if (controllerPollTimer) clearInterval(controllerPollTimer)
       s.disconnect()
     }
   })
+
+  function onViewportResize() {
+    const vv = window.visualViewport
+    if (!vv || !sessionEl) return
+    sessionEl.style.height = `${vv.height}px`
+  }
 
   /** A closed connection cannot be controlling anything, whatever the last control frame said. */
   function clearControl() {
@@ -184,7 +204,7 @@
   }
 </script>
 
-<div class="session">
+<div class="session" bind:this={sessionEl}>
   <SessionHeader
     title={displayTitle(session, sessionId)}
     tone={status.tone}
@@ -231,7 +251,10 @@
        URL bar, so the page renders taller than what's actually visible
        (docs/09-frontend.md#mobile). Paired with interactive-widget=resizes-
        content in index.html so this also shrinks when the soft keyboard
-       opens, instead of leaving the key bar stranded below it. */
+       opens, instead of leaving the key bar stranded below it. iOS Safari
+       has neither -- there, the script block's `onViewportResize` sets an
+       inline height from `visualViewport` instead, which wins the cascade
+       over both of these. */
     height: 100vh;
     height: 100dvh;
   }
