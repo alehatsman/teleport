@@ -78,7 +78,8 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "home_dir": "/Users/aleh",
   "pid": 41003,
   "uptime_ms": 913402,
-  "sessions_running": 3
+  "sessions_running": 3,
+  "ui_version": "v0.4.1"
 }
 ```
 
@@ -91,6 +92,14 @@ persisted, resolved fresh on every call) exists purely so the UI can collapse a 
 ([09-frontend.md](09-frontend.md#sessionssvelte)); as identifying as `device_name` (it
 reveals the username via the path), same gate. `null`/omitted if unresolvable — the UI
 falls back to showing the path in full, same as it always has.
+
+`ui_version` is the release tag `<data_dir>/web/current` points at — read by
+`readlink`-ing the slot on each call, so it reflects the bundle the *next* request will
+be served, not the one this process started with. `null` when the daemon is serving its
+embedded bundle or an explicit `--web-dist` (a dev tree has no release version and must
+not pretend otherwise). It changes under a running daemon, because
+[`teleport ui upgrade`](18-ui-upgrades.md) flips the slot without restarting anything;
+the web app watches it and *offers* a reload rather than taking one.
 
 `api_versions` and `capabilities` exist for **version skew**, which is unavoidable once
 native apps ship: an App Store build can be months behind a daemon the user updated this

@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -35,6 +36,7 @@ use crate::persistence;
 use crate::presets::Preset;
 use crate::pty::SpawnSpec;
 use crate::session::{CreateError, SessionId, SessionManager, SessionState};
+use crate::web_assets::WebAssets;
 
 /// Shared state for every handler and the WS upgrade. One instance, built
 /// once in `main.rs` after the listener is bound (the origin policy needs
@@ -64,10 +66,12 @@ pub struct AppState {
     pub started_at: Instant,
     /// `env!("CARGO_PKG_VERSION")`, reported by `/health`.
     pub version: &'static str,
-    /// Built SPA assets (`web/dist`), if found at startup
-    /// (docs/08-packaging.md#build-pipeline). `None` during the normal `npm
-    /// run dev` workflow, which never touches this router at all.
-    pub web_dist: Option<PathBuf>,
+    /// Where the SPA is served from -- an explicit `--web-dist` or the
+    /// `<data_dir>/web/current` slot, resolved per request so a
+    /// `teleport ui upgrade` takes effect without a restart
+    /// (docs/18-ui-upgrades.md). Serves nothing during the normal `npm run
+    /// dev` workflow, which never touches this router at all.
+    pub web: WebAssets,
     /// Wakes `main.rs`'s `shutdown_signal()` future
     /// (docs/11-mvp-plan.md#m10) -- the one trigger `POST /api/v1/shutdown`
     /// has. `notify_one()` is remembered even if no one is waiting yet
@@ -342,32 +346,76 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// checked explicitly and kept a `404` -- a typo'd API path must never
 /// silently come back as an HTML document.
 ///
-/// Disk-backed `--web-dist` is checked first and, when present, always wins
-/// -- even in an `embedded-web` build -- so pointing `--web-dist` at a fresh
-/// `npm run build` output overrides the baked-in bundle without a daemon
-/// rebuild. Only when no disk path is configured does an `embedded-web`
-/// build serve its embedded bundle instead of falling through to `404`
+/// Two exceptions to "unknown paths get the shell", both from
+/// docs/18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained:
+/// a request under `/assets/` is a content-addressed file or a `404`,
+/// never the shell (an HTML body with `Content-Type: text/html` where a
+/// tab expected JavaScript fails with a parse error that says nothing
+/// about what happened), and a miss there is retried against the retained
+/// version directories, which is how a tab that predates the last UI flip
+/// keeps working.
+///
+/// Where the files come from is [`WebAssets`]'s decision, made here rather
+/// than at startup. Disk always wins over the embedded bundle -- even in an
+/// `embedded-web` build -- so a fresh `npm run build` or a flipped slot
+/// overrides a baked-in bundle with no daemon rebuild and no restart
 /// (docs/16-release-pipeline.md#embedding-the-web-ui-embedded-web-feature).
 async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    if req.uri().path().starts_with("/api/") {
+    let path = req.uri().path().to_owned();
+    if path.starts_with("/api/") {
         return route_not_found();
     }
-    let Some(dist) = &state.web_dist else {
+    let is_asset = path.starts_with(ASSETS_PREFIX);
+
+    // Rebuilt per attempt: the retained-version retry needs a second
+    // request, and `ServeDir` consumes the one it's given. Every request
+    // reaching this fallback is a bodyless GET/HEAD, so dropping the body
+    // loses nothing.
+    let (parts, _body) = req.into_parts();
+    let rebuild = || Request::from_parts(parts.clone(), Body::empty());
+
+    let Some(dir) = state.web.resolve() else {
         #[cfg(feature = "embedded-web")]
         {
-            return crate::embedded_web::serve(req.uri().path());
+            return with_cache_headers(&path, crate::embedded_web::serve(&path, is_asset));
         }
         #[cfg(not(feature = "embedded-web"))]
         {
             return route_not_found();
         }
     };
-    // `.fallback()`, not `.not_found_service()` -- the latter pins the
-    // response to `404` even when the shell serves fine, and a client
-    // deep-linking to `/sessions/<id>` on reload must get a normal `200`,
-    // not a `404` with an HTML body.
-    let serve_dir = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
-    match serve_dir.oneshot(req).await {
+
+    let mut response = serve_from(&dir, rebuild(), is_asset).await;
+    if is_asset && response.status() == StatusCode::NOT_FOUND {
+        for retained in state.web.retained_versions() {
+            let retry = serve_from(&retained, rebuild(), true).await;
+            if retry.status() != StatusCode::NOT_FOUND {
+                response = retry;
+                break;
+            }
+        }
+    }
+    with_cache_headers(&path, response)
+}
+
+/// One `ServeDir` pass over `dir`. `shell_fallback` is off for `/assets/*`
+/// so a miss stays a `404` the caller can retry elsewhere.
+///
+/// `.fallback()`, not `.not_found_service()` -- the latter pins the
+/// response to `404` even when the shell serves fine, and a client
+/// deep-linking to `/sessions/<id>` on reload must get a normal `200`,
+/// not a `404` with an HTML body.
+async fn serve_from(dir: &std::path::Path, req: Request, is_asset: bool) -> Response {
+    let serve_dir = ServeDir::new(dir);
+    let result = if is_asset {
+        serve_dir.oneshot(req).await
+    } else {
+        serve_dir
+            .fallback(ServeFile::new(dir.join("index.html")))
+            .oneshot(req)
+            .await
+    };
+    match result {
         Ok(response) => response.into_response(),
         // `ServeDir`'s service is infallible; kept as a match, not an
         // `.unwrap()`, so a future tower-http version that adds a real error
@@ -375,6 +423,44 @@ async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Respo
         Err(err) => match err {},
     }
 }
+
+/// Cache policy for the UI (docs/18-ui-upgrades.md#cache-headers).
+/// Mandatory, not polish: without it a browser applies *heuristic* caching
+/// to `index.html`, which pins a tab to the old bundle for hours and makes
+/// a correct slot flip look broken.
+///
+/// `/assets/*` is content-hashed by Vite -- a given URL's bytes never
+/// change -- so it is cached forever. The shell names those hashed assets
+/// and must be revalidated every load; it is recognised by the response's
+/// own content type rather than by path, which catches both `/` and every
+/// client-side route the fallback answers with the shell.
+fn with_cache_headers(path: &str, mut response: Response) -> Response {
+    let value = if path.starts_with(ASSETS_PREFIX) {
+        IMMUTABLE_CACHE
+    } else if is_html(&response) {
+        // "revalidate", not "don't store" -- the 304 is cheap.
+        "no-cache"
+    } else {
+        return response;
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    response
+}
+
+fn is_html(response: &Response) -> bool {
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"))
+}
+
+/// Vite's output directory for content-hashed chunks, and the only path
+/// prefix with special rules here.
+pub(crate) const ASSETS_PREFIX: &str = "/assets/";
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// A `404` for a path that is neither a registered route nor (when a
 /// `web_dist` is configured) a client-side one the SPA shell can take over.
@@ -441,6 +527,11 @@ async fn health(
         if let Some(base) = directories::BaseDirs::new() {
             body["home_dir"] = base.home_dir().display().to_string().into();
         }
+        // The release tag the UI slot points at, so the app can offer a
+        // reload when it changes under a running daemon
+        // (docs/18-ui-upgrades.md#telling-the-client). `null` when serving
+        // the embedded bundle or an explicit `--web-dist`.
+        body["ui_version"] = state.web.ui_version().into();
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
         body["sessions_running"] = state

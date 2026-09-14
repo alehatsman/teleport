@@ -127,6 +127,24 @@ jobs:
           pattern: teleport-*
           path: dist
           merge-multiple: true
+      # The UI bundle ships as its own artifact so `teleport ui upgrade` can
+      # replace the web UI without a new daemon binary, and therefore
+      # without a restart that would kill every session
+      # (docs/18-ui-upgrades.md#release-artifact). Same `npm run build`
+      # output the embedded-web step already consumed -- a tar and an
+      # upload, not a second build.
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - name: package web bundle
+        shell: bash
+        run: |
+          # Top-level directory is the tag: `teleport ui upgrade` strips it
+          # and installs the contents as <data_dir>/web/<tag>/.
+          mkdir -p "staging/$GITHUB_REF_NAME"
+          cp -R web-dist/. "staging/$GITHUB_REF_NAME/"
+          tar czf "dist/teleport-web-$GITHUB_REF_NAME.tar.gz" -C staging "$GITHUB_REF_NAME"
       - name: checksums
         working-directory: dist
         run: sha256sum * > checksums.txt

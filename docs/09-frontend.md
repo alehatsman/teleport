@@ -399,6 +399,27 @@ Reconnection is normal, not an error. Show a subtle inline indicator (a colored 
 `live` / `reconnecting` / `lost`). Never a modal. Never a full-screen error that hides
 the terminal contents the user is trying to read.
 
+## The "New UI available" offer
+
+The web bundle can be replaced under a running daemon
+([18-ui-upgrades.md](18-ui-upgrades.md)), so a long-lived tab can be running code the
+daemon is no longer serving. `Sessions.svelte` polls `GET /health` on a slow timer
+(30s — a UI flip happens on human timescales, and re-asking on the 3s list interval
+would triple this page's request count for nothing), remembers the first `ui_version` it
+saw, and shows a dismissible `.notice` when a later one differs.
+
+Two deliberate limits:
+
+- **It offers a reload; it never takes one.** A reload discards unsent keystrokes and
+  scroll position. The reconnect is safe — the PTYs live in the daemon and the socket
+  replays from its last offset ([04](04-api-protocol.md#reconnect)) — but the timing is
+  still the user's call.
+- **List view only.** The session view is not the place to interrupt someone mid-task,
+  and the offer is still waiting when they come back to the list.
+
+`ui_version` is `null` under `npm run dev` and under `--web-dist`, so nothing about this
+fires during development.
+
 ## Dev workflow
 
 ```bash
