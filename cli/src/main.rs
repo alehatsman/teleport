@@ -194,6 +194,11 @@ fn print_api_err(e: &http::ApiError) -> anyhow::Error {
 /// `state='exited'`, and this column used to render a bare `-` for the
 /// second case -- indistinguishable from a row that is still running.
 ///
+/// Unlike the web UI, this does not special-case `state='lost'` (whose
+/// reason is always `daemon_restart` and so restates the state). The table
+/// has no other outlet for the column, and one total rule -- code, else
+/// reason, else `-` -- is what a reader of this table would predict.
+///
 /// The wire spelling is kept verbatim rather than prettified: this is an
 /// operator tool, and `kill_timeout` is what the column, the docs and the
 /// daemon's logs all call it. An exit code we actually observed wins over a

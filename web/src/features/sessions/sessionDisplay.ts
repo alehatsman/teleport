@@ -80,8 +80,11 @@ export function displayAge(sinceMs: number, now: number): string {
 // human reads. Unknown values fall through to the raw string rather than a
 // generic placeholder -- a reason we have not taught this map about is still
 // more informative than "exited", and it tells us what to add here.
+//
+// No `daemon_restart` entry: that reason only ever accompanies `state='lost'`
+// (persistence.rs's `recover` is the only thing that writes it), and a `lost`
+// row is never annotated -- see `displayOutcome`.
 const LOST_REASON_LABELS: Record<string, string> = {
-  daemon_restart: "daemon restarted",
   spawn_failed: "spawn failed",
   kill_timeout: "kill timed out",
   wait_error: "wait error",
@@ -103,9 +106,11 @@ export function displayOutcome(s: Session): string | null {
     if (s.exit_code !== null) return `exit ${s.exit_code}`
     return s.lost_reason === null ? "exited" : lostReasonLabel(s.lost_reason)
   }
-  if (s.state === "lost") {
-    return s.lost_reason === null ? "lost" : `lost: ${lostReasonLabel(s.lost_reason)}`
-  }
+  // `lost` is deliberately left bare. It is reachable only through restart
+  // recovery, which always writes `daemon_restart`, so the reason restates
+  // the state and nothing more. `exited` is the word that lies here, not
+  // this one.
+  if (s.state === "lost") return "lost"
   return null
 }
 
@@ -174,9 +179,8 @@ function endedLabel(session: Session | null): string | null {
     if (session.lost_reason !== null) return `Exited (${lostReasonLabel(session.lost_reason)})`
     return "Exited"
   }
-  if (session?.state === "lost") {
-    return session.lost_reason === null ? "Lost" : `Lost (${lostReasonLabel(session.lost_reason)})`
-  }
+  // Bare, for the same reason `displayOutcome` leaves it bare.
+  if (session?.state === "lost") return "Lost"
   return null
 }
 

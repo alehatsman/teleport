@@ -69,10 +69,7 @@ test("a resume id survives a daemon restart and is still one click away", async 
     await page.getByRole("tab", { name: /^Closed/ }).click()
     const lostRow = page.getByRole("listitem").filter({ hasText: TITLE })
     await expect(lostRow).toBeVisible({ timeout: 15_000 })
-    // And it says *why* it is lost. This is the only fixture that produces a real
-    // `lost_reason` end to end, so it is where the daemon's wire value is pinned to
-    // the words a user reads (issue #49).
-    await expect(lostRow).toContainText("lost: daemon restarted")
+    await expect(lostRow).toContainText("lost")
 
     const resume = lostRow.getByRole("button", { name: /Resume/ })
     await expect(resume).toBeVisible()

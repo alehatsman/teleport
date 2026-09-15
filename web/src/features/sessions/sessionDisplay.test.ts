@@ -125,9 +125,10 @@ describe("displayOutcome / outcomeFailed", () => {
     expect(
       displayOutcome(session({ state: "exited", exit_code: null, lost_reason: "spawn_failed" }))
     ).toBe("spawn failed")
-    expect(displayOutcome(session({ state: "lost", lost_reason: "daemon_restart" }))).toBe(
-      "lost: daemon restarted"
-    )
+    // `lost` stays bare: restart recovery is the only way to reach it and it
+    // always writes `daemon_restart`, so the reason would only restate the
+    // state.
+    expect(displayOutcome(session({ state: "lost", lost_reason: "daemon_restart" }))).toBe("lost")
     expect(
       outcomeFailed(session({ state: "exited", exit_code: null, lost_reason: "kill_timeout" }))
     ).toBe(true)
@@ -214,7 +215,7 @@ describe("viewerStatus", () => {
     ).toBe("Exited (kill timed out)")
     expect(
       viewerStatus(session({ state: "lost", lost_reason: "daemon_restart" }), "live").label
-    ).toBe("Lost (daemon restarted)")
+    ).toBe("Lost")
     expect(viewerStatus(session({ state: "lost" }), "live")).toEqual({
       ended: true,
       unsettled: false,
