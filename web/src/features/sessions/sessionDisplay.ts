@@ -76,17 +76,52 @@ export function displayAge(sinceMs: number, now: number): string {
   return `${Math.floor(h / 24)}d`
 }
 
+// The wire `lost_reason` values (docs/05-persistence.md#schema) in words a
+// human reads. Unknown values fall through to the raw string rather than a
+// generic placeholder -- a reason we have not taught this map about is still
+// more informative than "exited", and it tells us what to add here.
+const LOST_REASON_LABELS: Record<string, string> = {
+  daemon_restart: "daemon restarted",
+  spawn_failed: "spawn failed",
+  kill_timeout: "kill timed out",
+  wait_error: "wait error",
+}
+
+export function lostReasonLabel(reason: string): string {
+  return LOST_REASON_LABELS[reason] ?? reason
+}
+
 // What a closed row ended as. "exit 0" is as informative as "exit 3":
 // silence here made every closed row look the same.
+//
+// A session can also end with no exit code at all -- the daemon never
+// observed the child die (issue #49). That is `exit_code === null` plus a
+// `lost_reason`, and it used to render as a bare "exited", which reads as
+// "gone" when the process may in fact still be running. Say which.
 export function displayOutcome(s: Session): string | null {
-  if (s.state === "exited") return s.exit_code === null ? "exited" : `exit ${s.exit_code}`
-  if (s.state === "lost") return "lost"
+  if (s.state === "exited") {
+    if (s.exit_code !== null) return `exit ${s.exit_code}`
+    return s.lost_reason === null ? "exited" : lostReasonLabel(s.lost_reason)
+  }
+  if (s.state === "lost") {
+    return s.lost_reason === null ? "lost" : `lost: ${lostReasonLabel(s.lost_reason)}`
+  }
   return null
 }
 
-/** A non-zero exit or a lost process: the outcome renders in the danger color. */
+/**
+ * A non-zero exit, a lost process, or an exit we never actually observed:
+ * the outcome renders in the danger color. The last case is why this is not
+ * just `(s.exit_code ?? 0) !== 0` -- a `kill_timeout` has a null exit code,
+ * which that coalesce read as a clean zero.
+ *
+ * Only meaningful for a closed row. `io_error` is the one `lost_reason` a
+ * *running* session can carry (docs/05-persistence.md#schema), and this would
+ * call it failed; the single caller guards on `displayOutcome` first, which
+ * is null until the session is exited or lost.
+ */
 export function outcomeFailed(s: Session): boolean {
-  return s.state === "lost" || (s.exit_code ?? 0) !== 0
+  return s.state === "lost" || s.lost_reason !== null || (s.exit_code ?? 0) !== 0
 }
 
 // "/Users/aleh/projects/teleport" next to six other rows exactly like it is
@@ -127,6 +162,24 @@ export type ViewerStatus = {
   label: string
 }
 
+// The viewer header's wording for a session that has ended, or null while it
+// is still running. Split out of `viewerStatus` only to keep that function
+// under the lint's complexity ceiling; the parenthetical is the same fact
+// `displayOutcome` puts in the session row, at header length.
+function endedLabel(session: Session | null): string | null {
+  if (session?.state === "exited") {
+    if (session.exit_code !== null) return `Exited (code ${session.exit_code})`
+    // No exit code means the daemon never saw the child die (issue #49); a
+    // plain "Exited" hid that.
+    if (session.lost_reason !== null) return `Exited (${lostReasonLabel(session.lost_reason)})`
+    return "Exited"
+  }
+  if (session?.state === "lost") {
+    return session.lost_reason === null ? "Lost" : `Lost (${lostReasonLabel(session.lost_reason)})`
+  }
+  return null
+}
+
 // A process that ended is a fact about the session, not about our socket.
 // The header used to say "Closed" (the connection) after the 4s exit toast
 // faded, and the exit code was gone with it. Derive the visible status from
@@ -134,16 +187,9 @@ export type ViewerStatus = {
 export function viewerStatus(session: Session | null, connection: StreamState): ViewerStatus {
   const ended = session?.state === "exited" || session?.state === "lost"
   const unsettled = !ended && (connection === "reconnecting" || connection === "connecting")
-  let label: string
-  if (session?.state === "exited") {
-    label = session.exit_code === null ? "Exited" : `Exited (code ${session.exit_code})`
-  } else if (session?.state === "lost") {
-    label = "Lost"
-  } else {
-    // Capitalized here, not via CSS text-transform: that capitalized every
-    // word and turned "Exited (code 3)" into "Exited (Code 3)".
-    label = connection.charAt(0).toUpperCase() + connection.slice(1)
-  }
+  // Capitalized here, not via CSS text-transform: that capitalized every
+  // word and turned "Exited (code 3)" into "Exited (Code 3)".
+  const label = endedLabel(session) ?? connection.charAt(0).toUpperCase() + connection.slice(1)
   let tone: DotTone = null
   if (session?.state === "lost") tone = "warning"
   else if (unsettled) tone = "warning-strong"

@@ -162,10 +162,6 @@ pub(crate) struct SessionSummary {
     )]
     pub exited_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
-    #[expect(
-        dead_code,
-        reason = "mirrors the daemon's JSON response shape (daemon/src/api.rs); not every field is read"
-    )]
     pub lost_reason: Option<String>,
     pub controller: Option<String>,
     #[expect(

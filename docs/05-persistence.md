@@ -83,8 +83,9 @@ CREATE INDEX idx_events_session   ON session_events(session_id, event_id);
 
 `state` ∈ `running | closing | exited | lost`.
 
-`lost_reason` ∈ `daemon_restart | spawn_failed | kill_timeout | io_error` (null
-otherwise).
+`lost_reason` ∈ `daemon_restart | spawn_failed | kill_timeout | wait_error | io_error`
+(null otherwise). `wait_error` is `child.wait()` itself returning an OS error rather
+than a status (`session/types.rs`'s `SessionLostReason`).
 
 `io_error` is the one reason that can be set **while the child is still alive** — a
 failed append does not kill the process. The session stays `running` with
