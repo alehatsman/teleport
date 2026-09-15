@@ -114,6 +114,42 @@ describe("displayOutcome / outcomeFailed", () => {
     expect(outcomeFailed(session({ state: "exited", exit_code: 1 }))).toBe(true)
     expect(outcomeFailed(session({ state: "lost" }))).toBe(true)
   })
+
+  // Issue #49: a hard kill the daemon never saw land leaves exit_code null
+  // and lost_reason set. "exited" read as "gone" when the process may still
+  // be running, and the old `(exit_code ?? 0) !== 0` scored it as a clean 0.
+  it("says why, when there is no exit code to show", () => {
+    expect(
+      displayOutcome(session({ state: "exited", exit_code: null, lost_reason: "kill_timeout" }))
+    ).toBe("kill timed out")
+    expect(
+      displayOutcome(session({ state: "exited", exit_code: null, lost_reason: "spawn_failed" }))
+    ).toBe("spawn failed")
+    // `lost` stays bare: restart recovery is the only way to reach it and it
+    // always writes `daemon_restart`, so the reason would only restate the
+    // state.
+    expect(displayOutcome(session({ state: "lost", lost_reason: "daemon_restart" }))).toBe("lost")
+    expect(
+      outcomeFailed(session({ state: "exited", exit_code: null, lost_reason: "kill_timeout" }))
+    ).toBe(true)
+  })
+
+  // A reason the daemon grows but this map has not learned yet must still
+  // reach the user, not collapse to the generic wording it is replacing.
+  it("passes an unknown reason through verbatim", () => {
+    expect(
+      displayOutcome(session({ state: "exited", exit_code: null, lost_reason: "something_new" }))
+    ).toBe("something_new")
+  })
+
+  // An exit code we did observe is the more precise fact; a lost_reason
+  // alongside it (not produced today, but the wire allows both) must not
+  // shadow it.
+  it("prefers a real exit code over a reason", () => {
+    expect(
+      displayOutcome(session({ state: "exited", exit_code: 0, lost_reason: "kill_timeout" }))
+    ).toBe("exit 0")
+  })
 })
 
 describe("displayTitle", () => {
@@ -171,6 +207,15 @@ describe("viewerStatus", () => {
       label: "Exited (code 3)",
     })
     expect(viewerStatus(session({ state: "exited", exit_code: null }), "live").label).toBe("Exited")
+    expect(
+      viewerStatus(
+        session({ state: "exited", exit_code: null, lost_reason: "kill_timeout" }),
+        "live"
+      ).label
+    ).toBe("Exited (kill timed out)")
+    expect(
+      viewerStatus(session({ state: "lost", lost_reason: "daemon_restart" }), "live").label
+    ).toBe("Lost")
     expect(viewerStatus(session({ state: "lost" }), "live")).toEqual({
       ended: true,
       unsettled: false,

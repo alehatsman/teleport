@@ -186,6 +186,33 @@ fn print_api_err(e: &http::ApiError) -> anyhow::Error {
     anyhow::anyhow!(msg)
 }
 
+/// The `EXIT` column of `teleport sessions`.
+///
+/// `lost_reason` is the only thing distinguishing "the child exited and we
+/// saw its code" from "we gave up waiting and the process may still be out
+/// there" (docs/05-persistence.md#schema, issue #49). Both land on
+/// `state='exited'`, and this column used to render a bare `-` for the
+/// second case -- indistinguishable from a row that is still running.
+///
+/// Unlike the web UI, this does not special-case `state='lost'` (whose
+/// reason is always `daemon_restart` and so restates the state). The table
+/// has no other outlet for the column, and one total rule -- code, else
+/// reason, else `-` -- is what a reader of this table would predict.
+///
+/// The wire spelling is kept verbatim rather than prettified: this is an
+/// operator tool, and `kill_timeout` is what the column, the docs and the
+/// daemon's logs all call it. An exit code we actually observed wins over a
+/// reason -- the daemon never sets both today (session/manager.rs's exit
+/// listener picks one), but the wire shape allows it and the code is the
+/// more precise fact.
+fn exit_cell(exit_code: Option<i32>, lost_reason: Option<&str>) -> String {
+    match (exit_code, lost_reason) {
+        (Some(code), _) => code.to_string(),
+        (None, Some(reason)) => reason.to_string(),
+        (None, None) => "-".to_string(),
+    }
+}
+
 async fn sessions(conn: &connect::Connection) -> Result<()> {
     let client = http::Client::new(conn)?;
     let sessions = client
@@ -203,9 +230,7 @@ async fn sessions(conn: &connect::Connection) -> Result<()> {
     for s in sessions {
         let size = format!("{}x{}", s.cols, s.rows);
         let controller = s.controller.unwrap_or_else(|| "-".to_string());
-        let exit = s
-            .exit_code
-            .map_or_else(|| "-".to_string(), |c| c.to_string());
+        let exit = exit_cell(s.exit_code, s.lost_reason.as_deref());
         let command = s.preset.unwrap_or(s.command);
         println!(
             "{:<28} {:<10} {:<8} {:<20} {:<16} {}",
@@ -296,4 +321,23 @@ async fn kill(conn: &connect::Connection, id: &str, purge: bool) -> Result<()> {
         .await
         .map_err(|e| print_api_err(&e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_cell;
+
+    #[test]
+    fn the_exit_column_names_a_lost_reason_when_there_is_no_code() {
+        assert_eq!(exit_cell(Some(0), None), "0");
+        assert_eq!(exit_cell(Some(3), None), "3");
+        // A still-running row: nothing to say yet.
+        assert_eq!(exit_cell(None, None), "-");
+        // Issue #49: this used to be "-" too, so a session whose hard kill
+        // was never confirmed looked exactly like one still running.
+        assert_eq!(exit_cell(None, Some("kill_timeout")), "kill_timeout");
+        assert_eq!(exit_cell(None, Some("spawn_failed")), "spawn_failed");
+        // An observed code is the more precise fact.
+        assert_eq!(exit_cell(Some(0), Some("kill_timeout")), "0");
+    }
 }
