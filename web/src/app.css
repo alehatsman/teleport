@@ -124,7 +124,7 @@ textarea {
   /* Not `font: inherit`: these sit inside labels set at 0.78-0.9rem, and iOS
      Safari zooms the whole viewport the moment it focuses an input rendering
      below 16px -- tapping any launcher field left the page zoomed in
-     (docs/18-locations.md#focus-and-the-soft-keyboard). The floor is here, on
+     (docs/19-locations.md#focus-and-the-soft-keyboard). The floor is here, on
      the one base rule, rather than as a `@media (pointer: coarse)` fork or a
      per-component exception each new field has to remember. Fixing it in the
      viewport meta with `maximum-scale=1` is not an option -- that disables
