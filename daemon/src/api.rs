@@ -1085,6 +1085,13 @@ struct BrowseResponse {
 /// separate "does this exist" step to race against it. Shared by `browse` and
 /// the pin routes so a pinned path and a browsed one are spelled the same way,
 /// and so both match the `cwd` a session records.
+///
+/// **Blocking.** `canonicalize()` is a syscall that can park a thread for a
+/// mount timeout on a stale NFS/SMB path or a sleeping external disk, so
+/// every caller runs it on the blocking pool ([#91]). Nothing here may be
+/// called directly from an `async fn`.
+///
+/// [#91]: https://github.com/alehatsman/teleport/issues/91
 fn resolve_dir(requested: &std::path::Path) -> Result<PathBuf, ApiError> {
     let resolved = requested
         .canonicalize()
@@ -1157,7 +1164,14 @@ async fn add_pin(
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
     let db = state.db.as_ref().ok_or(ApiError::NoPersistence)?;
-    let resolved = resolve_dir(std::path::Path::new(&req.path))?;
+    // Same reason as `browse` (#91): `canonicalize()` blocks, and a pinned
+    // path is exactly the kind that might live on a mount that is no longer
+    // answering.
+    let requested = req.path.clone();
+    let resolved =
+        tokio::task::spawn_blocking(move || resolve_dir(std::path::Path::new(&requested)))
+            .await
+            .map_err(|e| ApiError::Internal(format!("path resolution task failed: {e}")))??;
     let outcome = db
         .add_pin(&resolved.display().to_string(), crate::now_ms(), MAX_PINS)
         .await
@@ -1204,39 +1218,52 @@ async fn browse(
             })?,
     };
 
-    let resolved = resolve_dir(&requested)?;
+    // Every filesystem call in one hop to the blocking pool, not three: a
+    // `canonicalize()`, a `read_dir()` and a `metadata()` *per entry* is
+    // hundreds of syscalls for a directory with hundreds of children, and on
+    // a stale network mount each one can park the thread (#91). Held inline
+    // here until now, which meant a slow listing could stall unrelated
+    // requests -- including a WebSocket upgrade for a live session -- sharing
+    // the same worker.
+    let listing = tokio::task::spawn_blocking(move || -> Result<BrowseResponse, ApiError> {
+        let resolved = resolve_dir(&requested)?;
 
-    let read_dir = std::fs::read_dir(&resolved)
-        .map_err(|e| ApiError::BadRequest(format!("{}: {e}", resolved.display())))?;
-    let mut entries = Vec::new();
-    for entry in read_dir {
-        // A single unreadable entry (permissions, a race with something
-        // deleting it) shouldn't fail the whole listing -- skip it, same as
-        // a real file manager would.
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') {
-            continue; // dotfiles excluded -- keeps the list scannable, matches Finder/Explorer's own default
+        let read_dir = std::fs::read_dir(&resolved)
+            .map_err(|e| ApiError::BadRequest(format!("{}: {e}", resolved.display())))?;
+        let mut entries = Vec::new();
+        for entry in read_dir {
+            // A single unreadable entry (permissions, a race with something
+            // deleting it) shouldn't fail the whole listing -- skip it, same as
+            // a real file manager would.
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue; // dotfiles excluded -- keeps the list scannable, matches Finder/Explorer's own default
+            }
+            // metadata() follows symlinks, so a symlinked project directory is
+            // still offered -- file_type() (no syscall) would not see through one.
+            let is_dir = entry.metadata().is_ok_and(|m| m.is_dir());
+            if !is_dir {
+                continue;
+            }
+            entries.push(BrowseEntry {
+                name: name.into_owned(),
+                path: entry.path().display().to_string(),
+            });
         }
-        // metadata() follows symlinks, so a symlinked project directory is
-        // still offered -- file_type() (no syscall) would not see through one.
-        let is_dir = entry.metadata().is_ok_and(|m| m.is_dir());
-        if !is_dir {
-            continue;
-        }
-        entries.push(BrowseEntry {
-            name: name.into_owned(),
-            path: entry.path().display().to_string(),
-        });
-    }
-    entries.sort_by_key(|e| e.name.to_lowercase());
+        entries.sort_by_key(|e| e.name.to_lowercase());
 
-    Ok(Json(BrowseResponse {
-        parent: resolved.parent().map(|p| p.display().to_string()),
-        path: resolved.display().to_string(),
-        entries,
-    }))
+        Ok(BrowseResponse {
+            parent: resolved.parent().map(|p| p.display().to_string()),
+            path: resolved.display().to_string(),
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("directory listing task failed: {e}")))??;
+
+    Ok(Json(listing))
 }
 
 /// `POST /api/v1/shutdown` (docs/04-api-protocol.md#post-apiv1shutdown) --

@@ -356,6 +356,16 @@ would be a false sense of security (the free-text `cwd` field already lets someo
 their way anywhere) while genuinely blocking legitimate uses (`/srv`, `/opt`, an external
 mount).
 
+**Every filesystem call runs on the blocking pool**, not the async executor — one
+`canonicalize()`, one `read_dir()`, and a `metadata()` per entry is hundreds of syscalls
+for a directory with hundreds of children, and on a stale NFS/SMB mount or a sleeping
+external disk any one of them can park a thread for the mount timeout. A parked Tokio
+worker is shared, so an unlucky listing would stall unrelated in-flight requests,
+including a WebSocket upgrade for a live session. `POST /api/v1/locations/pins`
+canonicalizes the same way and for the same reason
+([#91](https://github.com/alehatsman/teleport/issues/91)). The same rule as
+`POST /api/v1/sessions`, whose `$PATH` scan and fork/exec have always been offloaded.
+
 ### `GET /api/v1/locations/pins`
 
 ```json
