@@ -172,20 +172,38 @@ fn sessions_root(name: &str) -> PathBuf {
 /// actual WebSocket connection rather than an in-process request. Dropping
 /// the returned [`Daemon`] aborts the server task.
 pub(crate) async fn spawn(config: Config) -> Daemon {
-    spawn_with_web_dist(config, None).await
+    spawn_with_web_dist(config, None, None).await
+}
+
+/// Like [`spawn`], but with a real SQLite store behind `AppState::db` -- for
+/// the routes that have nowhere to read or write without one (the pin routes,
+/// docs/19-locations.md#pins). Its files land under `dir`, which the caller
+/// owns and cleans up.
+pub(crate) async fn spawn_with_db(config: Config, dir: &std::path::Path) -> Daemon {
+    let (db, _) = teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
+        .expect("open test db");
+    spawn_with_web_dist(config, None, Some(db)).await
 }
 
 /// Like [`spawn`], but with `AppState::web_dist` set -- for the SPA-fallback
 /// tests, which need a router that actually serves `web/dist`
 /// (docs/08-packaging.md#build-pipeline).
-pub(crate) async fn spawn_with_web_dist(config: Config, web_dist: Option<PathBuf>) -> Daemon {
-    spawn_with_web_assets(config, WebAssets::new(web_dist, None)).await
+pub(crate) async fn spawn_with_web_dist(
+    config: Config,
+    web_dist: Option<PathBuf>,
+    db: Option<teleportd::persistence::Db>,
+) -> Daemon {
+    spawn_with_web_assets(config, WebAssets::new(web_dist, None), db).await
 }
 
 /// Like [`spawn_with_web_dist`], but takes the whole [`WebAssets`] -- for
 /// the version-slot tests (docs/18-ui-upgrades.md), which need a
 /// `<data_dir>/web` root rather than a fixed dist directory.
-pub(crate) async fn spawn_with_web_assets(config: Config, web: WebAssets) -> Daemon {
+pub(crate) async fn spawn_with_web_assets(
+    config: Config,
+    web: WebAssets,
+    db: Option<teleportd::persistence::Db>,
+) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -203,7 +221,7 @@ pub(crate) async fn spawn_with_web_assets(config: Config, web: WebAssets) -> Dae
     let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
-        db: None,
+        db,
         origin_policy,
         token: TOKEN.to_string(),
         presets: vec![],

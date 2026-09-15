@@ -200,6 +200,17 @@ pub struct RecoverySummary {
     pub recovered_lost: usize,
 }
 
+/// One `pinned_locations` row: a directory the user asked to keep at the top
+/// of the launcher, independent of whether any session in it still exists
+/// (docs/19-locations.md#pins).
+#[derive(Debug, Clone)]
+pub struct PinRow {
+    /// Absolute, already canonicalized by the caller.
+    pub path: String,
+    /// When it was first pinned, ms since epoch. Re-pinning does not move it.
+    pub pinned_at_ms: i64,
+}
+
 enum Command {
     Insert(NewSessionRow, oneshot::Sender<Result<()>>),
     MarkClosing {
@@ -259,6 +270,37 @@ enum Command {
     GcCandidates {
         older_than_ms: i64,
         reply: oneshot::Sender<Result<Vec<SessionRow>>>,
+    },
+    ListPins {
+        reply: oneshot::Sender<Result<Vec<PinRow>>>,
+    },
+    /// Insert-or-keep, and reply with the row that ended up stored
+    /// (docs/19-locations.md#post-apiv1locationspins: pinning twice is a
+    /// no-op, not an error).
+    AddPin {
+        path: String,
+        pinned_at_ms: i64,
+        max_pins: usize,
+        reply: oneshot::Sender<Result<AddPinOutcome>>,
+    },
+    RemovePin {
+        path: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+/// What [`Db::add_pin`] did. `Full` is not an `Err` because it is not a
+/// failure of the write -- it is a `429` the handler has to turn into a
+/// message, and an `anyhow::Error` string is the wrong carrier for that.
+#[derive(Debug, Clone)]
+pub enum AddPinOutcome {
+    /// The row now in the table -- freshly inserted, or the one that was
+    /// already there under this path.
+    Stored(PinRow),
+    /// Already at the cap, and this path is not one of the existing pins.
+    Full {
+        /// The cap that was hit, so the handler can name it in the `429`.
+        max_pins: usize,
     },
 }
 
@@ -505,6 +547,40 @@ impl Db {
         })
         .await
     }
+
+    /// Every pin, newest first (docs/19-locations.md#get-apiv1locationspins).
+    /// A pinned directory that has since been deleted is still returned --
+    /// dropping it here would leave the user no way to unpin it.
+    pub async fn list_pins(&self) -> Result<Vec<PinRow>> {
+        self.call(|reply| Command::ListPins { reply }).await
+    }
+
+    /// Pins `path`, or reports the cap. Idempotent: an already-pinned path
+    /// keeps its original `pinned_at_ms` and comes back as `Stored`.
+    pub async fn add_pin(
+        &self,
+        path: &str,
+        pinned_at_ms: i64,
+        max_pins: usize,
+    ) -> Result<AddPinOutcome> {
+        self.call(|reply| Command::AddPin {
+            path: path.to_string(),
+            pinned_at_ms,
+            max_pins,
+            reply,
+        })
+        .await
+    }
+
+    /// Unpins `path`. Unpinning something that was never pinned is success,
+    /// not a `404` -- the end state the caller asked for is the end state.
+    pub async fn remove_pin(&self, path: &str) -> Result<()> {
+        self.call(|reply| Command::RemovePin {
+            path: path.to_string(),
+            reply,
+        })
+        .await
+    }
 }
 
 /// Passkey login (docs/17-passkey-login.md). A separate `impl` block from
@@ -684,7 +760,12 @@ impl Db {
 /// open, every migration at an index `>= user_version` runs, then
 /// `user_version` is set to `MIGRATIONS.len()` (docs/05-persistence.md#migrations).
 /// No migration framework, no external tool.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, crate::auth_store::SCHEMA_V3];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA_V1,
+    SCHEMA_V2,
+    crate::auth_store::SCHEMA_V3,
+    SCHEMA_V4,
+];
 
 const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -730,6 +811,23 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, even
 const SCHEMA_V2: &str = r"
 ALTER TABLE sessions ADD COLUMN title TEXT;
 ALTER TABLE sessions ADD COLUMN claude_resume_id TEXT;
+";
+
+/// Pinned launcher locations (docs/19-locations.md#pins). Deliberately no
+/// foreign key to `sessions`: a pin outliving every session that ever ran in
+/// that directory -- and outliving the GC window that deletes them -- is the
+/// entire point of pinning. The path is the key; there is nothing else to
+/// identify a directory by.
+/// V4, not V3: this branch wrote the pins migration as V3, but V3 reached
+/// `main` first as the auth tables (`auth_store::SCHEMA_V3`). `user_version`
+/// is a count, so a daemon that already ran the auth migration would skip an
+/// index-2 entry outright and never create this table. Migrations append;
+/// they are never renumbered in place.
+const SCHEMA_V4: &str = r"
+CREATE TABLE IF NOT EXISTS pinned_locations (
+    path            TEXT PRIMARY KEY,
+    pinned_at_ms    INTEGER NOT NULL
+);
 ";
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -921,6 +1019,68 @@ fn gc_candidates(conn: &Connection, older_than_ms: i64) -> Result<Vec<SessionRow
     Ok(rows)
 }
 
+fn list_pins(conn: &Connection) -> Result<Vec<PinRow>> {
+    let mut stmt =
+        conn.prepare("SELECT path, pinned_at_ms FROM pinned_locations ORDER BY pinned_at_ms DESC")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PinRow {
+                path: r.get("path")?,
+                pinned_at_ms: r.get("pinned_at_ms")?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn add_pin(
+    conn: &Connection,
+    path: &str,
+    pinned_at_ms: i64,
+    max_pins: usize,
+) -> Result<AddPinOutcome> {
+    // The cap is checked here, inside the writer thread, rather than by the
+    // handler reading a count first: this is the only writer, so a count
+    // taken here cannot be stale by the time the INSERT runs.
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT path, pinned_at_ms FROM pinned_locations WHERE path = ?1",
+            params![path],
+            |r| {
+                Ok(PinRow {
+                    path: r.get("path")?,
+                    pinned_at_ms: r.get("pinned_at_ms")?,
+                })
+            },
+        )
+        .optional()?
+    {
+        // Already pinned: keep the original timestamp so re-tapping the star
+        // on a second device doesn't reshuffle the list.
+        return Ok(AddPinOutcome::Stored(existing));
+    }
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM pinned_locations", [], |r| r.get(0))?;
+    if usize::try_from(count).unwrap_or(usize::MAX) >= max_pins {
+        return Ok(AddPinOutcome::Full { max_pins });
+    }
+    conn.execute(
+        "INSERT INTO pinned_locations (path, pinned_at_ms) VALUES (?1, ?2)",
+        params![path, pinned_at_ms],
+    )?;
+    Ok(AddPinOutcome::Stored(PinRow {
+        path: path.to_string(),
+        pinned_at_ms,
+    }))
+}
+
+fn remove_pin(conn: &Connection, path: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pinned_locations WHERE path = ?1",
+        params![path],
+    )?;
+    Ok(())
+}
+
 fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
@@ -1008,6 +1168,32 @@ fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
                     reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
                 )]
                 let _ = reply.send(gc_candidates(conn, older_than_ms));
+            }
+            Command::ListPins { reply } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(list_pins(conn));
+            }
+            Command::AddPin {
+                path,
+                pinned_at_ms,
+                max_pins,
+                reply,
+            } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(add_pin(conn, &path, pinned_at_ms, max_pins));
+            }
+            Command::RemovePin { path, reply } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(remove_pin(conn, &path));
             }
         }
     }
@@ -1364,6 +1550,148 @@ mod tests {
         db.note_agent_meta("old1", None, Some("session_XYZ".to_string()));
         let fetched = db.get_session("old1").await.unwrap().expect("row");
         assert_eq!(fetched.claude_resume_id.as_deref(), Some("session_XYZ"));
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pins_round_trip_newest_first() {
+        let dir = scratch_dir("pins-list");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+
+        db.add_pin("/a", 100, 50).await.unwrap();
+        db.add_pin("/b", 200, 50).await.unwrap();
+
+        let paths: Vec<String> = db
+            .list_pins()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.path)
+            .collect();
+        assert_eq!(paths, vec!["/b", "/a"], "newest pin first");
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pinning_the_same_path_twice_keeps_the_first_timestamp() {
+        let dir = scratch_dir("pins-idempotent");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+
+        db.add_pin("/a", 100, 50).await.unwrap();
+        let outcome = db.add_pin("/a", 999, 50).await.unwrap();
+
+        match outcome {
+            AddPinOutcome::Stored(row) => assert_eq!(
+                row.pinned_at_ms, 100,
+                "re-pinning must not reshuffle the list under the other device"
+            ),
+            AddPinOutcome::Full { .. } => panic!("one pin is not the cap"),
+        }
+        assert_eq!(db.list_pins().await.unwrap().len(), 1);
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_pin_cap_refuses_a_new_path_but_not_an_existing_one() {
+        let dir = scratch_dir("pins-cap");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+
+        db.add_pin("/a", 1, 2).await.unwrap();
+        db.add_pin("/b", 2, 2).await.unwrap();
+
+        assert!(
+            matches!(
+                db.add_pin("/c", 3, 2).await.unwrap(),
+                AddPinOutcome::Full { max_pins: 2 }
+            ),
+            "a third path past a cap of two is refused"
+        );
+        assert!(
+            matches!(
+                db.add_pin("/a", 4, 2).await.unwrap(),
+                AddPinOutcome::Stored(_)
+            ),
+            "re-pinning something already stored adds nothing, so the cap can't block it"
+        );
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unpinning_something_that_was_never_pinned_is_not_an_error() {
+        let dir = scratch_dir("pins-remove");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+
+        db.remove_pin("/never").await.unwrap();
+        db.add_pin("/a", 1, 50).await.unwrap();
+        db.remove_pin("/a").await.unwrap();
+
+        assert!(db.list_pins().await.unwrap().is_empty());
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point of a pin is to outlive the sessions it came from --
+    /// GC reclaims rows, never this table (docs/19-locations.md#pins).
+    #[tokio::test]
+    async fn gc_and_session_deletes_leave_pins_alone() {
+        let dir = scratch_dir("pins-gc");
+        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        insert(&db, new_row("s1")).await;
+        db.add_pin("/a", 1, 50).await.unwrap();
+
+        exit(&db, "s1", 10, Some(0), None, 0).await;
+        assert_eq!(db.gc_candidates(i64::MAX).await.unwrap().len(), 1);
+        db.delete_session("s1").await.unwrap();
+
+        assert_eq!(db.list_pins().await.unwrap().len(), 1);
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A database written before migration 3 gains the table on open, with
+    /// no manual step (docs/05-persistence.md#migrations).
+    #[tokio::test]
+    async fn a_v2_database_gains_the_pins_table_on_open() {
+        let dir = scratch_dir("pins-migration");
+        let db_path = dir.join("state.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.pragma_update(None, "user_version", 2i64).unwrap();
+        }
+
+        let (db, _) = Db::open(&db_path, &dir.join("sessions")).unwrap();
+        db.add_pin("/a", 1, 50).await.unwrap();
+        assert_eq!(db.list_pins().await.unwrap().len(), 1);
 
         #[expect(
             clippy::let_underscore_must_use,

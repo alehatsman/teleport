@@ -43,7 +43,10 @@ web/
             ├── SessionFilters.svelte   # status toggle + search box (bindable, no logic)
             ├── NewSessionFab.svelte    # touch-only floating "New session" button
             ├── SessionLauncher.svelte  # new-session form: presets, custom command, cwd, resume
-            ├── DirectoryBrowser.svelte # inline cwd picker for the launcher (GET /api/v1/browse)
+            ├── locations.ts            # pure: frecency ranking + query matching over launch dirs
+            ├── locations.test.ts
+            ├── LocationPicker.svelte   # searchable location list + pin toggles (19-locations.md)
+            ├── DirectoryBrowser.svelte # inline cwd picker, opened from the picker (GET /api/v1/browse)
             ├── SessionList.svelte      # the list container; owns swipe-reveal exclusivity
             ├── SessionRow.svelte       # one row: display fields, swipe-to-reveal gesture
             ├── Session.svelte          # container: the stream, lease state, toast
@@ -94,6 +97,16 @@ five components composed together, each small enough to read in one sitting:
     persistence is deliberate in the original single-file version (`cwd`'s prefill logic
     is explicitly "never clobber a mid-typed value... across a reopen") — losing it would
     have been a silent behavior change from splitting the file, not a simplification.
+- **`LocationPicker.svelte`** — the launcher's "Choose…" panel
+  ([19-locations.md](19-locations.md#stage-2--the-location-picker)): a search box over
+  every known location, a pin star per row, and `Browse filesystem…` at the bottom, which
+  swaps in `DirectoryBrowser`. Props: `value: string` (the cwd in the field, marked
+  selected), `locations: Location[]`, `onSelect: (path: string) => void`, `onTogglePin:
+  (path: string, pinned: boolean) => void`, `onClose: () => void`. Owns: the query and
+  whether the browser is showing. Two details that are not cosmetic: Enter in the search
+  box is intercepted (it renders inside the launcher's `<form>`, where Enter would
+  otherwise *launch*), and the search box autofocuses only on fine pointers — raising the
+  soft keyboard would cover the list the user opened it to read.
 - **`DirectoryBrowser.svelte`** — mounted only while the launcher's browser panel is
   open (a fresh instance each time; the original's `openBrowser()` always re-fetched on
   open anyway, so nothing relied on its browse state surviving a close). Props:
@@ -119,7 +132,9 @@ five components composed together, each small enough to read in one sitting:
   `expanded` (mirrors the launcher panel), `onclick`. Hidden on fine-pointer devices.
 
 Helpers with no reactive state are plain modules beside the components, unit-tested
-without mounting anything (UI.md rule 27): **`sessionDisplay.ts`** (state labels and
+without mounting anything (UI.md rule 27): **`locations.ts`** (the `Location` type,
+`knownLocations()`'s frecency ranking and `matchLocations()`'s query filter —
+[19-locations.md](19-locations.md)), **`sessionDisplay.ts`** (state labels and
 tones, `displayAge`/`displayCwd`/`displayOutcome`, `needsAttention`, the list filter,
 `recentCwds`, and `viewerStatus()` — the record-first/socket-second rule for the viewer
 header) and **`launchRequest.ts`** (`buildLaunchRequest()`: launcher fields to a

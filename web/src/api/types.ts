@@ -101,6 +101,17 @@ export interface BrowseResponse {
   entries: BrowseEntry[]
 }
 
+/** One pinned launcher directory (docs/19-locations.md#pins). */
+export interface Pin {
+  path: string
+  pinned_at_ms: number
+}
+
+/** `GET /api/v1/locations/pins`. Newest pin first. */
+export interface PinsResponse {
+  pins: Pin[]
+}
+
 /** `POST /api/v1/ws-ticket` (docs/06-security.md#token-on-the-websocket-upgrade). */
 export interface WsTicketResponse {
   ticket: string

@@ -32,7 +32,7 @@ fn write_dist(dir: &std::path::Path) {
 
 #[tokio::test]
 async fn no_web_dist_configured_serves_api_only() {
-    let daemon = support::spawn_with_web_dist(support::default_config(), None).await;
+    let daemon = support::spawn_with_web_dist(support::default_config(), None, None).await;
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     let response = router.oneshot(get("/")).await.expect("router call");
     // No fallback_service registered at all -- axum's own default 404.
@@ -44,7 +44,8 @@ async fn known_asset_is_served_from_web_dist() {
     let dist =
         std::env::temp_dir().join(format!("teleportd-web-dist-{}-assets", std::process::id()));
     write_dist(&dist);
-    let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+    let daemon =
+        support::spawn_with_web_dist(support::default_config(), Some(dist.clone()), None).await;
 
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     let response = router
@@ -68,7 +69,8 @@ async fn unknown_client_route_falls_back_to_index_html() {
         std::process::id()
     ));
     write_dist(&dist);
-    let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+    let daemon =
+        support::spawn_with_web_dist(support::default_config(), Some(dist.clone()), None).await;
 
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     // A client-side route with no matching file on disk -- e.g. deep-linking
@@ -95,7 +97,8 @@ async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
         std::process::id()
     ));
     write_dist(&dist);
-    let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+    let daemon =
+        support::spawn_with_web_dist(support::default_config(), Some(dist.clone()), None).await;
 
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     // `nest("/api/v1", ...)` gives the mount point its own 404 for an
@@ -122,7 +125,8 @@ async fn unknown_api_route_is_a_plain_404_not_the_spa_shell() {
 async fn every_response_carries_the_content_security_policy() {
     let dist = std::env::temp_dir().join(format!("teleportd-web-dist-{}-csp", std::process::id()));
     write_dist(&dist);
-    let daemon = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+    let daemon =
+        support::spawn_with_web_dist(support::default_config(), Some(dist.clone()), None).await;
 
     let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
     let api_response = router
@@ -204,6 +208,9 @@ fn slot_daemon(root: &std::path::Path) -> impl std::future::Future<Output = supp
     support::spawn_with_web_assets(
         support::default_config(),
         teleportd::web_assets::WebAssets::new(None, Some(root.to_path_buf())),
+        // No Db: these assert which bundle is served, nothing that reads a
+        // row (the pins routes are the only thing that needs one).
+        None,
     )
 }
 
@@ -364,7 +371,8 @@ async fn health_reports_the_slot_version_and_null_for_a_dev_tree() {
     let dist =
         std::env::temp_dir().join(format!("teleportd-web-dist-{}-health", std::process::id()));
     write_dist(&dist);
-    let dev = support::spawn_with_web_dist(support::default_config(), Some(dist.clone())).await;
+    let dev =
+        support::spawn_with_web_dist(support::default_config(), Some(dist.clone()), None).await;
     let dev_router = teleportd::api::build_router(std::sync::Arc::clone(&dev.state));
     let dev_body = health_body(dev_router).await;
     assert!(dev_body["ui_version"].is_null());

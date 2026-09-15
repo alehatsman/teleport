@@ -28,6 +28,10 @@ GET    /api/v1/sessions/{id}/stream   # WebSocket upgrade
 GET    /api/v1/presets
 GET    /api/v1/browse
 
+GET    /api/v1/locations/pins
+POST   /api/v1/locations/pins
+DELETE /api/v1/locations/pins
+
 POST   /api/v1/shutdown
 POST   /api/v1/ws-ticket
 
@@ -351,6 +355,40 @@ contents. Deliberately not scoped to under the home directory or any other root;
 would be a false sense of security (the free-text `cwd` field already lets someone type
 their way anywhere) while genuinely blocking legitimate uses (`/srv`, `/opt`, an external
 mount).
+
+### `GET /api/v1/locations/pins`
+
+```json
+{ "pins": [{ "path": "/Users/aleh/projects/teleport", "pinned_at_ms": 1736790000000 }] }
+```
+
+Directories the user pinned to the top of the launcher's location list
+([19-locations.md](19-locations.md#pins)), newest first. A pin whose directory has since
+been deleted or unmounted is still listed — dropping it would leave no way to unpin it,
+and launching there fails with the same `422` any other bad `cwd` gets.
+
+### `POST /api/v1/locations/pins`
+
+```json
+{ "path": "/Users/aleh/projects/teleport" }
+```
+
+Responds `200` with the stored `{ path, pinned_at_ms }`. `path` is canonicalized exactly
+as `browse` does, so a pin is spelled the same way the `cwd` of a session launched there
+is. Pinning an already-pinned path returns the existing row, timestamp unchanged —
+idempotent, because two devices tapping the same star is normal, not a conflict.
+`400` when the path does not exist or is not a directory; `429` `too_many_pins` past 50
+pins.
+
+### `DELETE /api/v1/locations/pins?path=…`
+
+`204`, including when no such pin exists — the caller asked for an end state and that end
+state holds. The query path is matched against the stored string **as-is**, never
+canonicalized: a pin whose directory is gone cannot be resolved, and is exactly the pin
+most in need of removing.
+
+Neither route grants any new privilege: an authenticated client can already launch a
+session with `cwd` set to any path the daemon can read.
 
 ### `POST /api/v1/shutdown`
 
@@ -848,3 +886,4 @@ error.
 | `slow_consumer` | queue overflow (WS close 1013) | reconnect with backoff from last offset |
 | `bad_origin` | Origin/Host rejected | hard failure, do not retry |
 | `unauthorized` | missing or invalid credential | show the login screen (passkey, else the token) / re-pair |
+| `too_many_pins` | pin cap (50) reached | tell the user to unpin something; do not retry |

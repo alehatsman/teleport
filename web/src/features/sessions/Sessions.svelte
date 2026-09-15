@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte"
   import {
+    addPin,
     createSession,
     deleteSession,
     describeError,
     health,
+    listPins,
     listPresets,
     listSessions,
+    removePin,
   } from "@/api/api"
   import { setControlling } from "@/api/identity"
   import type { CreateSessionRequest, Preset, Session } from "@/api/types"
@@ -15,8 +18,8 @@
   import SessionLauncher from "@/features/sessions/SessionLauncher.svelte"
   import SessionList from "@/features/sessions/SessionList.svelte"
   import ErrorBanner from "@/ui/ErrorBanner.svelte"
+  import { knownLocations, type Location } from "./locations"
   import {
-    recentCwds as deriveRecentCwds,
     filterSessions,
     isActiveStatus,
     resumablePresetIds,
@@ -160,7 +163,14 @@
   // its own creation, to prefill preset/resume-id/cwd for that one open.
   let resumeSessionForLauncher: Session | null = $state(null)
 
-  let recentCwds: string[] = $derived(deriveRecentCwds(sessions))
+  // Ranked working directories for the launcher. Derived from the session
+  // list already polled -- no extra request, and it re-ranks as `now` ticks
+  // over (docs/19-locations.md#frecency).
+  let pins: string[] = $state([])
+  // Kept apart from `loadError`: the poll clears that one every 3s, which
+  // would wipe a "couldn't pin" message before it was read.
+  let pinError: string | null = $state(null)
+  let locations: Location[] = $derived(knownLocations(sessions, pins, homeDir, now))
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
   // Health is polled far more slowly than the session list: it exists here
@@ -170,7 +180,7 @@
   let healthTimer: ReturnType<typeof setInterval> | null = null
 
   onMount(async () => {
-    await Promise.all([refresh(), loadPresets(), loadHealthInfo()])
+    await Promise.all([refresh(), loadPresets(), loadHealthInfo(), loadPins()])
     loading = false
     // D2 (docs/15-open-questions.md#d2--session-list-freshness) is still an
     // open decision -- polling is the pragmatic interim answer for M5, not
@@ -232,6 +242,37 @@
       // there's a bigger problem than the title, and that surfaces
       // elsewhere (loadError from refresh()). Not worth a second banner --
       // the next successful poll retries this instead.
+    }
+  }
+
+  async function loadPins() {
+    try {
+      const res = await listPins()
+      pins = res.pins.map((p) => p.path)
+    } catch {
+      // Pins only reorder a list that works without them, so a failure here
+      // is not worth a banner -- the launcher just shows pure frecency.
+      // Re-read on the next toggle.
+    }
+  }
+
+  /**
+   * Optimistic: the star flips now and reverts if the daemon refuses. Over a
+   * tailnet a round trip before the star moves reads as a dead control.
+   */
+  async function togglePin(path: string, pinned: boolean) {
+    const before = pins
+    pins = pinned ? [path, ...pins] : pins.filter((p) => p !== path)
+    pinError = null
+    try {
+      if (pinned) await addPin(path)
+      else await removePin(path)
+      // The daemon canonicalizes on the way in, so what it stored may not be
+      // the string sent -- re-read rather than trusting the optimistic guess.
+      await loadPins()
+    } catch (e) {
+      pins = before
+      pinError = describeError(e)
     }
   }
 
@@ -329,6 +370,9 @@
     {#if loadError}
       <ErrorBanner message={loadError} />
     {/if}
+    {#if pinError}
+      <ErrorBanner message={pinError} />
+    {/if}
 
     {#if uiUpdateAvailable}
       <div class="notice">
@@ -350,9 +394,10 @@
         bind:selectedPreset
         bind:customCommand
         {presets}
-        {recentCwds}
+        {locations}
         {homeDir}
         resumeSession={resumeSessionForLauncher}
+        onTogglePin={togglePin}
         onLaunch={handleLaunch}
         onClose={closeLauncher}
       />

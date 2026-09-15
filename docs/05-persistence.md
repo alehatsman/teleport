@@ -292,6 +292,22 @@ attached and are **gone**. That is a real hole in history, and the API says so r
 than serving whatever happens to be at that file position
 ([04-api-protocol.md](04-api-protocol.md#bounded-attach)).
 
+### Pinned locations
+
+```sql
+CREATE TABLE pinned_locations (
+    path            TEXT PRIMARY KEY,
+    pinned_at_ms    INTEGER NOT NULL
+);
+```
+
+Directories the user pinned in the launcher ([19-locations.md](19-locations.md#pins)).
+Daemon-side, not per-browser, so a folder pinned on the phone is pinned on the laptop —
+and deliberately **not** in `config.toml`, which is hand-authored, commented and read
+`Deserialize`-only. No foreign key to `sessions` and no GC: outliving every session that
+ever ran there, including the `retain_days` window that deletes them, is the entire
+point of a pin. Migration 3.
+
 ### Garbage collection
 
 On startup and every 6 hours: delete `sessions/<id>/` for sessions in state `exited`

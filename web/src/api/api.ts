@@ -15,6 +15,8 @@ import {
   type HealthResponse,
   type LoginResponse,
   type PasskeySummary,
+  type Pin,
+  type PinsResponse,
   type PresetsResponse,
   type Session,
   type SessionsResponse,
@@ -114,6 +116,24 @@ export function listPresets(): Promise<PresetsResponse> {
 
 export function browse(path?: string): Promise<BrowseResponse> {
   return request(`/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`)
+}
+
+/**
+ * The pinned launcher directories (docs/19-locations.md#pins). Daemon-side,
+ * not per-browser: a folder pinned on the phone is pinned on the laptop.
+ */
+export function listPins(): Promise<PinsResponse> {
+  return request("/locations/pins")
+}
+
+/** Idempotent -- pinning an already-pinned path is a no-op, not an error. */
+export function addPin(path: string): Promise<Pin> {
+  return request("/locations/pins", { method: "POST", body: JSON.stringify({ path }) })
+}
+
+/** Also idempotent: unpinning something that was never pinned is success. */
+export function removePin(path: string): Promise<void> {
+  return request(`/locations/pins?path=${encodeURIComponent(path)}`, { method: "DELETE" })
 }
 
 /**

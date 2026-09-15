@@ -47,25 +47,6 @@ export function filterSessions(
   )
 }
 
-// M8 (docs/11-mvp-plan.md#m8--agent-presets): recent working directories,
-// derived from the session list already on hand -- no new storage/endpoint.
-// Most-recent-use-first, deduped, capped so the launcher's chips stay
-// scannable.
-export const RECENT_CWDS_MAX = 8
-
-export function recentCwds(sessions: Session[]): string[] {
-  const latest = new Map<string, number>()
-  for (const s of sessions) {
-    if (!s.cwd) continue
-    const prev = latest.get(s.cwd)
-    if (prev === undefined || s.created_at_ms > prev) latest.set(s.cwd, s.created_at_ms)
-  }
-  return [...latest.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, RECENT_CWDS_MAX)
-    .map(([dir]) => dir)
-}
-
 // D3 (docs/04-api-protocol.md#get-apiv1sessions): idle_since_ms is already
 // a live signal (the daemon clears it the moment output resumes), but
 // last_bell_ms never clears server-side -- one bell three hours ago

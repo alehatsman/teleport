@@ -10,7 +10,6 @@ import {
   filterSessions,
   needsAttention,
   outcomeFailed,
-  recentCwds,
   resumablePresetIds,
   stateTone,
   viewerStatus,
@@ -68,21 +67,6 @@ describe("filterSessions", () => {
     expect(filterSessions(all, "active", "  CLAUDE ").map((s) => s.id)).toEqual(["a"])
     expect(filterSessions(all, "closed", "/home/a").map((s) => s.id)).toEqual(["c"])
     expect(filterSessions(all, "closed", "nothing")).toEqual([])
-  })
-})
-
-describe("recentCwds", () => {
-  it("dedupes, orders most-recent-first, skips empty, caps at 8", () => {
-    const sessions = [
-      session({ cwd: "/old", created_at_ms: 1 }),
-      session({ cwd: "/new", created_at_ms: 3 }),
-      session({ cwd: "/old", created_at_ms: 2 }),
-      session({ cwd: "", created_at_ms: 9 }),
-    ]
-    expect(recentCwds(sessions)).toEqual(["/new", "/old"])
-    const many = Array.from({ length: 12 }, (_, i) => session({ cwd: `/d${i}`, created_at_ms: i }))
-    expect(recentCwds(many)).toHaveLength(8)
-    expect(recentCwds(many)[0]).toBe("/d11")
   })
 })
 
