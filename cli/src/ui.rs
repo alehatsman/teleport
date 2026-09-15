@@ -29,6 +29,11 @@ const REPO: &str = "alehatsman/teleport";
 /// What it costs: ~1.2 MB (docs/18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained).
 const RETAINED_VERSIONS: usize = 3;
 
+/// Prefix for the directory an upgrade extracts into before renaming it into
+/// place. Dot-prefixed so a half-extracted bundle is invisible to everything
+/// that lists versions -- the daemon's and the CLI's listings both skip it.
+const STAGING_PREFIX: &str = ".staging-";
+
 /// `<data_dir>/web` -- the slot root. Every path this module touches is
 /// under it.
 #[derive(Debug)]
@@ -83,6 +88,28 @@ impl Slot {
         dirs.into_iter().map(|(_, path)| path).collect()
     }
 
+    /// `.staging-*` directories an interrupted upgrade left behind
+    /// ([#78](https://github.com/alehatsman/teleport/issues/78)). Harmless --
+    /// dot-prefixed, so neither [`Slot::versions`] nor the daemon's
+    /// `read_version_dirs` ever sees them, meaning they are never served and
+    /// never counted against retention -- but ~1.2 MB of litter each, and
+    /// nothing used to name them.
+    fn stray_staging(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(STAGING_PREFIX))
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        // Name order, not mtime: these are only ever listed or deleted, and a
+        // stable order keeps `status` output diffable between runs.
+        dirs.sort();
+        dirs
+    }
+
     /// The upgrade's one irreversible step, and a single syscall: symlink to
     /// a temp name, then `rename(2)` over `current`. Atomic on POSIX, so no
     /// in-flight request ever observes a missing or half-written link.
@@ -123,6 +150,20 @@ pub(crate) fn status(data_dir: &Path) {
             );
         }
     }
+    // Only mentioned when there are any -- a permanent "stray: none" line
+    // would be noise on every healthy run. #78 exists because "why is there
+    // a .staging-v0.4.1 in my data dir" had no answer anywhere; this is it.
+    let stray = slot.stray_staging();
+    if !stray.is_empty() {
+        println!("stray staging dirs (an interrupted upgrade; safe to delete):");
+        for path in stray {
+            println!(
+                "  {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+        println!("  -- the next `teleport ui upgrade` clears these");
+    }
 }
 
 /// `teleport ui upgrade` -- download, verify, extract, flip, prune.
@@ -134,6 +175,16 @@ pub(crate) async fn upgrade(data_dir: &Path, version: Option<String>) -> Result<
     std::fs::create_dir_all(&slot.root)
         .with_context(|| format!("creating the slot root at {}", slot.root.display()))?;
     restrict(&slot.root)?;
+
+    // Every stray, not just this tag's (#78). An upgrade is the only thing
+    // that creates these, so it is the natural thing to clear them -- and a
+    // retry after the crash that stranded one is exactly when a user is here.
+    // Two concurrent upgrades would race, but that was never supported: one
+    // owner, one daemon, one slot.
+    for stray in slot.stray_staging() {
+        println!("clearing stray {}", stray.display());
+        remove_if_present(&stray)?;
+    }
 
     let http = client()?;
     let tag = match version {
@@ -165,7 +216,7 @@ pub(crate) async fn upgrade(data_dir: &Path, version: Option<String>) -> Result<
         // up in a directory the daemon serves to a browser.
         verify(&bytes, &String::from_utf8_lossy(&checksums), &archive)?;
 
-        let staging = slot.root.join(format!(".staging-{tag}"));
+        let staging = slot.root.join(format!("{STAGING_PREFIX}{tag}"));
         remove_if_present(&staging)?;
         extract(&bytes, &staging)?;
         let index = staging.join("index.html");
@@ -455,6 +506,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// #78: an interrupted upgrade strands a `.staging-*` directory. It must
+    /// stay invisible to everything that lists versions -- otherwise a
+    /// half-extracted bundle could be flipped to or counted against retention
+    /// -- while still being findable by the one thing that cleans it up.
+    #[cfg(unix)]
+    #[test]
+    fn stray_staging_dirs_are_listed_but_never_counted_as_versions() {
+        let dir = scratch("stray-staging");
+        let slot = Slot::new(&dir);
+        std::fs::create_dir_all(&slot.root).unwrap();
+        std::fs::create_dir_all(slot.root.join("v1.0.0")).unwrap();
+        std::fs::create_dir_all(slot.root.join(format!("{STAGING_PREFIX}v1.1.0"))).unwrap();
+        std::fs::create_dir_all(slot.root.join(format!("{STAGING_PREFIX}v1.2.0"))).unwrap();
+
+        let versions: Vec<String> = slot
+            .versions()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            versions,
+            vec!["v1.0.0"],
+            "staging dirs leaked into versions"
+        );
+
+        let stray: Vec<String> = slot
+            .stray_staging()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            stray,
+            vec![
+                format!("{STAGING_PREFIX}v1.1.0"),
+                format!("{STAGING_PREFIX}v1.2.0")
+            ],
+            "every stray should be found, in a stable order"
+        );
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `current` symlink and a plain file must not be mistaken for
+    /// strays: deleting either would break the slot outright.
+    #[cfg(unix)]
+    #[test]
+    fn the_current_link_and_stray_files_are_not_stray_staging_dirs() {
+        let dir = scratch("stray-staging-negatives");
+        let slot = Slot::new(&dir);
+        std::fs::create_dir_all(&slot.root).unwrap();
+        std::fs::create_dir_all(slot.root.join("v1.0.0")).unwrap();
+        std::os::unix::fs::symlink("v1.0.0", slot.root.join("current")).unwrap();
+        // A file, not a directory, that happens to share the prefix.
+        std::fs::write(slot.root.join(format!("{STAGING_PREFIX}notadir")), b"x").unwrap();
+
+        assert!(
+            slot.stray_staging().is_empty(),
+            "only directories are strays"
+        );
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Builds a gzipped tar with the given `<path, contents>` entries, all

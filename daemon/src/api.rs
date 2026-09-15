@@ -417,12 +417,30 @@ async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request) -> Respo
 
     let mut response = serve_from(&dir, rebuild(), is_asset).await;
     if is_asset && response.status() == StatusCode::NOT_FOUND {
-        for retained in state.web.retained_versions() {
-            let retry = serve_from(&retained, rebuild(), true).await;
+        let retained = state.web.retained_versions();
+        let retained_count = retained.len();
+        for version in retained {
+            let retry = serve_from(&version, rebuild(), true).await;
             if retry.status() != StatusCode::NOT_FOUND {
                 response = retry;
                 break;
             }
+        }
+        // The one symptom that says retention is too short
+        // (docs/18-ui-upgrades.md#stale-tabs-and-why-old-versions-are-retained,
+        // issue #79): a content-hashed asset that is in neither the live slot
+        // nor any retained version belongs to a tab that has now outlived the
+        // window. Logged rather than left to be inferred from a bare 404 in an
+        // access log, because `RETAINED_VERSIONS` is a guess and this is the
+        // evidence that would change it. Harmless on its own -- the tab
+        // reloads and gets the current bundle.
+        if response.status() == StatusCode::NOT_FOUND {
+            tracing::warn!(
+                path = %path,
+                retained = retained_count,
+                "hashed asset missing from the live slot and every retained version -- \
+                 a tab older than the retention window asked for it"
+            );
         }
     }
     with_cache_headers(&path, response)
