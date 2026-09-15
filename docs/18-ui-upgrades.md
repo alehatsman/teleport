@@ -308,12 +308,23 @@ it resolves the slot the way an installed one does):
 
 ## Open questions
 
-- **Retention count.** Three is a guess. The real input is "how long does a tab stay open
-  across upgrades", which nobody has measured.
-- **Who prunes.** `teleport ui upgrade` does it after a successful flip. A daemon-side GC
-  pass (it already has one for sessions, [05](05-persistence.md#garbage-collection))
-  would also catch dirs left by an interrupted upgrade. Deferred until interrupted
-  upgrades are observed to actually leave litter.
+- **Retention count.** Three is still a guess, and deliberately still a constant rather
+  than a config knob ([#79](https://github.com/alehatsman/teleport/issues/79)) — the real
+  input is "how long does a tab stay open across upgrades", which nobody has measured.
+  What changed is that the guess is now *falsifiable*: a hashed asset that misses the
+  live slot **and** every retained version logs a `WARN` naming the path and the
+  retention count (`spa_fallback`, `api.rs`). That line is the evidence that would move
+  the number, and its absence is evidence three is enough. Adding the knob before the
+  log had ever fired would have been tuning by imagination.
+- **Who prunes.** `teleport ui upgrade` prunes old versions after a successful flip, and
+  **sweeps every stray `.staging-*` before it starts** — not just the one its own tag
+  would reuse ([#78](https://github.com/alehatsman/teleport/issues/78)). A retry after
+  the crash that stranded one is exactly when a user is running `upgrade`, so that is
+  where the sweep belongs. `teleport ui status` names any strays it finds, so the
+  question "why is there a `.staging-v0.4.1` in my data dir" has an answer without
+  reading this document. A daemon-side GC pass
+  ([05](05-persistence.md#garbage-collection)) is still deferred: it would only matter
+  for someone who strands a staging dir and then never upgrades again.
 - **No release carries the artifact yet.** `teleport ui upgrade` cannot be exercised
   end to end against a real release until a tag is cut with the new
   `teleport-web-<tag>.tar.gz` in it. Everything up to and including the flip is covered
