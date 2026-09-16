@@ -7,7 +7,7 @@
 // deliberately kills the daemon and must not disturb specs running in
 // parallel against the shared one).
 
-import { type ChildProcess, spawn } from "node:child_process"
+import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -25,6 +25,32 @@ const POLL_INTERVAL_MS = 100
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// `--manifest-path`, not `-p teleportd`: `-p` selects a member of a workspace
+// and there is no workspace here -- `daemon/` and `cli/` are two independent
+// crates with no root Cargo.toml. Run from `web/`, cargo walked up looking for
+// a manifest, found none, and exited 101 (issue #95). Resolved from this file
+// rather than the cwd: Playwright's is `web/`, but nothing here guarantees it.
+const MANIFEST = join(import.meta.dirname, "..", "..", "..", "daemon", "Cargo.toml")
+
+let built = false
+
+// Compile before spawning, rather than letting `cargo run` do it inline. A
+// cold build takes minutes and READY_TIMEOUT_MS is 15s, so the fallback died
+// waiting on a port file the compiler hadn't got to yet -- and silently, since
+// the fixture pipes cargo's output. Inheriting stdio here puts the progress
+// where someone waiting can see it. Once built, the `cargo run` below is a
+// no-op lookup, which is the whole point: after this, both paths just exec a
+// binary. Memoized because three daemons start per suite.
+function buildDaemonOnce(): void {
+  if (built) return
+  const r = spawnSync("cargo", ["build", "--quiet", "--manifest-path", MANIFEST], {
+    stdio: "inherit",
+  })
+  if (r.error) throw r.error
+  if (r.status !== 0) throw new Error(`cargo build failed (code ${r.status})`)
+  built = true
 }
 
 async function waitForFile(path: string, timeoutMs: number): Promise<string> {
@@ -86,6 +112,12 @@ export async function startDaemon(
   // ui-upgrade.spec.ts can flip the bundle under a running process.
   const webDist =
     opts.webDist === undefined ? join(import.meta.dirname, "..", "..", "dist") : opts.webDist
+  // Say so here rather than letting every spec fail on a blank page: the
+  // daemon serves an empty --web-dist perfectly happily, so a missing build
+  // reads like a product bug instead of a missing step (issue #95).
+  if (webDist !== null && !existsSync(webDist)) {
+    throw new Error(`no web bundle at ${webDist} -- run \`npm run build\` in web/ first`)
+  }
   const portFile = join(dataDir, "port")
   if (existsSync(portFile)) {
     // Reusing a data dir: the daemon only ever *writes* this file, so a
@@ -100,9 +132,10 @@ export async function startDaemon(
   // noPropertyAccessFromIndexSignature rejects dot access on one (same
   // reason vite.config.ts destructures it up top).
   const { TELEPORTD_BIN: bin } = process.env
+  if (!bin) buildDaemonOnce()
   const [command, baseArgs] = bin
     ? [bin, [] as string[]]
-    : ["cargo", ["run", "--quiet", "-p", "teleportd", "--"]]
+    : ["cargo", ["run", "--quiet", "--manifest-path", MANIFEST, "--"]]
 
   const proc = spawn(
     command,

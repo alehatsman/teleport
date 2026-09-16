@@ -233,10 +233,12 @@ for what it covers and why.
 **The daemon fixture** (`web/e2e/fixtures/daemon.ts`) spawns a real `teleportd` against
 an ephemeral port and a throwaway data dir, waits on the same signals a human would (the
 `<data_dir>/port` file, then `/health` answering — never a fixed sleep), and reuses
-`TELEPORTD_BIN` when set (CI: a pre-built binary) or falls back to `cargo run -p
-teleportd --` (local: `npm run test:e2e` alone just works, `tasks/ui-e2e.yml` builds the
-binary first for speed). Auth stays **on** — the real default
-([06-security.md](06-security.md#authentication)) — a custom `authedPage` fixture does
+`TELEPORTD_BIN` when set (CI: a pre-built binary) or falls back to `cargo run
+--manifest-path daemon/Cargo.toml --` (local: `npm run test:e2e` alone just works,
+`tasks/ui-e2e.yml` builds the binary first for speed). `--manifest-path` and not `-p
+teleportd`, because there is no workspace root to select a member of. Auth stays **on**
+— the real default ([06-security.md](06-security.md#authentication)) — a custom
+`authedPage` fixture does
 the one real `?token=…` navigation every test, the actual onboarding flow, rather than
 routing around it with `auth_token = false`.
 
@@ -249,10 +251,10 @@ because it deliberately kills the daemon and restarts it against the same data d
 port (to exercise the real "recovered as lost" path, [01](01-architecture.md#the-crash-boundary))
 — that must never disturb whatever else is running in parallel against the shared one.
 
-Run it: `cd web && npm run test:e2e` (needs a built `teleportd` on `PATH` or
-`TELEPORTD_BIN`, and `npx playwright install chromium webkit` once), or
-`provision apply tasks/ui-e2e.yml` for the whole thing in one command. CI runs it as its
-own `web-e2e` job ([.github/workflows/ci.yml](../.github/workflows/ci.yml)), separate
+Run it: `cd web && npm run build && npm run test:e2e` (needs `npx playwright install
+chromium webkit` once; the build is what the daemon serves as `--web-dist`, and the
+fixture fails fast if it is missing), or `provision apply tasks/ui-e2e.yml` for the
+whole thing in one command. CI runs it as its own `web-e2e` job ([.github/workflows/ci.yml](../.github/workflows/ci.yml)), separate
 from the fast `web` job (lint/typecheck/build/vitest) so a typo doesn't wait on a Rust
 build and two browser downloads.
 
