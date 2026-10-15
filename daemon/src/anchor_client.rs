@@ -38,6 +38,8 @@ mod frame {
     pub(super) const EXIT: u8 = 0x03;
     /// Lease state for this connection.
     pub(super) const LEASE: u8 = 0x04;
+    /// Resize, client to daemon. Lease holder only.
+    pub(super) const RESIZE: u8 = 0x05;
     /// Tag, offset, payload length.
     pub(super) const HEADER_LEN: usize = 1 + 8 + 4;
 }
@@ -281,6 +283,7 @@ impl AnchorClient {
                 .unwrap_or_default(),
             reader,
             writer: write_half,
+            pending: Vec::new(),
         })
     }
 
@@ -314,6 +317,14 @@ pub struct AnchorAttach {
     next_offset: u64,
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
+    /// Bytes of the frame currently being read, kept here rather than on
+    /// `next_frame`'s stack because `next_frame` is polled inside a
+    /// `select!` and is dropped whenever another arm wins. With a local
+    /// buffer those already-consumed bytes would be lost and the stream
+    /// would resume mid-frame — which surfaces as a garbage header, then
+    /// EOF, and a client told "the stream ended" instead of being handed
+    /// the exit frame that was in flight.
+    pending: Vec<u8>,
 }
 
 /// One frame from an attached session.
@@ -356,17 +367,50 @@ impl AnchorAttach {
         self.next_offset
     }
 
+    /// Reads until `pending` holds at least `want` bytes. `false` means the
+    /// stream hit EOF first.
+    ///
+    /// Cancel-safe, which is the point: `read_buf` appends into `pending`,
+    /// so every byte taken off the socket is retained even if this future is
+    /// dropped mid-read and called again later.
+    async fn fill_to(&mut self, want: usize) -> Result<bool> {
+        while self.pending.len() < want {
+            // `read_buf` writes into spare capacity; with none it would
+            // return 0 and be mistaken for EOF.
+            self.pending.reserve(want - self.pending.len());
+            let n = self
+                .reader
+                .read_buf(&mut self.pending)
+                .await
+                .context("reading a frame")?;
+            if n == 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Reads the next frame. `None` once the stream ends — which, per
     /// anchor's protocol, is also how a subscriber that fell behind is told
     /// to reconnect and replay from its last offset.
+    ///
+    /// Cancel-safe: see `pending`.
     pub async fn next_frame(&mut self) -> Result<Option<AnchorFrame>> {
-        let mut header = [0_u8; frame::HEADER_LEN];
-        match self.reader.read_exact(&mut header).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e).context("reading a frame header"),
+        if !self.fill_to(frame::HEADER_LEN).await? {
+            // A clean end is EOF on a frame boundary. EOF with bytes still
+            // buffered is a truncated frame, which is an error rather than
+            // an orderly close.
+            return if self.pending.is_empty() {
+                Ok(None)
+            } else {
+                Err(anyhow::anyhow!("anchor's stream ended mid-frame"))
+            };
         }
-        let tag = header[0];
+        let header = self
+            .pending
+            .get(..frame::HEADER_LEN)
+            .context("a frame header is 13 bytes")?;
+        let tag = *header.first().context("a frame header is 13 bytes")?;
         let offset = u64::from_be_bytes(
             header
                 .get(1..9)
@@ -380,11 +424,16 @@ impl AnchorAttach {
                 .context("a frame header is 13 bytes")?,
         ) as usize;
 
-        let mut payload = vec![0_u8; len];
-        self.reader
-            .read_exact(&mut payload)
-            .await
-            .context("reading a frame payload")?;
+        let total = frame::HEADER_LEN + len;
+        if !self.fill_to(total).await? {
+            return Err(anyhow::anyhow!("anchor's stream ended mid-frame"));
+        }
+        let payload: Vec<u8> = self
+            .pending
+            .get(frame::HEADER_LEN..total)
+            .context("the frame was just filled to this length")?
+            .to_vec();
+        self.pending.drain(..total);
 
         Ok(Some(match tag {
             frame::OUTPUT => AnchorFrame::Output {
@@ -427,6 +476,26 @@ impl AnchorAttach {
             .await
             .context("claiming control")?;
         self.writer.flush().await.context("flushing a claim")
+    }
+
+    /// Resizes the PTY from this connection.
+    ///
+    /// Sent here rather than as a control op because anchor's lease is
+    /// per-connection: a control op arrives on a different connection and
+    /// cannot prove it holds the lease, so anchor refuses it while someone
+    /// does. Only the holder's resize is applied.
+    pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&cols.to_be_bytes());
+        payload.extend_from_slice(&rows.to_be_bytes());
+
+        let mut out = Vec::with_capacity(frame::HEADER_LEN + payload.len());
+        out.push(frame::RESIZE);
+        out.extend_from_slice(&0_u64.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(payload.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&payload);
+        self.writer.write_all(&out).await.context("resizing")?;
+        self.writer.flush().await.context("flushing a resize")
     }
 
     /// Sends input to the PTY. Only the lease holder's input is applied;

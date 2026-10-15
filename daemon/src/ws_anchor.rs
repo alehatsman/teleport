@@ -294,7 +294,6 @@ pub async fn run_anchor(proxy: Proxy) {
                 Some(Ok(Message::Text(text))) => {
                     if !handle_control(
                         &text,
-                        &anchor,
                         &leases,
                         &mut attach,
                         &session_id,
@@ -335,13 +334,8 @@ pub async fn run_anchor(proxy: Proxy) {
 }
 
 /// Handles one control message. `false` ends the connection.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one proxied connection's state; bundling it into a struct would just move the same fields"
-)]
 async fn handle_control(
     text: &str,
-    anchor: &AnchorClient,
     leases: &Arc<LeaseRegistry>,
     attach: &mut crate::anchor_client::AnchorAttach,
     session_id: &str,
@@ -378,7 +372,10 @@ async fn handle_control(
                 .await;
                 return true;
             }
-            if let Err(e) = anchor.resize(session_id, cols, rows).await {
+            // On the attached connection: anchor's lease is per-connection,
+            // and this is the one holding it. A control op would arrive on
+            // a different connection and be refused.
+            if let Err(e) = attach.resize(cols, rows).await {
                 tracing::debug!(session_id = %session_id, error = %e, "resize rejected");
                 return true;
             }
