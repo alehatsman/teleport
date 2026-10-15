@@ -127,25 +127,36 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    route previously had none on either, which is how it stayed broken.
 
 2. **Session rows and agent metadata are never persisted.** Nothing writes
-   teleport's `sessions` table on the anchor path. `title` and
-   `claude_resume_id` live only in `WatchRegistry` memory
-   (`anchor_watch.rs:68`) and are lost on every teleport restart — which
-   contradicts the rationale at `api.rs:950-955`: "a resume id is only ever
-   useful once the session that had it is gone, and the usual way it goes is
-   the daemon restarting under it." The anchor path reintroduces exactly the
-   bug that comment records fixing. `session_events` rows are never written
-   either. **Blocker.**
+   teleport's `sessions` table on the anchor path.
+
+   **`title` and `claude_resume_id`: fixed.** They lived only in
+   `WatchRegistry` memory and were lost on every teleport restart, which
+   contradicted the rationale at `api.rs:950-955`. **`session_events` rows
+   are still never written** — bells and idle transitions leave no history on
+   this path. That half is open, and is lower severity: nothing reads those
+   rows back today.
+
+   **Narrower than it first looked, and worth recording why.** A *running*
+   session recovers without any persistence: the new teleport starts a
+   watcher from offset 0 and re-derives both fields from the replayed log. It
+   is an **exited** session that loses them, because `reconcile` starts no
+   watcher for one (`anchor_watch.rs:117`) — and that is precisely when a
+   resume id is useful. The first version of the test used a running session
+   and passed with the fix removed; it proved nothing. This is the
+   "passes on both paths for different reasons" class, hit first-hand.
 
    **Decided with anchor:** the two fields split on *write frequency*, not on
    ownership.
 
-   - **`claude_resume_id` becomes an anchor label.** It is emitted once, in
+   - **`claude_resume_id` is an anchor label** (`teleport.claude_resume_id`).
+     It is emitted once, in
      an agent's startup banner (`session/manager.rs:43-46`), so the write is
      rare. A label survives a teleport restart for free, needs no table, and
      creates no second source of truth. Anchor never interprets a label and
      has a test pinning that, so `teleport.claude_resume_id` stays
      self-evidently teleport's opinion.
-   - **`title` stays in a teleport table.** It is re-emitted on every prompt
+   - **`title` is in a teleport table** (`anchor_session_meta`, schema V5).
+     It is re-emitted on every prompt
      (`session/manager.rs:349-353`) — chatty by construction, which is
      exactly why the in-process path throttles it to 1/s
      (`AGENT_META_PERSIST_INTERVAL_MS`, `session/manager.rs:41-47`). Labels
@@ -155,11 +166,11 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    That throttle is itself the evidence for the split: it exists because the
    title is chatty and the resume id is not.
 
-3. **`controller` and `subscribers` are hardcoded** in list and get
-   (`api.rs:908-909`) versus live values in-process (`api.rs:936-937`). The
-   data is available — `leases.controller_name` is already used in the `ready`
-   frame (`ws_anchor.rs:156`) — so the session list says nobody is in control
-   while the WS says otherwise. **Blocker, cheap.**
+3. ~~**`controller` and `subscribers` are hardcoded**~~ **Fixed.** Both now
+   come from teleport's lease registry, which is the authority on who may
+   type. `subscribers` counts teleport's own attached clients — an `anchor`
+   CLI attached straight to anchord is deliberately not counted, which
+   matches what the field has always meant.
 
 4. **Replay truncation is less accurate.** In-process folds in truncation
    discovered during catch-up (`ws.rs:305`) and clamps `replay_from` past a
@@ -264,9 +275,9 @@ Anchor's session flagged this class as the one that goes quietly wrong:
   both "the socket closed" to a test that does not check the code (gap 5).
 
 **New tests the delete needs.** Done: ws-ticket on both paths (gap 1), lease
-freed on purge (#101). Still missing: title and resume id surviving a teleport
-restart (gap 2); `controller` in the session list matching the WS frame
-(gap 3); close codes asserted by value (gap 5).
+freed on purge (#101), title and resume id surviving a restart of an exited
+session (gap 2), the list agreeing with the stream about the controller
+(gap 3). Still missing: close codes asserted by value (gap 5).
 
 ## Ordering
 
@@ -274,8 +285,9 @@ Nothing below moves until the one above it is true.
 
 1. ~~**Resolve gap 12** with anchor.~~ Done — it was anchor's bug, fixed in
    `00f3eaa`. Teleport changes nothing.
-2. **Fix the remaining blockers.** Gaps 2 and 3. ~~Gap 1 and #101~~ are done.
-   Each is a defect on the anchor path *today*, independent of any deletion.
+2. ~~**Fix the remaining blockers.**~~ Done — gaps 1, 2 and 3, and #101. All
+   were defects on the anchor path *today*, independent of any deletion.
+   `session_events` (half of gap 2) is left open as non-blocking.
 3. **Close the cheap divergences**, gaps 4 and 5, while both paths still exist
    and can be compared.
 4. **Package `anchord`** as its own launchd/systemd unit with its own
