@@ -6,6 +6,7 @@
 
 pub mod anchor_bridge;
 pub mod anchor_client;
+pub mod anchor_lease;
 pub mod api;
 pub mod auth;
 pub mod auth_routes;
