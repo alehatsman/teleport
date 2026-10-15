@@ -24,7 +24,7 @@
     reason = "each test binary uses a different subset of this shared support module"
 )]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -142,9 +142,13 @@ pub(crate) struct Daemon {
 
 /// A distinct owner per fixture, so one fixture's sessions are invisible to
 /// another's list and uncounted by its `max_sessions`.
-fn next_owner_id() -> u64 {
+fn next_owner_id() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The pid scopes owners to this run. Without it a reused daemon would
+    // hand a later run's "test-0" the sessions an earlier run's "test-0"
+    // left behind, and a list assertion would count someone else's work.
+    format!("{}-{n}", std::process::id())
 }
 
 /// The one `anchord` this test binary shares.
@@ -159,6 +163,34 @@ fn next_owner_id() -> u64 {
 /// Never dropped: a `static` lives for the process, so the daemon outlives
 /// every fixture in the binary and its directory is cleaned up by the OS.
 static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new();
+
+/// Wipes every session out of the shared daemon, once per run.
+///
+/// Reusing a daemon across runs stops it leaking *processes*, but each run
+/// leaves its sessions behind — most of them still running, since fixtures
+/// rarely terminate what they spawn. Those accumulate into exactly the
+/// resource pressure the reuse was meant to end. The daemon belongs
+/// entirely to this test binary, so starting each run from empty is both
+/// safe and what isolation actually requires.
+async fn wipe_shared_daemon(socket: &Path) {
+    static WIPED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    WIPED
+        .get_or_init(|| async {
+            let client = teleportd::anchor_client::AnchorClient::new(socket.to_path_buf());
+            let Ok(sessions) = client.list(&std::collections::BTreeMap::new()).await else {
+                return;
+            };
+            for session in sessions {
+                // Terminate first: anchor refuses to purge a live session,
+                // which is the behaviour this relies on rather than works
+                // around. Both are best-effort — a session another run is
+                // mid-way through tearing down is already going.
+                drop(client.terminate(&session.id).await);
+                drop(client.purge(&session.id).await);
+            }
+        })
+        .await;
+}
 
 /// The shared daemon's socket, or `None` when not running on anchor.
 pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
@@ -175,7 +207,8 @@ pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
 /// An `anchord` the suite drives, so teleport's own tests can run against
 /// the anchor path rather than a suite written to agree with it.
 pub(crate) struct Anchord {
-    child: std::process::Child,
+    /// `None` when this run reused a daemon an earlier run started.
+    child: Option<std::process::Child>,
     dir: PathBuf,
 }
 
@@ -187,15 +220,39 @@ impl Anchord {
         let bin = PathBuf::from(&raw);
         assert!(bin.is_file(), "ANCHORD_BIN is set to {raw:?}, not a file");
 
-        // Short path: a unix socket path is capped near 104 bytes.
-        let dir = PathBuf::from(format!(
-            "/tmp/tp-suite-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before 1970")
-                .as_nanos()
-        ));
+        // A fixed directory per test binary, not a unique one per run.
+        //
+        // This daemon lives in a `static` and statics are never dropped, so
+        // nothing runs its teardown when the test process exits — a
+        // per-run path meant every run abandoned a daemon that nothing
+        // would ever reap. Dozens accumulated, held PTYs, and eventually
+        // wedged the machine; I misread the resulting failures as product
+        // flakiness twice before finding it.
+        //
+        // A fixed path makes the next run find the previous daemon and
+        // reuse it, so at most one exists per binary no matter how often
+        // the suite runs. Isolation does not depend on the daemon being
+        // fresh: fixtures own their sessions under a unique owner, and the
+        // run nonce below keeps a later run's owners from colliding with
+        // an earlier one's.
+        let stem = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "suite".to_owned());
+        // Trimmed: the socket path underneath this is capped near 104 bytes.
+        let stem: String = stem.chars().take(24).collect();
+        let dir = PathBuf::from(format!("/tmp/tp-anchor-{stem}"));
+
+        // A daemon already listening here is reused as-is.
+        let socket = dir.join("run/anchor.sock");
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return Some(Self { child: None, dir });
+        }
+
+        // Otherwise start fresh: whatever is there is a dead daemon's
+        // leftovers, and reusing its database would carry an earlier run's
+        // sessions into this one.
+        drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
         // Captured, so a daemon that dies on startup says why instead of
         // being diagnosed as "slow" by a timeout.
@@ -207,7 +264,10 @@ impl Anchord {
             .stderr(std::process::Stdio::from(log))
             .spawn()
             .expect("spawning anchord");
-        Some(Self { child, dir })
+        Some(Self {
+            child: Some(child),
+            dir,
+        })
     }
 
     fn socket(&self) -> PathBuf {
@@ -234,17 +294,10 @@ impl Anchord {
     }
 }
 
-impl Drop for Anchord {
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "best-effort teardown in Drop; a failure cannot be propagated"
-    )]
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+// Deliberately no `Drop`. This lives in a `static`, which is never
+// dropped, so an impl here would be dead code that reads as cleanup — the
+// most misleading kind. The daemon is reused by the next run instead; to
+// clear it by hand: `pkill -f tp-anchor- && rm -rf /tmp/tp-anchor-*`.
 
 impl Daemon {
     pub(crate) fn base_url(&self) -> String {
@@ -285,7 +338,7 @@ pub(crate) async fn spawn(config: Config) -> Daemon {
 /// the routes that have nowhere to read or write without one (the pin routes,
 /// docs/19-locations.md#pins). Its files land under `dir`, which the caller
 /// owns and cleans up.
-pub(crate) async fn spawn_with_db(config: Config, dir: &std::path::Path) -> Daemon {
+pub(crate) async fn spawn_with_db(config: Config, dir: &Path) -> Daemon {
     let (db, _) = teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
         .expect("open test db");
     spawn_with_web_dist(config, None, Some(db)).await
@@ -342,6 +395,7 @@ async fn spawn_inner(
     let anchor = match (anchor, shared_anchord_socket()) {
         (Some(client), _) => Some(client),
         (None, Some(socket)) => {
+            wipe_shared_daemon(socket.as_path()).await;
             config.anchor_owner = format!("test-{}", next_owner_id());
             Some(teleportd::anchor_client::AnchorClient::new(socket))
         }
