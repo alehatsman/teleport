@@ -205,12 +205,18 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    workmanager) produces no `resized` frame for teleport's browsers —
    `anchor_watch` tracks output, not geometry.
 
-   **Known limitation, confirmed with anchor.** The attach stream's `RESIZE`
-   frame is client→daemon only; nothing fans geometry back out, so there is
-   no way for teleport to learn about a third-party resize today. Do not add
-   a poll for it. Surfacing it would be new protocol surface on anchor's
-   side — proposed there, not assumed here. If anchor grows the frame, this
-   gap closes by consuming it and this note goes.
+   **Fixed.** Anchor made `0x05` travel both ways (anchor `77dde06`) and
+   teleport consumes it. The frame carries the size anchor *applied* — after
+   clamping and coalescing — so teleport's own local announce was removed
+   rather than kept alongside it: broadcasting the *requested* size would
+   race the authoritative frame and tell a client that asked for 5000 it had
+   5000, then 1000. The originator is told too and is not filtered as an
+   echo, for the same reason. The attach reply now carries `cols`/`rows`, so
+   a browser starts from the real size instead of waiting for a change a
+   quiet session never sends.
+
+   Still not covered: the `note_size` DB write (`session/mod.rs:346`), which
+   has no anchor equivalent and nothing reads back.
 
 9. **Idleness diverges.** `anchor_watch.rs:60` duplicates the threshold from
    `session/mod.rs:111`. Two differences: `Derived::idle_since_ms` has no
@@ -283,6 +289,19 @@ session (gap 2), the list agreeing with the stream about the controller
 
 Nothing below moves until the one above it is true.
 
+**Constraint 1 — the last step cannot be used to validate itself.** M5's exit
+criterion is "update teleport while agents are running, and they survive".
+The agents in question run *inside* the live `teleportd`, so the restart that
+would prove survival is currently the restart that kills them. It only
+becomes survivable after `anchord` is packaged with its own lifecycle **and**
+the default is flipped. The order below is therefore forced, not preferred:
+no amount of care makes a live restart safe before step 5.
+
+**Constraint 2 — anything needing a comparison happens before step 7.** Gaps
+4 and 5 are divergences *between* the two paths. Once the in-process path is
+deleted there is nothing left to compare against, so a divergence not closed
+by then is simply the new behaviour, discovered later by a user.
+
 1. ~~**Resolve gap 12** with anchor.~~ Done — it was anchor's bug, fixed in
    `00f3eaa`. Teleport changes nothing.
 2. ~~**Fix the remaining blockers.**~~ Done — gaps 1, 2 and 3, and #101. All
@@ -313,6 +332,7 @@ protocol doc. Against an older anchord each is a live bug:
 |---|---|
 | `8b47537` | `log` clamps an oversized `max` instead of refusing it, so `get_log`'s paging loop works past 4 MiB. |
 | `00f3eaa` | `terminate`'s reply means the exit is *recorded*, so the `purge` teleport sends next is not refused. |
+| `77dde06` | `resize` travels outbound, so a third-party resize reaches teleport's browsers; the attach reply carries the starting size. |
 
 Teleport's own half of that audit: input is split at 64 KiB (#97), so a paste
 cannot drop an attach.
