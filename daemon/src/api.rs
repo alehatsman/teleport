@@ -871,9 +871,14 @@ struct SessionView {
 impl SessionView {
     /// A session anchord holds.
     ///
-    /// `controller` and `subscribers` are anchor's to know and teleport's
-    /// not to guess: the lease lives in teleport's own layer above anchor
-    /// for now, and subscriber counts are per-connection inside anchord.
+    /// `controller` and `subscribers` come from teleport's own lease
+    /// registry, not from anchord. Teleport's lease is what decides which
+    /// browser may type (`ws_anchor.rs`'s module doc: anchor's lease is
+    /// per-connection and only mirrors it), so teleport is the authority on
+    /// both — and `ready` already reports the controller this way
+    /// (`ws_anchor.rs:156`). Reporting `None`/`0` here while the WebSocket
+    /// said otherwise was not caution, it was two answers to one question.
+    ///
     /// The four derived fields come from `anchor_watch`, which follows the
     /// session's output the way the in-process reader does. `None` when no
     /// watcher has seen it yet — a session created moments ago, or one
@@ -881,6 +886,7 @@ impl SessionView {
     fn from_anchor(
         bridged: &anchor_bridge::BridgedSession,
         derived: Option<&crate::anchor_watch::Derived>,
+        leases: &crate::anchor_lease::LeaseRegistry,
     ) -> Self {
         let s = &bridged.session;
         SessionView {
@@ -903,8 +909,8 @@ impl SessionView {
             exited_at_ms: s.exited_at,
             exit_code: s.exit_code,
             lost_reason: s.lost_reason.clone(),
-            controller: None,
-            subscribers: 0,
+            controller: leases.controller_name(&s.id),
+            subscribers: leases.subscriber_count(&s.id),
             last_bell_ms: derived.and_then(|d| d.last_bell_ms),
             idle_since_ms: derived.and_then(|d| d.idle_since_ms(crate::now_ms())),
             title: derived.and_then(|d| d.title.clone()),
@@ -1014,7 +1020,11 @@ async fn list_sessions(
             .into_iter()
             .map(|s| {
                 let derived = state.watch.get(&s.id);
-                SessionView::from_anchor(&anchor_bridge::BridgedSession::new(s), derived.as_ref())
+                SessionView::from_anchor(
+                    &anchor_bridge::BridgedSession::new(s),
+                    derived.as_ref(),
+                    &state.leases,
+                )
             })
             .collect();
         views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
@@ -1060,6 +1070,7 @@ async fn get_session(
         return Ok(Json(SessionView::from_anchor(
             &anchor_bridge::BridgedSession::new(session),
             derived.as_ref(),
+            &state.leases,
         )));
     }
     if let Ok(session) = find_session(&state, &id) {

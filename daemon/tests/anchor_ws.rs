@@ -169,6 +169,28 @@ async fn create(daemon: &support::Daemon, script: &str) -> String {
         .expect("create")
 }
 
+/// One session as teleport's own HTTP view reports it.
+async fn get_session(daemon: &support::Daemon, id: &str) -> Value {
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/sessions/{id}"))
+        .header(axum::http::header::HOST, "127.0.0.1")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", support::TOKEN),
+        )
+        .body(axum::body::Body::empty())
+        .expect("valid request");
+    let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
+    let response = tower::ServiceExt::oneshot(router, req)
+        .await
+        .expect("router call");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).expect("a session view")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_attaches_through_teleport_to_a_session_in_anchord() {
     if anchord_bin().is_none() {
@@ -312,4 +334,51 @@ async fn an_observer_is_refused_resize_but_still_sees_output() {
     let error = next_json(&mut observer).await;
     assert_eq!(error["type"], "error");
     assert_eq!(error["code"], "not_controller");
+}
+
+/// The session list reports the same controller the WebSocket does.
+///
+/// `ready` has always carried the controller from teleport's lease registry
+/// (`ws_anchor.rs`), but the list and get views hardcoded `controller: null`
+/// and `subscribers: 0` on the anchor path. One attached browser could
+/// therefore be told it holds control while the list said nobody did — two
+/// answers to one question, and the UI reads both (#gap 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_list_agrees_with_the_stream_about_who_is_in_control() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("controller");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo ctl-ready; cat").await;
+
+    // Before anyone attaches: nobody is in control, nobody is watching.
+    let view = get_session(&daemon, &id).await;
+    assert_eq!(view["controller"], Value::Null, "nobody has attached yet");
+    assert_eq!(view["subscribers"], 0);
+
+    let mut ws = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=control&client_id=browser-a&client_name=Ada"
+    )))
+    .await;
+    let ready = next_json(&mut ws).await;
+    assert_eq!(ready["control"], true);
+    assert_eq!(
+        ready["controller"], "Ada",
+        "the stream names the controller"
+    );
+
+    // The same question, asked of the list, must get the same answer.
+    let view = get_session(&daemon, &id).await;
+    assert_eq!(
+        view["controller"], "Ada",
+        "the list disagrees with the stream about who is in control"
+    );
+    assert_eq!(
+        view["subscribers"], 1,
+        "one browser is attached and the list says {}",
+        view["subscribers"]
+    );
 }
