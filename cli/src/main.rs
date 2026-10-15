@@ -93,8 +93,26 @@ enum UiAction {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Install a UI bundle already built on this machine (`web/dist`) and
+    /// flip the slot to it. No download and no checksum -- the development
+    /// path, not the release path
+    /// (docs/18-ui-upgrades.md#installing-a-locally-built-bundle).
+    Install {
+        /// Directory holding the built bundle, e.g. `web/dist`.
+        dir: PathBuf,
+        /// Name for the version directory. Defaults to `local-<unix seconds>`.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Point the slot back at the previously installed version.
     Rollback,
+    /// Drop the slot entirely, so the daemon serves the UI embedded in its
+    /// own binary again.
+    Reset {
+        /// Also delete the installed version directories, not just the link.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[tokio::main]
@@ -122,7 +140,9 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 UiAction::Upgrade { version } => ui::upgrade(&data_dir, version.clone()).await,
+                UiAction::Install { dir, name } => ui::install(&data_dir, dir, name.clone()),
                 UiAction::Rollback => ui::rollback(&data_dir),
+                UiAction::Reset { purge } => ui::reset(&data_dir, *purge),
             };
         }
         #[cfg(not(unix))]

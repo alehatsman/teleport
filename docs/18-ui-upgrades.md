@@ -144,6 +144,56 @@ It steps *backwards* specifically, rather than "to some other version": at the o
 retained version it stops and says so. Picking "the newest one that isn't current" would
 make a second rollback walk forward again, and the two commands would just toggle.
 
+When it stops, it names the current version and points at `teleport ui reset` — at the
+oldest retained version the only way further back is the daemon's embedded bundle, and
+"no earlier UI version is retained" on its own left that unsaid.
+
+### Installing a locally built bundle
+
+`teleport ui install <dir>` takes a directory that already holds a built bundle — a
+`web/dist` tree — and runs the same steps 5–8 as an upgrade, minus the download and the
+checksum (there is no release to check against; the bytes are the ones the caller just
+built):
+
+```text
+1. validate <dir>/index.html exists and is non-empty   ← a dist that never got built
+2. copy <dir> -> <data_dir>/web/.staging-<name>/       ← never over a retained dir
+3. rename .staging-<name> -> <name>
+4. symlink+rename <name> over current                  ← atomic; same single syscall
+5. prune retained versions beyond the newest 3
+```
+
+`--name <NAME>` names the version directory, which is what `ui status` lists and what
+`/health` reports as `ui_version`; it defaults to `local-<unix-seconds>`. A name must be
+one path segment, must not start with `.` (that is the staging/sentinel namespace) and
+must not be `current`. Installing over a name that already exists is refused rather than
+deleting a directory the daemon may be serving this instant — the same rule the upgrade
+path follows; pass a different `--name`.
+
+**This is the development path, and it is deliberately not the release path.** Nothing
+here is verified against a checksum, so what lands in the slot is exactly as trustworthy
+as the directory handed to it. It exists because the alternative — what this command
+replaced — was hand-building the slot with `cp`, `ln -s` and `mv`, which has a trap:
+`mv -f link dir` on macOS *follows* a symlink that points at a directory and moves the
+source **into** it, so staging a new `current` over an existing one silently buries the
+link inside the live version directory instead of flipping it. `rename(2)` never follows
+the link, which is why [Flipping](#flipping)'s step 7 is a syscall and not a shell
+command.
+
+### Returning to the embedded UI
+
+`teleport ui reset` removes `current`. The daemon's next request resolves no slot and
+falls back to the bundle embedded in the binary
+([Resolution is per request](#resolution-is-per-request-not-per-process)) — no restart,
+same as every other flip. Version directories are left in place unless `--purge` is
+passed, which deletes them too.
+
+It is the counterpart to `install`: a locally built bundle in the slot **shadows the
+binary's embedded UI indefinitely**, including after the binary is upgraded to a newer
+version than the slot holds. Anyone who installs a dev bundle needs a one-command way
+back, and `rollback` is not it — that walks between installed versions and can never
+leave the slot.
+
 ## Cache headers
 
 **Mandatory, not polish.** Without them the flip is invisible for hours and the whole
@@ -251,7 +301,9 @@ machine's slot. Upgrading a remote daemon's UI means running the CLI on that hos
 ```text
 teleport ui status            # current version, retained versions, where it resolves from
 teleport ui upgrade [--version vX.Y.Z]
+teleport ui install <dir> [--name NAME]   # a locally built bundle; no download, no checksum
 teleport ui rollback
+teleport ui reset [--purge]   # drop the slot; serve the binary's embedded UI again
 ```
 
 `teleport ui` is dispatched before the CLI resolves a daemon connection: it is

@@ -234,6 +234,170 @@ pub(crate) async fn upgrade(data_dir: &Path, version: Option<String>) -> Result<
     Ok(())
 }
 
+/// `teleport ui install <dir>` -- the development path
+/// (docs/18-ui-upgrades.md#installing-a-locally-built-bundle). Same flip as
+/// an upgrade, minus the download and the checksum: there is no release to
+/// check the bytes against, so what lands in the slot is exactly as
+/// trustworthy as the directory handed in.
+///
+/// It exists because the alternative is hand-building the slot with `cp`,
+/// `ln -s` and `mv` -- and `mv -f` over a symlink-to-a-directory *follows*
+/// it on macOS, burying the staged link inside the live version directory
+/// instead of flipping it. [`Slot::flip_to`] is a `rename(2)`, which never
+/// follows.
+pub(crate) fn install(data_dir: &Path, source: &Path, name: Option<String>) -> Result<()> {
+    let name = match name {
+        Some(name) => {
+            validate_version_name(&name)?;
+            name
+        }
+        None => default_local_name(),
+    };
+
+    // Checked before anything is created: a `dist` that was never built is
+    // the overwhelmingly common mistake here, and the slot should not grow
+    // a staging directory because of it.
+    let index = source.join("index.html");
+    if std::fs::metadata(&index).map_or(0, |m| m.len()) == 0 {
+        bail!(
+            "{} has no usable index.html -- is that a built bundle? (run `npm run build` in web/)",
+            source.display()
+        );
+    }
+
+    let slot = Slot::new(data_dir);
+    std::fs::create_dir_all(&slot.root)
+        .with_context(|| format!("creating the slot root at {}", slot.root.display()))?;
+    restrict(&slot.root)?;
+
+    let installed = slot.root.join(&name);
+    if installed.exists() {
+        // Same rule the upgrade path follows: re-installing over a version
+        // directory would mean deleting one the daemon may be serving this
+        // instant, which is the one thing this design never does.
+        bail!(
+            "{} is already installed -- pass a different --name",
+            installed.display()
+        );
+    }
+
+    let staging = slot.root.join(format!("{STAGING_PREFIX}{name}"));
+    remove_if_present(&staging)?;
+    copy_tree(source, &staging)?;
+    std::fs::rename(&staging, &installed)
+        .with_context(|| format!("moving the staged bundle into {}", installed.display()))?;
+
+    slot.flip_to(&name)?;
+    println!("UI is now {name} (local build) -- no daemon restart, no session touched");
+    println!("  `teleport ui reset` returns to the UI embedded in the daemon binary");
+    prune(&slot, &name)?;
+    Ok(())
+}
+
+/// `teleport ui reset` -- remove `current`, so the daemon's next request
+/// resolves no slot and falls back to its embedded bundle. The counterpart
+/// to [`install`]: a local bundle in the slot shadows the embedded UI
+/// indefinitely, including after the binary is upgraded past it, and
+/// [`rollback`] can only walk between installed versions -- it can never
+/// leave the slot.
+pub(crate) fn reset(data_dir: &Path, purge: bool) -> Result<()> {
+    let slot = Slot::new(data_dir);
+    let had_link = std::fs::symlink_metadata(slot.current_link()).is_ok();
+    remove_if_present(&slot.current_link())?;
+
+    if purge {
+        for dir in slot.versions() {
+            println!("purging {}", dir.display());
+            remove_if_present(&dir)?;
+        }
+        for stray in slot.stray_staging() {
+            println!("clearing stray {}", stray.display());
+            remove_if_present(&stray)?;
+        }
+    }
+
+    if had_link {
+        println!("slot cleared -- serving the UI embedded in the daemon binary");
+    } else {
+        // Idempotent, like `rollback` at the oldest version: there was
+        // nothing in the way, which is the state being asked for.
+        println!("no slot was set -- already serving the embedded UI");
+    }
+    if !purge && !slot.versions().is_empty() {
+        println!("  installed versions are kept; `--purge` deletes them too");
+    }
+    Ok(())
+}
+
+/// One path segment, and not one of the slot's own reserved names. A
+/// version name becomes a directory beside the live one and the string
+/// `/health` reports as `ui_version`, so a `../` or a dot-prefix here is
+/// either an escape or an invisible version.
+fn validate_version_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("--name cannot be empty");
+    }
+    if name == "current" {
+        bail!("`current` is the slot's symlink, not a version name");
+    }
+    if name.starts_with('.') {
+        bail!("a version name cannot start with `.` -- that is the staging namespace");
+    }
+    if Path::new(name).components().count() != 1 {
+        bail!("`{name}` is not a single path segment");
+    }
+    Ok(())
+}
+
+/// `local-<unix seconds>`: sorts and reads as what it is, and two installs
+/// in the same second are the only collision -- which `install` reports
+/// rather than overwriting.
+fn default_local_name() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!("local-{secs}")
+}
+
+/// Copies a built bundle into the staging directory, with the same posture
+/// [`extract`] has for an archive: regular files only -- a symlink in the
+/// tree is refused rather than followed, since what lands here is served to
+/// a browser -- and owner-only modes throughout, not whatever the source
+/// tree happened to carry.
+fn copy_tree(source: &Path, dest: &Path) -> Result<usize> {
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    restrict(dest)?;
+
+    let mut files = 0_usize;
+    let entries =
+        std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading an entry of {}", source.display()))?;
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        // `symlink_metadata`: a symlink must be seen as a symlink, not as
+        // whatever it points at.
+        let meta = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+
+        if meta.is_dir() {
+            files += copy_tree(&path, &target)?;
+        } else if meta.is_file() {
+            std::fs::copy(&path, &target)
+                .with_context(|| format!("copying {} to {}", path.display(), target.display()))?;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("restricting {}", target.display()))?;
+            files += 1;
+        } else {
+            bail!(
+                "{} is not a regular file or directory -- refusing to install it",
+                path.display()
+            );
+        }
+    }
+    Ok(files)
+}
+
 /// `teleport ui rollback` -- one `rename(2)`, no download. This is why a
 /// flip retains the previous directory instead of replacing it in place.
 pub(crate) fn rollback(data_dir: &Path) -> Result<()> {
@@ -261,7 +425,13 @@ pub(crate) fn rollback(data_dir: &Path) -> Result<()> {
         // Idempotent at the oldest retained version rather than an error:
         // rolling back when there is nowhere to roll back to has already
         // achieved what it was asked for.
-        println!("no earlier UI version is retained; staying on the current one");
+        match current {
+            Some(version) => println!(
+                "no earlier UI version is retained; staying on {version} \
+                 (`teleport ui reset` returns to the daemon's embedded UI)"
+            ),
+            None => println!("no UI version is installed; the daemon is serving its embedded UI"),
+        }
         return Ok(());
     };
     slot.flip_to(&previous)?;
@@ -732,7 +902,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    fn install(slot: &Slot, version: &str) {
+    /// Fakes an already-installed version directory and flips to it. Named
+    /// apart from the real [`install`] command this module now exports.
+    fn fake_install(slot: &Slot, version: &str) {
         let dir = slot.root.join(version);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), version).unwrap();
@@ -748,7 +920,7 @@ mod tests {
         let slot = Slot::new(&dir);
         std::fs::create_dir_all(&slot.root).unwrap();
         for version in ["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4"] {
-            install(&slot, version);
+            fake_install(&slot, version);
         }
         prune(&slot, "v1.0.4").unwrap();
 
@@ -768,8 +940,8 @@ mod tests {
         let dir = scratch("rollback");
         let slot = Slot::new(&dir);
         std::fs::create_dir_all(&slot.root).unwrap();
-        install(&slot, "v1.0.0");
-        install(&slot, "v1.0.1");
+        fake_install(&slot, "v1.0.0");
+        fake_install(&slot, "v1.0.1");
 
         rollback(&dir).unwrap();
         assert_eq!(slot.current_version().as_deref(), Some("v1.0.0"));
@@ -778,6 +950,130 @@ mod tests {
         // not a failure.
         rollback(&dir).unwrap();
         assert_eq!(slot.current_version().as_deref(), Some("v1.0.0"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A built bundle on disk, the shape `web/dist` has.
+    fn fake_dist(root: &Path, marker: &str) -> PathBuf {
+        let dist = root.join(format!("dist-{marker}"));
+        std::fs::create_dir_all(dist.join("assets")).unwrap();
+        std::fs::write(dist.join("index.html"), format!("<html>{marker}</html>")).unwrap();
+        std::fs::write(dist.join("assets/app.js"), "console.log(1)").unwrap();
+        dist
+    }
+
+    #[test]
+    fn install_copies_a_local_bundle_into_the_slot_and_flips_to_it() {
+        let dir = scratch("install-local");
+        let dist = fake_dist(&dir, "one");
+
+        install(&dir, &dist, Some("local-one".into())).unwrap();
+
+        let slot = Slot::new(&dir);
+        assert_eq!(slot.current_version().as_deref(), Some("local-one"));
+        let installed = slot.root.join("local-one");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("index.html")).unwrap(),
+            "<html>one</html>"
+        );
+        // Nested files come along, and the source tree is left alone.
+        assert!(installed.join("assets/app.js").is_file());
+        assert!(dist.join("index.html").is_file());
+        // Owner-only, like everything else under <data_dir> (docs/06-security.md).
+        let mode = std::fs::metadata(installed.join("index.html"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // No staging litter survives a success.
+        assert!(slot.stray_staging().is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn install_refuses_a_directory_that_was_never_built() {
+        let dir = scratch("install-unbuilt");
+        let empty = dir.join("dist-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let err = install(&dir, &empty, Some("local-empty".into())).unwrap_err();
+        assert!(err.to_string().contains("no usable index.html"));
+        // The failure must not leave the slot half-built.
+        assert!(!Slot::new(&dir).root.join("local-empty").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn install_never_overwrites_a_version_the_daemon_may_be_serving() {
+        let dir = scratch("install-collision");
+        let first = fake_dist(&dir, "first");
+        let second = fake_dist(&dir, "second");
+        install(&dir, &first, Some("local-x".into())).unwrap();
+
+        let err = install(&dir, &second, Some("local-x".into())).unwrap_err();
+        assert!(err.to_string().contains("already installed"));
+        // The live directory is untouched, not deleted-then-rewritten.
+        let slot = Slot::new(&dir);
+        assert_eq!(
+            std::fs::read_to_string(slot.root.join("local-x/index.html")).unwrap(),
+            "<html>first</html>"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_version_name_must_be_one_plain_segment() {
+        validate_version_name("local-1").unwrap();
+        for bad in ["", "current", ".staging-x", "a/b", "../escape"] {
+            assert!(
+                validate_version_name(bad).is_err(),
+                "`{bad}` should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn install_then_rollback_walks_between_local_versions() {
+        let dir = scratch("install-rollback");
+        install(&dir, &fake_dist(&dir, "a"), Some("local-a".into())).unwrap();
+        // versions() orders by mtime; see fake_install's note.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        install(&dir, &fake_dist(&dir, "b"), Some("local-b".into())).unwrap();
+
+        let slot = Slot::new(&dir);
+        assert_eq!(slot.current_version().as_deref(), Some("local-b"));
+        rollback(&dir).unwrap();
+        assert_eq!(slot.current_version().as_deref(), Some("local-a"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reset_drops_the_slot_and_purge_takes_the_versions_with_it() {
+        let dir = scratch("reset");
+        install(&dir, &fake_dist(&dir, "one"), Some("local-one".into())).unwrap();
+        let slot = Slot::new(&dir);
+
+        reset(&dir, false).unwrap();
+        assert_eq!(
+            slot.current_version(),
+            None,
+            "no current link means the daemon falls back to its embedded bundle"
+        );
+        assert!(
+            slot.root.join("local-one").is_dir(),
+            "versions survive a plain reset"
+        );
+
+        // Idempotent: resetting an already-clear slot is the state asked for.
+        reset(&dir, false).unwrap();
+
+        reset(&dir, true).unwrap();
+        assert!(slot.versions().is_empty(), "--purge takes the versions too");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
