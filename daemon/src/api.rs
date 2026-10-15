@@ -593,13 +593,25 @@ async fn health(
         body["ui_version"] = state.web.ui_version().into();
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
-        body["sessions_running"] = state
-            .sessions
-            .list()
-            .iter()
-            .filter(|s| s.state() == SessionState::Running)
-            .count()
-            .into();
+        // Counted wherever the sessions actually live. Reporting the
+        // in-process manager's count on the anchor path would report zero
+        // while sessions run, which is worse than not reporting it:
+        // health is what a supervisor decides to restart on.
+        body["sessions_running"] = match &state.anchor {
+            Some(anchor) => anchor
+                .list(&std::collections::BTreeMap::new())
+                .await
+                .map(|sessions| sessions.iter().filter(|s| s.state == "running").count())
+                .unwrap_or_default()
+                .into(),
+            None => state
+                .sessions
+                .list()
+                .iter()
+                .filter(|s| s.state() == SessionState::Running)
+                .count()
+                .into(),
+        };
     }
     Json(body)
 }
@@ -671,6 +683,28 @@ async fn create_session(
     // travel as labels -- anchor has no column for them and should not grow
     // one (`anchor_bridge`).
     if let Some(anchor) = &state.anchor {
+        // max_sessions is teleport's policy, so teleport enforces it.
+        // anchord has a cap of its own but it is a different daemon's
+        // setting, and leaving this unchecked would silently drop a limit
+        // docs/06-security.md#process-spawning treats as load-bearing.
+        //
+        // Counted, not reserved: two creates racing can both pass. The
+        // in-process path reserves a slot because it can; across a socket
+        // that would need a reservation protocol for a cap whose job is
+        // stopping runaway loops, not arbitrating a photo finish.
+        let live = anchor
+            .list(&std::collections::BTreeMap::new())
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?
+            .into_iter()
+            .filter(|s| s.state == "running" || s.state == "closing")
+            .count();
+        if live >= state.config.max_sessions {
+            return Err(ApiError::Create(CreateError::MaxSessions(
+                state.config.max_sessions,
+            )));
+        }
+
         let labels = anchor_bridge::labels_for(&kind, preset_id.as_deref());
         let spec = anchor_bridge::spec_for(command, args, cwd, env, cols, rows, login_shell);
         let id = anchor

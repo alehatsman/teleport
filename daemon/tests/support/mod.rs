@@ -138,6 +138,78 @@ pub(crate) struct Daemon {
     pub addr: std::net::SocketAddr,
     pub state: Arc<AppState>,
     server: JoinHandle<()>,
+    /// The `anchord` this daemon's sessions live in, when the suite is run
+    /// against the anchor path. Killed with the daemon.
+    _anchord: Option<Anchord>,
+}
+
+/// An `anchord` started for one fixture.
+///
+/// Exists so the whole suite can be pointed at the anchor path with an env
+/// var rather than forking every fixture: that is the only honest way to
+/// check anchor's M4 exit criterion, which is teleport's *own* tests
+/// passing against it.
+pub(crate) struct Anchord {
+    child: std::process::Child,
+    dir: PathBuf,
+}
+
+impl Anchord {
+    /// `None` unless `TELEPORT_TEST_ANCHOR` and `ANCHORD_BIN` are both set.
+    fn start_if_requested() -> Option<Self> {
+        std::env::var_os("TELEPORT_TEST_ANCHOR")?;
+        let raw = std::env::var_os("ANCHORD_BIN").expect("TELEPORT_TEST_ANCHOR needs ANCHORD_BIN");
+        let bin = PathBuf::from(&raw);
+        assert!(bin.is_file(), "ANCHORD_BIN is set to {raw:?}, not a file");
+
+        // Short path: a unix socket path is capped near 104 bytes.
+        let dir = PathBuf::from(format!(
+            "/tmp/tp-suite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before 1970")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
+        let child = std::process::Command::new(&bin)
+            .env("XDG_DATA_HOME", &dir)
+            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env("ANCHOR_LOG", "warn")
+            .spawn()
+            .expect("spawning anchord");
+        Some(Self { child, dir })
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.dir.join("run/anchor.sock")
+    }
+
+    /// Blocks until the socket accepts, so a fixture never races startup.
+    ///
+    /// Generous, because every fixture starts its own anchord and a full
+    /// parallel run starts dozens at once. The wait is for a process to
+    /// bind a unix socket, so a slow one here means a loaded machine, not a
+    /// broken daemon.
+    fn wait_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while std::os::unix::net::UnixStream::connect(self.socket()).is_err() {
+            assert!(Instant::now() < deadline, "anchord never came up");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+impl Drop for Anchord {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort teardown in Drop; a failure cannot be propagated"
+    )]
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl Daemon {
@@ -229,6 +301,20 @@ async fn spawn_inner(
     db: Option<teleportd::persistence::Db>,
     anchor: Option<teleportd::anchor_client::AnchorClient>,
 ) -> Daemon {
+    // When the suite is pointed at the anchor path, every fixture gets its
+    // own anchord and routes through it.
+    let anchord = Anchord::start_if_requested();
+    let anchor = match (&anchor, &anchord) {
+        (Some(client), _) => Some(client.clone()),
+        (None, Some(anchord)) => {
+            anchord.wait_ready();
+            Some(teleportd::anchor_client::AnchorClient::new(
+                anchord.socket(),
+            ))
+        }
+        (None, None) => None,
+    };
+
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -286,6 +372,7 @@ async fn spawn_inner(
         addr,
         state,
         server,
+        _anchord: anchord,
     }
 }
 
@@ -296,11 +383,36 @@ pub(crate) fn default_config() -> Config {
 /// Creates a `shell`-kind `/bin/sh` session directly through the
 /// `SessionManager` (bypassing HTTP) -- the fastest way for a WS-focused
 /// test to get a session id to attach to.
-pub(crate) fn create_shell_session(
+/// Creates a session in whichever backend this daemon uses.
+///
+/// Routing by backend matters: creating in the in-process manager while the
+/// daemon serves from anchord gives a session the API cannot see, and every
+/// test that then attaches gets `not_found` — which looks like a protocol
+/// bug and is really a fixture talking to the wrong store.
+pub(crate) async fn create_shell_session(
     daemon: &Daemon,
     args: &[String],
 ) -> teleportd::session::SessionId {
     let cwd = std::env::temp_dir();
+    if let Some(anchor) = &daemon.state.anchor {
+        let id = anchor
+            .create(
+                &teleportd::anchor_client::AnchorSpec {
+                    command: "/bin/sh".to_string(),
+                    args: args.to_vec(),
+                    cwd,
+                    env: std::collections::BTreeMap::new(),
+                    cols: 80,
+                    rows: 24,
+                    login_shell: false,
+                },
+                &std::collections::BTreeMap::new(),
+            )
+            .await
+            .expect("create session in anchord");
+        return id.parse().expect("anchord returns a ULID");
+    }
+
     let spec = teleportd::pty::SpawnSpec {
         program: "/bin/sh",
         args,
