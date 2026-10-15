@@ -209,6 +209,10 @@ async fn attach_replays_then_streams_and_reports_the_exit() {
         match attach.next_frame().await.expect("a frame") {
             Some(AnchorFrame::Output { bytes, .. }) => seen.extend_from_slice(&bytes),
             Some(AnchorFrame::Lease { held }) => assert!(held),
+            // The initial size, sent whether or not anyone resized.
+            Some(AnchorFrame::Resized { cols, rows }) => {
+                assert!(cols > 0 && rows > 0, "a zero-sized pty");
+            }
             Some(AnchorFrame::Exit { .. }) | None => panic!("ended before replaying"),
         }
     }

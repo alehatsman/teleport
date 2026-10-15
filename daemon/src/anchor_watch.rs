@@ -186,6 +186,16 @@ async fn reconcile(
 /// Follows one session's output, deriving signals from it until it ends.
 fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String, db: Option<Db>) {
     tokio::spawn(async move {
+        // **Starting from 0 is load-bearing beyond the reason below.**
+        // Replaying a running session's whole log re-derives its title and
+        // resume id after a teleport restart, which is why a restart test
+        // against a *running* session passes even with persistence removed.
+        // Only an exited session — which never gets a watcher — actually
+        // depends on the stored copies. Anyone optimising this to start at
+        // the head must keep the persistence in `OscUpdate::Title` and the
+        // resume label: without them, running sessions would start losing
+        // their metadata too, and no existing test would say so.
+        //
         // From 0 the first time. The signals worth deriving are mostly
         // emitted at startup — an agent sets its title and prints its
         // resume link in its opening banner — and the supervisor cannot

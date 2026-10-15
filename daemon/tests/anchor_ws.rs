@@ -382,3 +382,55 @@ async fn the_session_list_agrees_with_the_stream_about_who_is_in_control() {
         view["subscribers"]
     );
 }
+
+/// A resize by someone who is not this browser still reaches it.
+///
+/// Geometry is not in the output bytes, so without a frame saying so a
+/// client whose session is resized by another anchord client — an `anchor`
+/// CLI, or a second teleport — keeps rendering at a width the PTY no longer
+/// has. Teleport could not observe it at all until anchor made `0x05`
+/// travel both ways (anchor 77dde06); the spec carried it as a known
+/// limitation until then.
+///
+/// Also pins the two halves that are easy to get subtly wrong: the attach
+/// reply carries the starting size, so a session nobody ever resizes still
+/// has one, and the frame carries the size anchor *applied* rather than the
+/// size anyone asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_by_another_client_reaches_an_attached_browser() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("thirdpartyresize");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo size-ready; cat").await;
+
+    let mut ws = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=observe&client_id=browser-b&client_name=B"
+    )))
+    .await;
+    let ready = next_json(&mut ws).await;
+    // From the attach reply: nobody has resized anything yet, and this
+    // browser still knows how wide the session is.
+    assert_eq!(ready["cols"], 80, "the attach reply carried no size");
+    assert_eq!(ready["rows"], 24);
+    read_until(&mut ws, "size-ready").await;
+
+    // A different anchord client entirely — not this browser, and not
+    // teleport's WebSocket path.
+    let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
+    client.resize(&id, 120, 40).await.expect("resize");
+
+    // The observer is told, despite having done nothing and holding no
+    // lease. Skipping output frames to find the control frame.
+    let resized = loop {
+        let frame = next_json(&mut ws).await;
+        if frame["type"] == "resized" {
+            break frame;
+        }
+    };
+    assert_eq!(resized["cols"], 120, "wrong width: {resized}");
+    assert_eq!(resized["rows"], 40, "wrong height: {resized}");
+}
