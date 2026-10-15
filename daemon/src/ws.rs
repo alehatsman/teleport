@@ -114,8 +114,21 @@ pub async fn upgrade(
         )
             .into_response();
     }
-    let Some(session) = state.sessions.get(session_id) else {
-        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+    // On the anchor path the session lives in anchord, so there is no
+    // in-process `Session` to look up and `run` has nothing to take. The
+    // proxy in `ws_anchor` speaks the same client protocol over an anchor
+    // attach; keeping it a separate path leaves the authoritative
+    // in-process loop below untouched.
+    let anchor_path = state.anchor.clone();
+    let session = if anchor_path.is_some() {
+        None
+    } else {
+        match state.sessions.get(session_id) {
+            Some(session) => Some(session),
+            None => {
+                return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response()
+            }
+        }
     };
 
     // A stable per-install id names the controller in the UI and lets a
@@ -135,6 +148,30 @@ pub async fn upgrade(
     let max_replay_bytes = state.config.max_replay_bytes;
     let control_grace_ms = state.config.control_grace_ms;
 
+    if let Some(anchor) = anchor_path {
+        let leases = Arc::clone(&state.leases);
+        let id = session_id.to_string();
+        return ws.on_upgrade(move |socket| {
+            crate::ws_anchor::run_anchor(crate::ws_anchor::Proxy {
+                socket,
+                anchor,
+                leases,
+                session_id: id,
+                client_id,
+                client_name,
+                requested_control,
+                after: q.after,
+                tail: q.tail,
+                default_tail,
+                max_replay_bytes,
+                control_grace_ms,
+            })
+        });
+    }
+
+    let Some(session) = session else {
+        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+    };
     ws.on_upgrade(move |socket| {
         run(
             socket,
@@ -157,7 +194,7 @@ pub async fn upgrade(
 /// and never counts as truncation; only an `after` moved forward by
 /// `max_replay_bytes` does (docs/04-api-protocol.md#bounded-attach: "When a
 /// replay is clamped, `ready` says so").
-fn bound_attach(
+pub(crate) fn bound_attach(
     after: Option<u64>,
     tail: Option<u64>,
     default_tail: u64,

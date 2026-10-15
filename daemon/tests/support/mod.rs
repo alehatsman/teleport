@@ -249,6 +249,7 @@ async fn spawn_inner(
         // `None` for the in-process path, which is what most fixtures
         // drive; `Some` routes sessions to a real anchord.
         anchor,
+        leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db,
         origin_policy,
         token: TOKEN.to_string(),

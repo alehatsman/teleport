@@ -54,6 +54,9 @@ pub struct AppState {
     /// the extraction — see anchor's `ROADMAP.md` M4, which flips the
     /// default only once this suite passes against the anchor path.
     pub anchor: Option<crate::anchor_client::AnchorClient>,
+    /// Control leases for anchor-hosted sessions. Unused on the in-process
+    /// path, where the lease lives on each `Session`.
+    pub leases: Arc<crate::anchor_lease::LeaseRegistry>,
     /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
     /// that `sessions.get` doesn't know about falls back to this for `GET`
     /// and `/log` -- a `lost`/`exited` row from before this process started

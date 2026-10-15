@@ -339,9 +339,16 @@ pub enum AnchorFrame {
 }
 
 impl AnchorAttach {
-    /// Whether this connection holds the input lease.
+    /// Whether this connection holds the input lease, as of the last
+    /// `lease` frame seen.
     pub fn has_control(&self) -> bool {
         self.has_control
+    }
+
+    /// Records a lease change the caller read off the stream, so
+    /// [`has_control`](Self::has_control) stays true to it.
+    pub fn set_control(&mut self, held: bool) {
+        self.has_control = held;
     }
 
     /// The session's authoritative offset when the attach was answered.
@@ -401,6 +408,25 @@ impl AnchorAttach {
                 }))
             }
         }))
+    }
+
+    /// Claims anchor's control lease for this connection, preempting
+    /// whoever holds it.
+    ///
+    /// `attach` deliberately never preempts, so this is the only way to take
+    /// control of a session someone else is driving. Anchor answers with a
+    /// `lease` frame to this connection and to every other one attached.
+    pub async fn claim_control(&mut self) -> Result<()> {
+        let mut out = Vec::with_capacity(frame::HEADER_LEN + 1);
+        out.push(frame::LEASE);
+        out.extend_from_slice(&0_u64.to_be_bytes());
+        out.extend_from_slice(&1_u32.to_be_bytes());
+        out.push(1);
+        self.writer
+            .write_all(&out)
+            .await
+            .context("claiming control")?;
+        self.writer.flush().await.context("flushing a claim")
     }
 
     /// Sends input to the PTY. Only the lease holder's input is applied;

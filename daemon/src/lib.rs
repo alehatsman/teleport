@@ -22,6 +22,7 @@ pub mod pty;
 pub mod session;
 pub mod web_assets;
 pub mod ws;
+pub mod ws_anchor;
 
 /// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field
 /// across `session.rs`/`persistence.rs`/`main.rs` and the matching SQLite

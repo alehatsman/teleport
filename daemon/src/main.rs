@@ -227,15 +227,17 @@ async fn main() -> Result<()> {
     // below, which otherwise only listens for Ctrl+C / SIGTERM.
     let shutdown_trigger = Arc::new(tokio::sync::Notify::new());
 
-    // The anchor path is incomplete until `ws.rs` proxies attach to anchord
-    // (anchor ROADMAP M4). Refusing here is deliberate: a flag that routes
-    // the REST surface to one session store while WebSocket attach still
-    // reaches the in-process one would show a user a session list whose
-    // entries cannot be opened. Better to not start than to half-start.
+    // Both paths are complete now: REST and WebSocket attach both reach
+    // anchord when this is on. It still defaults off — the in-process layer
+    // stays authoritative until teleport's own suite has run green against
+    // the anchor path and a release has shipped on it (anchor ROADMAP M5).
     let anchor = if config.use_anchor {
-        anyhow::bail!(
-            "use_anchor is not ready: attach still runs in process.              Unset it in config.toml; see anchor's ROADMAP.md M4."
-        );
+        let socket = match &config.anchor_socket {
+            Some(socket) => socket.clone(),
+            None => anchor_socket_default()?,
+        };
+        tracing::info!(socket = %socket.display(), "sessions will run in anchord");
+        Some(teleportd::anchor_client::AnchorClient::new(socket))
     } else {
         None
     };
@@ -243,6 +245,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         sessions,
         anchor,
+        leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db: Some(db),
         origin_policy,
         token,
@@ -551,6 +554,27 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
         () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
+}
+
+/// Where `anchord` listens when `config.toml` does not say.
+///
+/// Anchor's own resolution, mirrored rather than imported: teleport does not
+/// depend on the anchor crate, so this follows its documented default of
+/// `$XDG_RUNTIME_DIR/anchor.sock`, falling back to the data dir.
+fn anchor_socket_default() -> Result<PathBuf> {
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(run).join("anchor.sock"));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|home| PathBuf::from(home).join(".local/share"))
+        })
+        .context("cannot resolve anchord's socket: set anchor_socket in config.toml")?;
+    Ok(data.join("anchor/anchor.sock"))
 }
 
 #[cfg(test)]
