@@ -495,3 +495,52 @@ async fn the_anchor_path_advertises_that_sessions_survive_a_restart() {
         "sessions live in anchord, so a restart does not kill them: {caps:?}"
     );
 }
+
+/// A down anchord must never read as "you have no sessions".
+///
+/// The two are indistinguishable to a client if the daemon answers an
+/// outage with `200 []`, and on this path that is the difference between a
+/// visible outage and work that looks silently deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_anchord_is_an_error_not_an_empty_list() {
+    // No anchord is started: the socket path simply does not exist, which
+    // is exactly what a client sees when anchord is not running.
+    let daemon = support::spawn_on_anchor(
+        Config::default(),
+        None,
+        PathBuf::from("/tmp/anchor-does-not-exist-for-this-test.sock"),
+    )
+    .await;
+
+    let (status, body) = get_json(&daemon, "/api/v1/sessions").await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an outage must not answer 200: {body}"
+    );
+    assert_eq!(body["error"], "backend_unavailable", "body: {body}");
+}
+
+/// `/health` must report an unreachable anchord as *unknown*, never as
+/// zero running sessions. The updater reads this field alongside
+/// `sessions_survive_restart`, and a zero would be a confident claim that
+/// there is nothing to lose, made exactly when nothing can be asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_reports_an_unreachable_anchord_as_unknown() {
+    let daemon = support::spawn_on_anchor(
+        Config::default(),
+        None,
+        PathBuf::from("/tmp/anchor-does-not-exist-for-this-test.sock"),
+    )
+    .await;
+
+    let (status, body) = get_json(&daemon, "/api/v1/health").await;
+
+    assert_eq!(status, StatusCode::OK, "health never rejects: {body}");
+    assert!(
+        body["sessions_running"].is_null(),
+        "an unreachable anchord is unknown, not zero: {body}"
+    );
+    assert_eq!(body["anchor_reachable"], false, "body: {body}");
+}

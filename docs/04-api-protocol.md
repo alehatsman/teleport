@@ -68,6 +68,12 @@ decide whether to spawn a daemon, so it must answer before any credential exists
 }
 ```
 
+`capabilities` grows a `sessions_survive_restart` entry when sessions run in `anchord`
+rather than in the daemon process. It is a promise the updater acts on — restarting this
+daemon does not kill them — so it is advertised only when an anchor client actually
+exists, and its absence is never read as a promise: an older daemon and an in-process one
+answer identically.
+
 **Authenticated** (any `Principal`) adds device and load information:
 
 ```json
@@ -86,6 +92,11 @@ decide whether to spawn a daemon, so it must answer before any credential exists
   "ui_version": "v0.4.1"
 }
 ```
+
+`sessions_running` is **`null`, never `0`, when `anchord` cannot be reached**, and the
+body then also carries `"anchor_reachable": false`. The updater reads this field together
+with `sessions_survive_restart`; a `0` would be a confident claim that there is nothing
+to lose, made at exactly the moment the daemon holding it cannot be asked.
 
 The hostname is mildly identifying, so it sits behind the principal. Nothing else in the
 unauthenticated shape is sensitive — **do not add fields that are**.
@@ -159,6 +170,11 @@ Spawn failure still records a row (`state=exited`, `lost_reason="spawn_failed"`)
 UI can show why.
 
 ### `GET /api/v1/sessions`
+
+On the anchor path this answers **`503 backend_unavailable`** when `anchord` cannot be
+reached. It never answers `200` with an empty list: a client cannot tell that from "you
+have no sessions", and the difference is a visible outage versus work that looks
+silently deleted.
 
 ```json
 {

@@ -185,6 +185,13 @@ pub enum ApiError {
     /// Only reachable in test fixtures built without a `Db`
     /// ([`AppState::db`]) -- a real daemon always has one.
     NoPersistence,
+    /// anchord could not be reached -- `503`.
+    ///
+    /// Distinct from `Internal` because it is the one failure with an
+    /// obvious operator action (start anchord), and distinct from an empty
+    /// result because "the daemon holding your sessions is down" and "you
+    /// have no sessions" must never look the same to a client.
+    BackendUnavailable(String),
 }
 
 impl From<AuthError> for ApiError {
@@ -224,6 +231,11 @@ impl IntoResponse for ApiError {
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", msg),
+            ApiError::BackendUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend_unavailable",
+                msg,
+            ),
             // docs/04-api-protocol.md#post-apiv1sessions: 422 for a
             // resolvable-at-validation-time problem, 429 for max_sessions,
             // 500 for a spawn failure past that point. Never 404 -- the
@@ -627,12 +639,27 @@ async fn health(
         // while sessions run, which is worse than not reporting it:
         // health is what a supervisor decides to restart on.
         body["sessions_running"] = match &state.anchor {
-            Some(anchor) => anchor
+            // An unreachable anchord is reported as unknown, never as
+            // zero. The updater reads this field together with
+            // `sessions_survive_restart` to decide whether it may restart
+            // under load; a zero here would be a confident claim that
+            // there is nothing to lose, made at the exact moment the
+            // daemon holding it cannot be asked.
+            Some(anchor) => match anchor
                 .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
                 .await
-                .map(|sessions| sessions.iter().filter(|s| s.state == "running").count())
-                .unwrap_or_default()
-                .into(),
+            {
+                Ok(sessions) => sessions
+                    .iter()
+                    .filter(|s| s.state == "running")
+                    .count()
+                    .into(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "counting anchord's sessions for health failed");
+                    body["anchor_reachable"] = false.into();
+                    serde_json::Value::Null
+                }
+            },
             None => state
                 .sessions
                 .list()
@@ -968,23 +995,23 @@ impl SessionView {
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, ApiError> {
     // On the anchor path anchord is the source of truth, and its own list
     // already folds live sessions over stored rows. Teleport's SQLite rows
     // are deliberately not merged in: they describe sessions from the
     // in-process era that no longer exist anywhere, and showing entries a
     // client cannot open is worse than not showing them.
     if let Some(anchor) = &state.anchor {
-        let sessions = match anchor
+        // Never an empty list on failure. A client cannot tell that from
+        // "you have no sessions", and on this path that difference is the
+        // difference between a visible outage and silently vanished work.
+        let sessions = anchor
             .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
             .await
-        {
-            Ok(sessions) => sessions,
-            Err(e) => {
+            .map_err(|e| {
                 tracing::warn!(error = %e, "listing sessions from anchord failed");
-                Vec::new()
-            }
-        };
+                ApiError::BackendUnavailable(format!("cannot reach anchord: {e}"))
+            })?;
         let mut views: Vec<SessionView> = sessions
             .into_iter()
             .map(|s| {
@@ -993,7 +1020,7 @@ async fn list_sessions(
             })
             .collect();
         views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
-        return Json(serde_json::json!({ "sessions": views }));
+        return Ok(Json(serde_json::json!({ "sessions": views })));
     }
 
     let live = state.sessions.list();
@@ -1018,7 +1045,7 @@ async fn list_sessions(
     }
 
     views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
-    Json(serde_json::json!({ "sessions": views }))
+    Ok(Json(serde_json::json!({ "sessions": views })))
 }
 
 async fn get_session(
