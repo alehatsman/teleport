@@ -279,6 +279,17 @@ impl LeaseRegistry {
         drop(self.leases.lock().remove(session));
         drop(self.events.lock().remove(session));
     }
+
+    /// Whether this registry still holds anything for `session`.
+    ///
+    /// Exists so a test can assert a purge actually released it. The call
+    /// that does the releasing is in `api.rs`'s delete handler, not here, so
+    /// a unit test of [`forget`](Self::forget) would prove the wrong half —
+    /// it was the missing call site, not the function, that leaked.
+    #[must_use]
+    pub fn is_tracking(&self, session: &str) -> bool {
+        self.leases.lock().contains_key(session) || self.events.lock().contains_key(session)
+    }
 }
 
 #[cfg(test)]

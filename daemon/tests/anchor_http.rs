@@ -616,10 +616,14 @@ async fn an_agent_survives_teleport_restarting_under_it() {
     // is about a session that really ran rather than one that merely exists.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (status, bytes) =
-            request(&before, authed("GET", &format!("/api/v1/sessions/{id}/log"))).await;
+        let (status, bytes) = request(
+            &before,
+            authed("GET", &format!("/api/v1/sessions/{id}/log")),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        if bytes.windows(12).any(|w| w == b"agent-is-up\n") || bytes.windows(11).any(|w| w == b"agent-is-up")
+        if bytes.windows(12).any(|w| w == b"agent-is-up\n")
+            || bytes.windows(11).any(|w| w == b"agent-is-up")
         {
             break;
         }
@@ -714,5 +718,101 @@ async fn anchord_restarting_leaves_teleport_serving() {
     assert_eq!(
         found["state"], "lost",
         "a session whose pty died must not still read as running: {found}"
+    );
+}
+
+/// A ws-ticket is issued for a session anchord owns.
+///
+/// The route trades the long-lived bearer token for a short-lived one scoped
+/// to a single session, so the real credential never rides in a `stream.ts`
+/// reconnect URL (docs/06-security.md mitigation 2). It resolved the session
+/// through the in-process map, which is empty on the anchor path — so every
+/// request 404'd for sessions that plainly exist, and clients were pushed
+/// back onto `?token=`, silently losing the mitigation (#100).
+///
+/// A mitigation that is off is worse than one that was never there, so this
+/// asserts the ticket is issued *and* that an unknown id is still refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ws_ticket_is_issued_for_a_session_in_anchord() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("wsticket");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+
+    let (status, body) =
+        post_json(&daemon, "/api/v1/ws-ticket", &json!({ "session_id": id })).await;
+    assert_eq!(status, StatusCode::OK, "the ticket was refused: {body}");
+    assert!(
+        body["ticket"].as_str().is_some_and(|t| !t.is_empty()),
+        "no ticket in {body}"
+    );
+    assert!(
+        body["expires_in"].as_u64().is_some_and(|s| s > 0),
+        "no TTL in {body}"
+    );
+
+    // A well-formed id nobody knows is still a 404: the ticket is scoped to a
+    // session, so one that does not exist must not get a credential.
+    let (status, _) = post_json(
+        &daemon,
+        "/api/v1/ws-ticket",
+        &json!({ "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "an unknown id got a ticket");
+
+    // A malformed id is the same 404, not a 500.
+    let (status, _) = post_json(
+        &daemon,
+        "/api/v1/ws-ticket",
+        &json!({ "session_id": "not-a-ulid" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a malformed id was not a 404"
+    );
+}
+
+/// Purging a session releases its lease, not just its derived signals.
+///
+/// `LeaseRegistry::forget` existed and documented exactly this, but nothing
+/// called it: the delete handler forgot the watch entry and left the `Lease`
+/// and its `broadcast::Sender` behind for the life of the process (#101).
+/// Create-and-purge is the normal workload, so it grew without bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn purging_a_session_releases_its_lease() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("leasepurge");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+
+    // Claiming is what puts the session in the registry; a session nobody
+    // ever controlled would pass this test without the fix.
+    daemon.state.leases.claim_control(&id, "browser-a", "A");
+    assert!(
+        daemon.state.leases.is_tracking(&id),
+        "the claim did not register"
+    );
+
+    let (status, _) = request(
+        &daemon,
+        authed("DELETE", &format!("/api/v1/sessions/{id}?purge=true")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        !daemon.state.leases.is_tracking(&id),
+        "the purged session's lease and event channel are still held"
     );
 }

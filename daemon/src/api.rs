@@ -231,11 +231,9 @@ impl IntoResponse for ApiError {
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", msg),
-            ApiError::BackendUnavailable(msg) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "backend_unavailable",
-                msg,
-            ),
+            ApiError::BackendUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable", msg)
+            }
             // docs/04-api-protocol.md#post-apiv1sessions: 422 for a
             // resolvable-at-validation-time problem, 429 for max_sessions,
             // 500 for a spawn failure past that point. Never 404 -- the
@@ -1143,7 +1141,13 @@ async fn delete_session(
             .purge(&id)
             .await
             .map_err(|e| anchor_bridge::api_error(&e))?;
+        // Both registries, not just the watch one: the lease registry holds a
+        // `Lease` and a `broadcast::Sender` per session, and a purge is the
+        // one point where teleport knows a session id will never be used
+        // again. Forgetting one and not the other leaked the pair for the
+        // life of the process.
         state.watch.forget(&id);
+        state.leases.forget(&id);
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -1626,15 +1630,48 @@ async fn create_ws_ticket(
     Json(req): Json<WsTicketRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
-    let session = find_session(&state, &req.session_id)?;
+    // Resolved against whichever backend owns sessions. Going straight to
+    // `find_session` would consult the in-process map, which is empty on the
+    // anchor path -- so every ticket 404'd for sessions that exist, and
+    // clients fell back to the `?token=` URL this route exists to avoid.
+    let id = resolve_ticket_session(&state, &req.session_id).await?;
     let ticket = state
         .ws_tickets
-        .issue(session.id)
+        .issue(id)
         .map_err(|e| ApiError::Internal(format!("reading OS CSPRNG for ticket: {e}")))?;
     Ok(Json(WsTicketResponse {
         ticket,
         expires_in: auth::TICKET_TTL.as_secs(),
     }))
+}
+
+/// The session a ws-ticket is being asked for, if it exists.
+///
+/// A ticket is scoped to one session, so the session has to exist -- there is
+/// no point handing out a ticket for an id nobody could attach to. Which
+/// backend answers that depends on the path, exactly as it does for
+/// `get_session`.
+///
+/// Only a live session counts, on either path: the ticket's whole purpose is
+/// the `/stream` upgrade, and an exited session that is only a SQLite row
+/// cannot be attached to. That is why this does not fall back to
+/// `historical_row` the way `get_session` does.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
+)]
+async fn resolve_ticket_session(state: &AppState, id: &str) -> Result<SessionId, ApiError> {
+    if let Some(anchor) = &state.anchor {
+        // The id still has to parse: the ticket store is keyed by
+        // `SessionId`, and both id spaces are ULIDs.
+        let parsed: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
+        anchor
+            .get(id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        return Ok(parsed);
+    }
+    find_session(state, id).map(|session| session.id)
 }
 
 #[expect(
