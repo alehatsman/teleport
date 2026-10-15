@@ -716,3 +716,60 @@ async fn anchord_restarting_leaves_teleport_serving() {
         "a session whose pty died must not still read as running: {found}"
     );
 }
+
+/// A log past anchor's 4 MiB per-response cap is served whole.
+///
+/// `get_log` assembles a wide range from several `log` calls because one
+/// anchor response is capped at 4 MiB. That paging only works if an
+/// oversized `max` is *clamped*; anchord used to refuse it with `too_large`,
+/// which failed the very first call and so never let the loop run (#98,
+/// fixed in anchor 8b47537). Under 4 MiB nothing notices, which is why the
+/// test above did not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_log_past_one_response_cap_is_assembled_from_several() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("biglog");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+
+    // Comfortably past the 4 MiB cap, so the range needs at least two calls.
+    // `yes` is the cheapest way to make a PTY produce megabytes quickly.
+    let id = create(
+        &daemon,
+        "stty raw -echo; yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -c 6000000; echo big-log-done; sleep 30",
+        "shell",
+    )
+    .await;
+
+    let cap = 4 * 1024 * 1024;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let body = loop {
+        let (status, bytes) = request(
+            &daemon,
+            authed("GET", &format!("/api/v1/sessions/{id}/log")),
+        )
+        .await;
+        // The bug surfaced here as a 400: anchord answered the first call
+        // `too_large`, and anchor_bridge maps that onto BadRequest.
+        assert_eq!(status, StatusCode::OK, "the whole-log request was refused");
+        if bytes.windows(12).any(|w| w == b"big-log-done") {
+            break bytes;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the log never finished; got {} bytes",
+            bytes.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    assert!(
+        body.len() > cap,
+        "the log came back {} bytes, at or under the {cap}-byte cap the \
+         paging loop exists to get past",
+        body.len()
+    );
+}
