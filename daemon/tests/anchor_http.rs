@@ -110,6 +110,29 @@ impl Anchord {
         Self { child, dir }
     }
 
+    /// Stops and starts anchord **keeping its data directory**, which is
+    /// what makes this a restart rather than a fresh daemon: the store
+    /// carries over, so the recovery path that settles sessions whose ptys
+    /// died with the old process is the one under test.
+    fn restart(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort stop of a process about to be replaced"
+        )]
+        let _ = self.child.kill();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort stop of a process about to be replaced"
+        )]
+        let _ = self.child.wait();
+        self.child = Command::new(anchord_bin().expect("checked by the caller"))
+            .env("XDG_DATA_HOME", &self.dir)
+            .env("XDG_RUNTIME_DIR", self.dir.join("run"))
+            .env("ANCHOR_LOG", "warn")
+            .spawn()
+            .expect("respawning anchord");
+    }
+
     fn socket(&self) -> PathBuf {
         self.dir.join("run/anchor.sock")
     }
@@ -635,4 +658,61 @@ async fn an_agent_survives_teleport_restarting_under_it() {
 
     let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
     client.terminate(&id).await.expect("terminate");
+}
+
+/// M5's second exit criterion: **anchord restarts without teleport
+/// noticing beyond a reconnect.**
+///
+/// Teleport holds no long-lived connection it cannot rebuild, so a daemon
+/// that goes away and comes back must leave it serving requests again --
+/// not wedged on a dead socket, and not permanently broken until teleport
+/// itself is restarted.
+///
+/// The sessions themselves do **not** survive, and the test says so
+/// explicitly: anchord's ptys die with it (anchor's docs/07-lifecycle.md),
+/// so the agent comes back as `lost`, not `running`. That is the honest
+/// boundary -- updates are survivable, crashes are not -- and asserting it
+/// here keeps anyone from "fixing" this test later into a claim anchor
+/// does not make.
+#[tokio::test(flavor = "multi_thread")]
+async fn anchord_restarting_leaves_teleport_serving() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let mut anchord = Anchord::start("reconnect");
+    anchord.ready().await;
+
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo up; sleep 300", "agent").await;
+
+    // anchord goes away and comes back, keeping its store.
+    anchord.restart();
+    anchord.ready().await;
+
+    // Teleport was never restarted and never told anything. The next
+    // request has to work: a client reconnects, it does not give up.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let found = loop {
+        let (status, listed) = get_json(&daemon, "/api/v1/sessions").await;
+        if status == StatusCode::OK {
+            if let Some(session) = listed["sessions"]
+                .as_array()
+                .and_then(|all| all.iter().find(|s| s["id"] == id.as_str()).cloned())
+            {
+                break session;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "teleport never served again after anchord restarted (last status {status})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    // Reported honestly: the pty died with the daemon that held it.
+    assert_eq!(
+        found["state"], "lost",
+        "a session whose pty died must not still read as running: {found}"
+    );
 }
