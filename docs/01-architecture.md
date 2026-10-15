@@ -252,13 +252,29 @@ tied to `HPCON` and its streams, and explicit closure has process-tree effects.
 | Phone sleeps / changes network | survives | survives | survives |
 | Desktop UI quits | survives | survives | survives |
 | Tailscale restarts (`--bg`) | survives | survives | survives |
-| `teleportd` crashes | **lost** | survives | survives |
-| `teleportd` **updated** | **lost** | survives | survives |
+| `teleportd` crashes | **lost** (in-process) / survives (anchor) | survives | survives |
+| `teleportd` **updated** | **lost** (in-process) / **survives** (anchor) | survives | survives |
 | Host reboots | **lost** | survives | survives |
 
 The update row is the one that bites in practice. A crash is rare; shipping a new
-version is routine, and it has the same blast radius. The updater therefore refuses to
-restart a daemon with running sessions ([08-packaging.md](08-packaging.md#updates-must-not-kill-sessions)).
+version is routine, and it has the same blast radius.
+
+**On the anchor path that row no longer holds, and it is the reason anchor exists.**
+Sessions live in `anchord`, a separate process with its own lifecycle, so restarting
+`teleportd` to ship a release drops some websockets and nothing else: clients reconnect
+by offset and the ptys never notice. The daemon advertises this as a
+`sessions_survive_restart` capability on `/health`, and the updater restarts under load
+only when it sees it ([08-packaging.md](08-packaging.md#updates-must-not-kill-sessions)).
+
+This is demonstrated, not asserted: `daemon/tests/anchor_http.rs`'s
+`an_agent_survives_teleport_restarting_under_it` starts an agent, drops the teleport that
+spawned it, starts a new one against the same `anchord`, and requires the agent to still
+be `running` with its transcript intact from byte zero.
+
+**What does not change:** `anchord` dying still takes its ptys with it. The master fd has
+no handoff, on either path. anchor makes *updates* survivable by being small and changing
+rarely; it does not make *crashes* survivable (anchor's `docs/07-lifecycle.md`). The
+in-process path keeps the behaviour below unchanged.
 
 On restart, any session still marked `running` with no live PTY becomes:
 

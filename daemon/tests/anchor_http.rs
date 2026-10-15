@@ -544,3 +544,95 @@ async fn health_reports_an_unreachable_anchord_as_unknown() {
     );
     assert_eq!(body["anchor_reachable"], false, "body: {body}");
 }
+
+/// **The reason anchor exists**, asserted end to end: a running agent
+/// survives teleport being stopped and started again.
+///
+/// Before this, sessions lived in teleportd, so shipping a release killed
+/// every running agent -- which is why the updater refused to restart while
+/// any session was live (docs/08-packaging.md). An agent that runs for
+/// hours never offers the idle moment that refusal waits for, so in
+/// practice teleport could not ship at all while it was being used.
+///
+/// The restart here is the real one a release performs: the old daemon is
+/// dropped, a new one starts against the same anchord with the same owner,
+/// and nothing hands state from one to the other -- the new daemon learns
+/// everything by asking anchord.
+///
+/// What this does *not* claim: that a dying anchord is survivable. Its
+/// ptys die with it (anchor's docs/07-lifecycle.md). Updates are made
+/// survivable, crashes are not.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_survives_teleport_restarting_under_it() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("survive");
+    anchord.ready().await;
+
+    // The teleport that spawns the agent.
+    let before = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let (status, created) = post_json(
+        &before,
+        "/api/v1/sessions",
+        &json!({
+            "kind": "agent",
+            "command": "/bin/sh",
+            "args": ["-c", "stty raw -echo; echo agent-is-up; sleep 300"],
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created}");
+    let id = created["id"].as_str().expect("a session id").to_string();
+
+    // Let the agent produce something, so the assertion after the restart
+    // is about a session that really ran rather than one that merely exists.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, bytes) =
+            request(&before, authed("GET", &format!("/api/v1/sessions/{id}/log"))).await;
+        assert_eq!(status, StatusCode::OK);
+        if bytes.windows(12).any(|w| w == b"agent-is-up\n") || bytes.windows(11).any(|w| w == b"agent-is-up")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the agent never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Ship a release: teleport goes away.
+    drop(before);
+
+    // The new teleport. Same anchord, same owner, no shared state.
+    let after = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+
+    let (status, listed) = get_json(&after, "/api/v1/sessions").await;
+    assert_eq!(status, StatusCode::OK, "list: {listed}");
+    let sessions = listed["sessions"].as_array().expect("a session list");
+    let found = sessions
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("the agent did not survive the restart: {listed}"));
+    assert_eq!(
+        found["state"], "running",
+        "the agent survived but is not running: {found}"
+    );
+
+    // Still readable, which is the part that makes survival useful: the
+    // transcript is intact from byte zero, not merely the row.
+    let (status, bytes) =
+        request(&after, authed("GET", &format!("/api/v1/sessions/{id}/log"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        bytes.windows(11).any(|w| w == b"agent-is-up"),
+        "the transcript from before the restart is gone: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
+    client.terminate(&id).await.expect("terminate");
+}
