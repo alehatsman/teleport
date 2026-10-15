@@ -12,7 +12,7 @@
 //! value.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -50,6 +50,8 @@ struct ConfigFile {
     log_warn_bytes: Option<u64>,
     log_max_bytes: Option<u64>,
     retain_days: Option<u64>,
+    use_anchor: Option<bool>,
+    anchor_socket: Option<PathBuf>,
 }
 
 /// The resolved configuration every other module reads from -- no `Option`s,
@@ -94,6 +96,18 @@ pub struct Config {
     pub log_max_bytes: u64,
     /// GC threshold, in days since `exited_at_ms` (docs/05-persistence.md#garbage-collection).
     pub retain_days: u64,
+    /// Run sessions in an external `anchord` instead of this process.
+    ///
+    /// **Default `false`, deliberately.** The in-process PTY layer stays
+    /// authoritative until the anchor path has passed this suite and shipped
+    /// once; see anchor's `ROADMAP.md` M4/M5. Flipping this is the whole
+    /// point of the extraction — it is what lets teleport ship a release
+    /// while agents keep running — but it is not flipped by being written.
+    pub use_anchor: bool,
+    /// Where `anchord` listens. Unset uses anchor's own resolution:
+    /// `$XDG_RUNTIME_DIR/anchor.sock`, falling back to
+    /// `$XDG_DATA_HOME/anchor/anchor.sock`.
+    pub anchor_socket: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -110,6 +124,8 @@ impl Default for Config {
             log_warn_bytes: DEFAULT_LOG_WARN_BYTES,
             log_max_bytes: DEFAULT_LOG_MAX_BYTES,
             retain_days: DEFAULT_RETAIN_DAYS,
+            use_anchor: false,
+            anchor_socket: None,
         }
     }
 }
@@ -140,6 +156,8 @@ impl Config {
             log_warn_bytes: file.log_warn_bytes.unwrap_or(defaults.log_warn_bytes),
             log_max_bytes: file.log_max_bytes.unwrap_or(defaults.log_max_bytes),
             retain_days: file.retain_days.unwrap_or(defaults.retain_days),
+            use_anchor: file.use_anchor.unwrap_or(defaults.use_anchor),
+            anchor_socket: file.anchor_socket.or(defaults.anchor_socket),
         })
     }
 }
@@ -148,7 +166,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn scratch_dir(name: &str) -> std::path::PathBuf {
+    fn scratch_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "teleportd-config-{name}-{}-{}",
             std::process::id(),
@@ -189,6 +207,34 @@ mod tests {
             cfg.default_tail, DEFAULT_TAIL,
             "unnamed fields keep their default"
         );
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort test cleanup; nothing to do if it fails"
+        )]
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_anchor_path_is_off_unless_asked_for() {
+        // The extraction's whole safety property: writing the anchor path
+        // does not enable it. Only a deliberate config.toml does.
+        let dir = scratch_dir("anchor-default");
+        let cfg = Config::load(&dir).expect("load");
+        assert!(!cfg.use_anchor);
+        assert!(cfg.anchor_socket.is_none());
+
+        fs::write(
+            dir.join("config.toml"),
+            "use_anchor = true\nanchor_socket = \"/run/anchor.sock\"\n",
+        )
+        .expect("writing config.toml");
+        let cfg = Config::load(&dir).expect("load");
+        assert!(cfg.use_anchor);
+        assert_eq!(
+            cfg.anchor_socket.as_deref(),
+            Some(Path::new("/run/anchor.sock"))
+        );
+
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort test cleanup; nothing to do if it fails"

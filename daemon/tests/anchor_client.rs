@@ -42,6 +42,10 @@ struct Daemon {
 impl Daemon {
     fn start(tag: &str) -> Self {
         let dir = PathBuf::from(format!("/tmp/tp-anchor-{}-{tag}", std::process::id()));
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort teardown; nothing to do if it fails"
+        )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
         let bin = anchord_bin().expect("checked by the caller");
@@ -60,6 +64,10 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort teardown in Drop; a failure here cannot be propagated"
+    )]
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -227,12 +235,15 @@ async fn attach_replays_then_streams_and_reports_the_exit() {
     loop {
         assert!(Instant::now() < deadline, "no exit frame arrived");
         match attach.next_frame().await.expect("a frame") {
-            Some(AnchorFrame::Exit { code }) => {
-                // Terminated rather than left to exit 3, so the code is
-                // whatever the signal produced — the point is that it is
-                // reported at all, exactly once, at the end of the stream.
-                assert!(attach.next_frame().await.expect("after exit").is_none());
-                let _ = code;
+            Some(AnchorFrame::Exit { code: _ }) => {
+                // The code's value depends on the signal that terminated it,
+                // rather than the script's own `exit 3`. What matters is
+                // that an exit is reported at all, exactly once, and that
+                // the stream ends immediately after it.
+                assert!(
+                    attach.next_frame().await.expect("after exit").is_none(),
+                    "exit must be the last frame"
+                );
                 break;
             }
             Some(_) => {}

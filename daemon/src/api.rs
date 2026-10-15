@@ -46,6 +46,13 @@ use crate::web_assets::WebAssets;
 pub struct AppState {
     /// Every live session.
     pub sessions: SessionManager,
+    /// Set when `config.use_anchor` is on: sessions live in an external
+    /// `anchord` rather than this process.
+    ///
+    /// `None` is the authoritative path today. Both exist on purpose during
+    /// the extraction — see anchor's `ROADMAP.md` M4, which flips the
+    /// default only once this suite passes against the anchor path.
+    pub anchor: Option<crate::anchor_client::AnchorClient>,
     /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
     /// that `sessions.get` doesn't know about falls back to this for `GET`
     /// and `/log` -- a `lost`/`exited` row from before this process started

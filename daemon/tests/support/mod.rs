@@ -221,6 +221,9 @@ pub(crate) async fn spawn_with_web_assets(
     let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
+        // Fixtures drive the in-process path; the anchor path has its own
+        // suite in `tests/anchor_client.rs`.
+        anchor: None,
         db,
         origin_policy,
         token: TOKEN.to_string(),

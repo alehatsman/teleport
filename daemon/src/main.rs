@@ -227,8 +227,22 @@ async fn main() -> Result<()> {
     // below, which otherwise only listens for Ctrl+C / SIGTERM.
     let shutdown_trigger = Arc::new(tokio::sync::Notify::new());
 
+    // The anchor path is incomplete until `ws.rs` proxies attach to anchord
+    // (anchor ROADMAP M4). Refusing here is deliberate: a flag that routes
+    // the REST surface to one session store while WebSocket attach still
+    // reaches the in-process one would show a user a session list whose
+    // entries cannot be opened. Better to not start than to half-start.
+    let anchor = if config.use_anchor {
+        anyhow::bail!(
+            "use_anchor is not ready: attach still runs in process.              Unset it in config.toml; see anchor's ROADMAP.md M4."
+        );
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         sessions,
+        anchor,
         db: Some(db),
         origin_policy,
         token,
