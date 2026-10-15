@@ -4,6 +4,7 @@
 //! compiled binary (docs/11-mvp-plan.md#m1--pty-primitive: "drive it from
 //! integration tests").
 
+pub mod anchor_bridge;
 pub mod anchor_client;
 pub mod api;
 pub mod auth;

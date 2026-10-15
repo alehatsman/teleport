@@ -204,6 +204,31 @@ pub(crate) async fn spawn_with_web_assets(
     web: WebAssets,
     db: Option<teleportd::persistence::Db>,
 ) -> Daemon {
+    spawn_inner(config, web, db, None).await
+}
+
+/// A daemon whose sessions live in an external `anchord` on `socket` — the
+/// anchor path, exercised through teleport's own HTTP surface.
+pub(crate) async fn spawn_on_anchor(
+    config: Config,
+    db: Option<teleportd::persistence::Db>,
+    socket: PathBuf,
+) -> Daemon {
+    spawn_inner(
+        config,
+        WebAssets::new(None, None),
+        db,
+        Some(teleportd::anchor_client::AnchorClient::new(socket)),
+    )
+    .await
+}
+
+async fn spawn_inner(
+    config: Config,
+    web: WebAssets,
+    db: Option<teleportd::persistence::Db>,
+    anchor: Option<teleportd::anchor_client::AnchorClient>,
+) -> Daemon {
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -221,9 +246,9 @@ pub(crate) async fn spawn_with_web_assets(
     let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
         sessions,
-        // Fixtures drive the in-process path; the anchor path has its own
-        // suite in `tests/anchor_client.rs`.
-        anchor: None,
+        // `None` for the in-process path, which is what most fixtures
+        // drive; `Some` routes sessions to a real anchord.
+        anchor,
         db,
         origin_policy,
         token: TOKEN.to_string(),

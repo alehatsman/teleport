@@ -28,6 +28,7 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::anchor_bridge;
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
 use crate::device::Device;
@@ -662,6 +663,32 @@ async fn create_session(
     let cwd = PathBuf::from(req.cwd);
     let (cols, rows, kind, preset_id) = (req.cols, req.rows, req.kind, req.preset);
 
+    // The anchor path: anchord owns the PTY, so creating one is a control
+    // request rather than a fork/exec here. Teleport's own `kind`/`preset`
+    // travel as labels -- anchor has no column for them and should not grow
+    // one (`anchor_bridge`).
+    if let Some(anchor) = &state.anchor {
+        let labels = anchor_bridge::labels_for(&kind, preset_id.as_deref());
+        let spec = anchor_bridge::spec_for(command, args, cwd, env, cols, rows, login_shell);
+        let id = anchor
+            .create(&spec, &labels)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        let session = anchor
+            .get(&id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(CreateSessionResponse {
+                id: session.id,
+                state: state_str(&session.state),
+                pid: session.pid,
+                output_offset: session.output_bytes,
+            }),
+        ));
+    }
+
     // `SessionManager::create` does blocking filesystem work (validating
     // `cwd`, a `$PATH` scan to resolve the executable) and an OS-level
     // fork/exec -- run it on the blocking pool so a slow/contended
@@ -694,6 +721,19 @@ async fn create_session(
             output_offset: session.next_offset(),
         }),
     ))
+}
+
+/// Anchor reports state as a string; teleport's response field is a
+/// `&'static str`. An unknown value means a newer daemon grew a state this
+/// build does not know -- reporting it as `lost` is the honest fallback,
+/// since what teleport can say for certain is that it cannot drive it.
+fn state_str(state: &str) -> &'static str {
+    match state {
+        "running" => "running",
+        "closing" => "closing",
+        "exited" => "exited",
+        _ => "lost",
+    }
 }
 
 /// `args: None` (the field omitted from the request) falls back to the
