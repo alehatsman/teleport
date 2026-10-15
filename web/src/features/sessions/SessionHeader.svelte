@@ -19,6 +19,7 @@
     toast,
     onBack,
     onTakeControl,
+    onReleaseControl,
   }: {
     title: string
     tone: DotTone
@@ -31,6 +32,7 @@
     toast: string | null
     onBack: () => void
     onTakeControl: () => void
+    onReleaseControl: () => void
   } = $props()
 </script>
 
@@ -43,7 +45,21 @@
     {#if ended}
       <!-- The badge/button would be a lie either way. -->
     {:else if hasControl}
-      <span class="badge badge--controlling">Controlling</span>
+      <!-- The badge *is* the release affordance. A controller who wants to
+           hand the session back (typically: took control from a phone, now
+           wants to type on the desktop) otherwise has no way out -- the
+           other client can always preempt with `claim_control`, but that
+           only helps if someone is there to click it. Same slot, same
+           width: a second button beside the badge would fight the title
+           for a phone-width header (see .session-header__control-btn). -->
+      <button
+        class="badge badge--controlling session-header__release-btn"
+        onclick={onReleaseControl}
+        title="Release control"
+        aria-label="Release control"
+      >
+        Controlling&nbsp;&times;
+      </button>
     {:else if !closed}
       <button class="btn btn--primary session-header__control-btn" onclick={onTakeControl}>
         Take control{#if controllerName}&nbsp;(from {controllerName}){/if}
@@ -119,6 +135,23 @@
   }
   .session-header__spacer {
     flex: 1;
+  }
+  .session-header__release-btn {
+    /* A <button> wearing .badge: strip the UA's chrome so it reads as the
+       same pill it replaced, and keep it from shrinking like the
+       Take-control button does -- its text is fixed-length, so there is
+       nothing to ellipsise. */
+    border: none;
+    font-family: inherit;
+    line-height: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    /* .badge's own 0.25rem block padding is sized for a static label and
+       leaves a ~24px tap target. This slot swaps with the Take-control
+       .btn, so match that button's vertical padding instead: a comfortable
+       target on a phone, and the header keeps the same height whichever of
+       the two is showing. */
+    padding-block: 0.45rem;
   }
   .session-header__control-btn {
     /* Long controller names ("Take control (from Chrome on Linux)") must

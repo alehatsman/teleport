@@ -25,7 +25,7 @@ test("launching and typing into a session works with a real mobile UA", async ({
   await page.getByLabel("Working directory").fill("/tmp")
   await page.getByRole("button", { name: "Launch" }).click()
 
-  await expect(page.getByText("Controlling", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Release control" })).toBeVisible()
 
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth)
   const viewportWidth = await page.evaluate(() => window.innerWidth)

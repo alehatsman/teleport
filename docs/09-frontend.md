@@ -375,7 +375,7 @@ visible, never ambiguous:
 
 | State | UI |
 |---|---|
-| This client controls | normal cursor, input enabled, badge "Controlling" |
+| This client controls | normal cursor, input enabled, badge "Controlling ×" — the badge is a button; clicking it releases the lease |
 | Observing | input disabled, dimmed cursor, prominent **Take control** button |
 | Control revoked | toast "Control taken by <client_name>", switch to observing, no data loss |
 | Asked for control, didn't get it | attach succeeded as observer; no toast, just the Take control button |
@@ -383,6 +383,18 @@ visible, never ambiguous:
 
 Claims are preemptive — one tap, no negotiation, no confirmation dialog. That is the
 point: grabbing a runaway agent from a phone must be instant.
+
+**Releasing is the same shape in reverse.** The controller must be able to *stop*
+controlling without closing the tab: the common case is taking control from a phone and
+then wanting to type on the desktop, where nobody is sitting at the other client to
+preempt. The "Controlling" badge is therefore the release button, not a static label —
+one tap drops to observer. The daemon answers `release_control` with no frame (unlike
+`claim_control`'s `control_granted`), so the client clears `hasControl`, the controller
+name, and its own "was controlling" flag locally, and `stream.ts` clears `wantControl` so
+a later reconnect attaches as `mode=observe` rather than resuming the lease that was just
+given up. Releasing while the socket is down is still correct: the message is dropped,
+but the holder's `control_grace_ms` window lapses on its own and the next attach asks
+only to observe.
 
 **A session ending is a fact about the record, not about the socket** — same principle
 as [Connection status](#connection-status)'s "record first, socket second". `hasControl`

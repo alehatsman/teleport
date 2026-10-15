@@ -23,7 +23,7 @@ test("a killed and restarted daemon shows Lost, never a stale Controlling badge"
 
     await page.goto(`${daemon.baseURL}/?token=${daemon.token}#/sessions/${created.id}`)
     await page.getByRole("button", { name: "Take control" }).click()
-    await expect(page.getByText("Controlling", { exact: true })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Release control" })).toBeVisible()
     await expect(page.getByText("Live", { exact: true })).toBeVisible()
 
     const { dataDir, port } = daemon
@@ -40,7 +40,7 @@ test("a killed and restarted daemon shows Lost, never a stale Controlling badge"
     daemon = await startDaemon({ dataDir, port })
 
     await expect(page.getByText("Lost", { exact: true })).toBeVisible({ timeout: 10_000 })
-    await expect(page.getByText("Controlling", { exact: true })).not.toBeVisible()
+    await expect(page.getByRole("button", { name: "Release control" })).not.toBeVisible()
     await expect(page.getByText("Closed", { exact: true })).not.toBeVisible()
     await expect(page.getByRole("button", { name: /Take control/ })).not.toBeVisible()
   } finally {

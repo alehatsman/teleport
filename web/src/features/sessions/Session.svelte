@@ -179,6 +179,23 @@
     stream?.takeControl()
   }
 
+  /**
+   * Hand the lease back (SessionHeader's "Controlling" badge). The daemon
+   * acknowledges `release_control` with no frame at all, so the local state
+   * is cleared here rather than waiting for one that never arrives --
+   * including the `setControlling` flag, so a reconnect attaches as an
+   * observer instead of resuming the lease we just gave up. `stream`'s own
+   * `wantControl` is cleared by `releaseControl()` for the same reason,
+   * which also makes this correct while the socket is down: the message is
+   * dropped, but the session's grace window lapses on its own and the next
+   * attach asks for `mode=observe`.
+   */
+  function releaseControl() {
+    stream?.releaseControl()
+    clearControl()
+    showToast("Control released")
+  }
+
   function sendKey(bytes: string) {
     if (hasControl) stream?.sendInput(bytes)
     else onObserverInput()
@@ -217,6 +234,7 @@
     {toast}
     {onBack}
     onTakeControl={takeControl}
+    onReleaseControl={releaseControl}
   />
 
   {#if sessionError}

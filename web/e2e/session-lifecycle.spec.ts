@@ -17,7 +17,7 @@ test.describe("session lifecycle", () => {
     // gets control on the very next connect, no explicit claim needed.
     await expect(page).toHaveURL(/#\/sessions\//)
     await expect(page.getByText("Live", { exact: true })).toBeVisible()
-    await expect(page.getByText("Controlling", { exact: true })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Release control" })).toBeVisible()
 
     // xterm.js exposes no accessible role for its canvas-rendered terminal
     // (a real gap in the library, not this app) -- the hidden input-capture

@@ -60,7 +60,7 @@ test("the UI is replaced under a running daemon without losing the session", asy
 
     await page.goto(`${daemon.baseURL}/?token=${daemon.token}#/sessions/${created.id}`)
     await page.getByRole("button", { name: "Take control" }).click()
-    await expect(page.getByText("Controlling", { exact: true })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Release control" })).toBeVisible()
     await expect(page.getByText("Live", { exact: true })).toBeVisible()
     await expect(page.locator('meta[name="ui-version"]')).toHaveAttribute("content", "v1.0.0")
 
@@ -83,7 +83,7 @@ test("the UI is replaced under a running daemon without losing the session", asy
     // from the new bundle. Control comes back on its own -- the lease is
     // keyed to this client, and nothing about a UI swap released it.
     await expect(page.getByText("Live", { exact: true })).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText("Controlling", { exact: true })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Release control" })).toBeVisible()
 
     // Attachable, not merely labelled as such: a real keystroke reaches the
     // PTY that predates the upgrade, and its output comes back.
