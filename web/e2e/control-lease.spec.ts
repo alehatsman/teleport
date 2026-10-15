@@ -70,11 +70,12 @@ test("releasing the lease frees it, locally and for the other client", async ({
   await expect(releaseA).not.toBeVisible()
   await expect(pageA.getByRole("button", { name: "Take control" })).toBeVisible()
 
-  // The daemon sends no frame for a release, so B learns it from the
-  // controller-name poll (docs/09-frontend.md#control-lease-ui): the
-  // "(from ...)" attribution drops off once the lease is free.
+  // B learns from the pushed `control_released` frame, not the 5s
+  // controller-name poll (docs/04-api-protocol.md#releasing-and-handing-the-
+  // lease-back): the "(from ...)" attribution drops off immediately. The
+  // tight timeout is the assertion -- at the poll's pace this would fail.
   await expect(pageB.getByRole("button", { name: "Take control", exact: true })).toBeVisible({
-    timeout: 15_000,
+    timeout: 2_000,
   })
 
   // A reload must not resume the lease A just gave up.

@@ -27,12 +27,19 @@ impl Session {
                 lease.holder_name = Some(client_name.to_string());
                 lease.grace = false;
                 lease.epoch += 1;
+                // An attach grant preempts nobody by construction, so there
+                // is no one to hand the lease back to on release.
+                lease.preempted = None;
                 Some(lease.epoch)
             }
             Some(holder) if holder == client_id => {
                 lease.holder_name = Some(client_name.to_string());
                 lease.grace = false;
                 lease.epoch += 1;
+                // `preempted` deliberately survives: this is the same holder
+                // resuming its own lease across a reconnect, so whoever it
+                // took the lease from is still who a later release hands it
+                // back to.
                 Some(lease.epoch)
             }
             Some(_) => None,
@@ -57,6 +64,10 @@ impl Session {
             lease.holder_name = Some(client_name.to_string());
             lease.grace = false;
             lease.epoch += 1;
+            // Who to hand it back to if this holder later releases
+            // (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
+            // A claim on a free lease preempted no one and clears it.
+            lease.preempted.clone_from(&lost_by);
             (lost_by, lease.epoch)
         };
         #[expect(
@@ -75,13 +86,36 @@ impl Session {
     /// `epoch` -- a stale release from a connection that already lost the
     /// lease (superseded by a reconnect or a `claim_control`, both of which
     /// bump the epoch) must not clear whoever holds it now.
+    ///
+    /// A release that *does* free the lease broadcasts
+    /// [`SessionEvent::ControlReleased`], carrying the `client_id` this
+    /// holder preempted on its way in as the hand-back hint
+    /// (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
     pub fn release_control(&self, client_id: &str, epoch: u64) {
-        let mut lease = self.control.lock();
-        if lease.holder.as_deref() == Some(client_id) && lease.epoch == epoch {
+        let resume_hint = {
+            let mut lease = self.control.lock();
+            if lease.holder.as_deref() != Some(client_id) || lease.epoch != epoch {
+                return;
+            }
             lease.holder = None;
             lease.holder_name = None;
             lease.grace = false;
-        }
+            lease.preempted.take()
+        };
+        // Unlike `claim_control`, a release used to notify no one at all --
+        // so the client this lease was taken from sat in observer mode with
+        // no way to learn it had come free, and the user typed into a pane
+        // that silently dropped every key. The lease is free as this goes
+        // out; `resume_hint` names who it was taken from, and claiming is
+        // still that client's own explicit act.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "broadcast send; a failure here just means no one is currently listening for control-lease changes"
+        )]
+        let _ = self.events.send(SessionEvent::ControlReleased {
+            by: client_id.to_string(),
+            resume_hint,
+        });
     }
 
     /// Whether `client_id`'s connection holding `epoch` is still the
@@ -151,6 +185,12 @@ impl Session {
                 lease.holder = None;
                 lease.holder_name = None;
                 lease.grace = false;
+                // The lease is empty; `preempted` describes a holder that
+                // no longer exists. Nothing reads it in this state (every
+                // path back to holding goes through `attach_control`, which
+                // clears it, or `claim_control`, which sets it), but a field
+                // that stops being true is a trap for the next reader.
+                lease.preempted = None;
             }
         });
     }

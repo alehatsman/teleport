@@ -45,6 +45,16 @@ pub enum SessionEvent {
         /// That client's display name.
         new_controller_name: String,
     },
+    /// The lease was released and is now free. `by` is the client that
+    /// released it; `resume_hint` is the client it preempted on its way in,
+    /// if any — a hint for the hand-back, never a grant
+    /// (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
+    ControlReleased {
+        /// The client that released the lease.
+        by: String,
+        /// The client it preempted when it claimed, if any.
+        resume_hint: Option<String>,
+    },
     /// The PTY was resized. There is one effective size per session, so
     /// every attached client needs it, not just the one that asked.
     Resized {
@@ -63,6 +73,12 @@ struct Lease {
     /// True while the holder is disconnected but still inside its grace
     /// window. The lease is still preemptible during it.
     grace: bool,
+    /// The client the current holder preempted when it claimed, if any.
+    /// Only a later `release_control` reads it, to say who the lease should
+    /// go back to. Set by `claim_control`, cleared by every other
+    /// transition — the mirror of `session/control.rs`'s field of the same
+    /// name, because a client cannot tell the two backends apart.
+    preempted: Option<String>,
 }
 
 /// Every anchor-hosted session's lease, in one place.
@@ -100,11 +116,21 @@ impl LeaseRegistry {
         let lease = leases.entry(session.to_owned()).or_default();
         match lease.holder.as_deref() {
             Some(holder) if holder != client_id => None,
-            _ => {
+            // `preempted` survives the same-holder arm (one client resuming
+            // its own lease still hands back to whoever it took it from) and
+            // is cleared on a free-lease grant, which preempted nobody.
+            Some(_) => {
+                lease.holder_name = Some(client_name.to_owned());
+                lease.grace = false;
+                lease.epoch += 1;
+                Some(lease.epoch)
+            }
+            None => {
                 lease.holder = Some(client_id.to_owned());
                 lease.holder_name = Some(client_name.to_owned());
                 lease.grace = false;
                 lease.epoch += 1;
+                lease.preempted = None;
                 Some(lease.epoch)
             }
         }
@@ -125,6 +151,7 @@ impl LeaseRegistry {
             lease.holder_name = Some(client_name.to_owned());
             lease.grace = false;
             lease.epoch += 1;
+            lease.preempted.clone_from(&lost_by);
             (lost_by, lease.epoch)
         };
 
@@ -145,14 +172,28 @@ impl LeaseRegistry {
     /// The epoch check is what stops a stale release — from a connection
     /// already superseded by a reconnect or a claim, both of which bump the
     /// epoch — from clearing whoever holds it now.
+    /// A release that frees the lease announces it, so the client it was
+    /// taken from learns the lease is available instead of sitting in
+    /// observer mode dropping the user's keystrokes.
     pub fn release_control(&self, session: &str, client_id: &str, epoch: u64) {
-        let mut leases = self.leases.lock();
-        if let Some(lease) = leases.get_mut(session) {
-            if lease.holder.as_deref() == Some(client_id) && lease.epoch == epoch {
-                lease.holder = None;
-                lease.holder_name = None;
-                lease.grace = false;
+        let resume_hint = {
+            let mut leases = self.leases.lock();
+            let Some(lease) = leases.get_mut(session) else {
+                return;
+            };
+            if lease.holder.as_deref() != Some(client_id) || lease.epoch != epoch {
+                return;
             }
+            lease.holder = None;
+            lease.holder_name = None;
+            lease.grace = false;
+            lease.preempted.take()
+        };
+        if let Some(tx) = self.events.lock().get(session) {
+            drop(tx.send(SessionEvent::ControlReleased {
+                by: client_id.to_owned(),
+                resume_hint,
+            }));
         }
     }
 
@@ -217,6 +258,9 @@ impl LeaseRegistry {
                     lease.holder = None;
                     lease.holder_name = None;
                     lease.grace = false;
+                    // An empty lease has no holder to describe; see the
+                    // same clear in session/control.rs.
+                    lease.preempted = None;
                 }
             }
         });
@@ -272,6 +316,85 @@ mod tests {
         assert!(
             registry.is_controller("s", "bob", bob),
             "a superseded connection must not free someone else's lease"
+        );
+    }
+
+    #[test]
+    fn releasing_announces_the_free_lease_and_names_the_preempted_client() {
+        let registry = LeaseRegistry::new();
+        let mut events = registry.subscribe("s");
+        let alice = registry
+            .attach_control("s", "alice", "Alice")
+            .expect("free");
+        let bob = registry.claim_control("s", "bob", "Bob");
+        assert_eq!(
+            events.try_recv(),
+            Ok(SessionEvent::ControlRevoked {
+                lost_by: Some("alice".to_owned()),
+                new_controller_id: "bob".to_owned(),
+                new_controller_name: "Bob".to_owned(),
+            })
+        );
+
+        registry.release_control("s", "bob", bob);
+
+        assert_eq!(
+            events.try_recv(),
+            Ok(SessionEvent::ControlReleased {
+                by: "bob".to_owned(),
+                resume_hint: Some("alice".to_owned()),
+            }),
+            "the client bob preempted is who the lease hands back to"
+        );
+        assert!(registry.controller_name("s").is_none(), "freed, not moved");
+        assert!(
+            !registry.is_controller("s", "alice", alice),
+            "a hint is not a grant -- alice still has to claim"
+        );
+    }
+
+    #[test]
+    fn releasing_an_unpreempted_lease_hints_nobody() {
+        let registry = LeaseRegistry::new();
+        let mut events = registry.subscribe("s");
+        let alice = registry
+            .attach_control("s", "alice", "Alice")
+            .expect("free");
+
+        registry.release_control("s", "alice", alice);
+
+        assert_eq!(
+            events.try_recv(),
+            Ok(SessionEvent::ControlReleased {
+                by: "alice".to_owned(),
+                resume_hint: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_resumed_lease_still_remembers_who_it_was_taken_from() {
+        let registry = LeaseRegistry::new();
+        let mut events = registry.subscribe("s");
+        let _alice = registry
+            .attach_control("s", "alice", "Alice")
+            .expect("free");
+        let _bob = registry.claim_control("s", "bob", "Bob");
+        drop(events.try_recv()); // the revoke
+
+        // Bob's socket drops and reconnects: a new grant to the same holder,
+        // so the hand-back target must survive it.
+        let resumed = registry
+            .attach_control("s", "bob", "Bob")
+            .expect("the same client resumes its own lease");
+        registry.release_control("s", "bob", resumed);
+
+        assert_eq!(
+            events.try_recv(),
+            Ok(SessionEvent::ControlReleased {
+                by: "bob".to_owned(),
+                resume_hint: Some("alice".to_owned()),
+            })
         );
     }
 

@@ -26,6 +26,8 @@ export interface SessionStreamCallbacks {
   /** `ready`'s or `resized`'s geometry. Observers letterbox to this; never fit it to their own viewport. */
   onGeometry(cols: number, rows: number): void
   onControlChange(hasControl: boolean, controllerName: string | null): void
+  /** The lease went free. Nobody controls the session now; this client is not claiming it. */
+  onControlReleased(): void
   /** Replay started mid-VT-stream; caller must `term.reset()` before the next `onOutput`. */
   onTruncated(): void
   onExit(code: number | null, finalOffset: number): void
@@ -237,6 +239,13 @@ export class SessionStream {
       }
       case "control_granted":
         this.callbacks.onControlChange(true, CLIENT_NAME)
+        return
+      case "control_released":
+        // Deliberately not a `claim_control`: the hint is for the CLI's
+        // hand-back (docs/04-api-protocol.md#releasing-and-handing-the-
+        // lease-back), and `wantControl` stays whatever the user last asked
+        // for. Only the displayed controller changes -- to nobody.
+        this.callbacks.onControlReleased()
         return
       case "control_revoked":
         // `wantControl` is untouched: it's user intent, not connection

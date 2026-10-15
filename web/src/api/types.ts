@@ -182,6 +182,20 @@ export interface ControlRevokedFrame {
   client_id: string
 }
 
+/**
+ * The lease was released and is now free (docs/04-api-protocol.md#releasing-
+ * and-handing-the-lease-back). Sent to every connection except the releaser.
+ * `resume_hint` names the client the releaser preempted on its way in -- the
+ * CLI claims on it, the web UI deliberately does not (a backgrounded tab
+ * silently becoming the writer is the failure the lease exists to prevent),
+ * so this client only stops attributing control to anyone.
+ */
+export interface ControlReleasedFrame {
+  type: "control_released"
+  by: string
+  resume_hint: string | null
+}
+
 export interface ResizedFrame {
   type: "resized"
   cols: number
@@ -205,6 +219,7 @@ export type ServerFrame =
   | ReadyFrame
   | ControlGrantedFrame
   | ControlRevokedFrame
+  | ControlReleasedFrame
   | ResizedFrame
   | ExitFrame
   | ErrorFrame

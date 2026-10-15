@@ -156,6 +156,17 @@ struct ReadyFrame {
 enum ServerMessage {
     Ready(ReadyFrame),
     ControlGranted,
+    ControlReleased {
+        /// The client that released the lease. Not read: the daemon never
+        /// sends this frame to the releaser itself.
+        #[expect(
+            dead_code,
+            reason = "mirrors the daemon's ws frame shape (daemon/src/ws.rs); not every field is read"
+        )]
+        by: String,
+        /// The client the releaser preempted on its way in, if any.
+        resume_hint: Option<String>,
+    },
     ControlRevoked {
         to: String,
         #[expect(
@@ -444,26 +455,7 @@ async fn connect_and_run(
             frame = ws.next() => {
                 match frame {
                     Some(Ok(Message::Binary(data))) => {
-                        if data.len() < 8 {
-                            continue;
-                        }
-                        let (offset_bytes, payload) = data.split_at(8);
-                        let offset = u64::from_be_bytes(
-                            offset_bytes
-                                .try_into()
-                                .expect("split_at(8) always returns an 8-byte head"),
-                        );
-                        if let Some(expected) = next_offset {
-                            if offset != expected {
-                                eprintln!(
-                                    "\r\n[teleport: {} byte gap in the stream -- scrollback truncated]\r",
-                                    offset.saturating_sub(expected)
-                                );
-                            }
-                        }
-                        stdout.write_all(payload).await.context("writing to stdout")?;
-                        stdout.flush().await.context("flushing stdout")?;
-                        next_offset = Some(offset + payload.len() as u64);
+                        write_output_frame(&mut stdout, &data, &mut next_offset).await?;
                     }
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ServerMessage>(&text) {
@@ -492,6 +484,34 @@ async fn connect_and_run(
                             Ok(ServerMessage::ControlRevoked { to, .. }) => {
                                 is_controller = false;
                                 eprintln!("\r\n[teleport: control taken by {to}]\r");
+                            }
+                            Ok(ServerMessage::ControlReleased { resume_hint, .. }) => {
+                                // The hand-back: whoever took control from
+                                // this client has given it up, so take it
+                                // back rather than leaving a pane that
+                                // silently drops every keystroke until the
+                                // user remembers `~!`
+                                // (docs/04-api-protocol.md#releasing-and-
+                                // handing-the-lease-back). Only when *we*
+                                // are the client named -- the hint is not a
+                                // grant, and an uninvolved observer claiming
+                                // here would be the silent preemption the
+                                // lease exists to prevent. `claim_control`
+                                // is sent, not assumed: the reply is a
+                                // `control_granted` frame, which is what
+                                // flips `is_controller` and re-syncs the
+                                // terminal size, exactly like a `~!`.
+                                if should_reclaim(
+                                    is_controller,
+                                    resume_hint.as_deref(),
+                                    params.client_id,
+                                ) {
+                                    ws.send(Message::text(
+                                        json!({"type":"claim_control"}).to_string(),
+                                    ))
+                                    .await
+                                    .context("reclaiming a released lease")?;
+                                }
                             }
                             Ok(ServerMessage::Resized { .. } | ServerMessage::Ready(_)) => {}
                             Ok(ServerMessage::Error { code, message }) => {
@@ -664,6 +684,81 @@ impl ResizeWatcher {
                 }
             }
         }
+    }
+}
+
+/// One server->client binary frame: an 8-byte big-endian offset, then raw
+/// PTY bytes (docs/04-api-protocol.md#framing). Lives outside the attach
+/// loop so that loop stays readable; `next_offset` is the caller's cursor,
+/// advanced here, and a gap in it is reported but never fatal -- the daemon
+/// clamped replay, and the remaining output is still worth showing.
+async fn write_output_frame(
+    stdout: &mut tokio::io::Stdout,
+    data: &[u8],
+    next_offset: &mut Option<u64>,
+) -> Result<()> {
+    if data.len() < 8 {
+        return Ok(());
+    }
+    let (offset_bytes, payload) = data.split_at(8);
+    let offset = u64::from_be_bytes(
+        offset_bytes
+            .try_into()
+            .expect("split_at(8) always returns an 8-byte head"),
+    );
+    if let Some(expected) = *next_offset {
+        if offset != expected {
+            eprintln!(
+                "\r\n[teleport: {} byte gap in the stream -- scrollback truncated]\r",
+                offset.saturating_sub(expected)
+            );
+        }
+    }
+    stdout
+        .write_all(payload)
+        .await
+        .context("writing to stdout")?;
+    stdout.flush().await.context("flushing stdout")?;
+    *next_offset = Some(offset + payload.len() as u64);
+    Ok(())
+}
+
+/// Whether a `control_released` frame is this client's cue to claim the
+/// lease back (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
+///
+/// Two guards, both load-bearing. `resume_hint` must name *us*: the hint is
+/// the daemon saying "this is the lease that was taken from you", and an
+/// uninvolved observer claiming on someone else's hand-back would be exactly
+/// the silent preemption the lease exists to prevent. And we must not
+/// already be the controller: a claim then would be a pointless epoch bump
+/// -- harmless, but it would make the hand-back look like a preemption to
+/// everyone else on the session.
+fn should_reclaim(is_controller: bool, resume_hint: Option<&str>, client_id: &str) -> bool {
+    !is_controller && resume_hint == Some(client_id)
+}
+
+#[cfg(test)]
+mod reclaim_tests {
+    use super::should_reclaim;
+
+    #[test]
+    fn claims_when_the_lease_comes_back_to_us() {
+        assert!(should_reclaim(false, Some("me"), "me"));
+    }
+
+    #[test]
+    fn ignores_a_hand_back_aimed_at_someone_else() {
+        assert!(!should_reclaim(false, Some("someone-else"), "me"));
+    }
+
+    #[test]
+    fn ignores_a_release_that_preempted_nobody() {
+        assert!(!should_reclaim(false, None, "me"));
+    }
+
+    #[test]
+    fn never_claims_what_we_already_hold() {
+        assert!(!should_reclaim(true, Some("me"), "me"));
     }
 }
 

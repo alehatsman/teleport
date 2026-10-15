@@ -211,6 +211,122 @@ async fn claim_control_preempts_and_notifies_the_loser() {
     assert_eq!(revoked["client_id"], "b");
 }
 
+/// Releasing the lease tells everyone else it is free, and names the client
+/// it was taken from so that client can hand-back
+/// (docs/04-api-protocol.md#releasing-and-handing-the-lease-back). Before
+/// this, `release_control` notified nobody: a CLI that had been preempted
+/// sat in observer mode silently dropping every keystroke the user typed,
+/// with no way to learn the lease had come free.
+#[tokio::test]
+async fn release_control_announces_the_free_lease_and_who_to_hand_it_back_to() {
+    let daemon = support::spawn(support::default_config()).await;
+    let id = support::create_shell_session(&daemon, &[]).await;
+
+    let mut a = connect(
+        &daemon.ws_url(&format!(
+            "/api/v1/sessions/{id}/stream?client_id=a&mode=control"
+        )),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect a");
+    let _ = next_json(&mut a).await; // ready, controller
+
+    let mut bystander = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=bystander")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect bystander");
+    let _ = next_json(&mut bystander).await; // ready, observer -- never holds the lease
+
+    let mut b = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=b")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect b");
+    let _ = next_json(&mut b).await; // ready, observer
+
+    send_text(&mut b, json!({ "type": "claim_control" })).await;
+    assert_eq!(next_json(&mut b).await["type"], "control_granted");
+    assert_eq!(next_json(&mut a).await["type"], "control_revoked");
+    assert_eq!(next_json(&mut bystander).await["type"], "control_revoked");
+
+    send_text(&mut b, json!({ "type": "release_control" })).await;
+
+    let released_a = next_json(&mut a).await;
+    assert_eq!(released_a["type"], "control_released");
+    assert_eq!(released_a["by"], "b");
+    assert_eq!(
+        released_a["resume_hint"], "a",
+        "the client b preempted is who the lease should go back to"
+    );
+
+    let released_bystander = next_json(&mut bystander).await;
+    assert_eq!(
+        released_bystander["type"], "control_released",
+        "an observer must stop attributing control to a holder that gave it up"
+    );
+
+    // The hint is not a grant: nobody holds the lease until someone claims.
+    let mut c = connect(
+        &daemon.ws_url(&format!(
+            "/api/v1/sessions/{id}/stream?client_id=c&mode=control"
+        )),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect c");
+    let ready_c = next_json(&mut c).await;
+    assert_eq!(
+        ready_c["control"], true,
+        "the lease is free after a release, so mode=control is granted without preempting"
+    );
+}
+
+/// A release carries no hint when the releaser took a free lease rather than
+/// preempting anyone -- there is nobody to hand it back to.
+#[tokio::test]
+async fn release_control_without_a_preemption_hints_nobody() {
+    let daemon = support::spawn(support::default_config()).await;
+    let id = support::create_shell_session(&daemon, &[]).await;
+
+    let mut a = connect(
+        &daemon.ws_url(&format!(
+            "/api/v1/sessions/{id}/stream?client_id=a&mode=control"
+        )),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect a");
+    let _ = next_json(&mut a).await; // ready, controller -- the lease was free
+
+    let mut b = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=b")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect b");
+    let _ = next_json(&mut b).await; // ready, observer
+
+    send_text(&mut a, json!({ "type": "release_control" })).await;
+
+    let released = next_json(&mut b).await;
+    assert_eq!(released["type"], "control_released");
+    assert_eq!(released["by"], "a");
+    assert!(
+        released["resume_hint"].is_null(),
+        "an attach-granted lease preempted nobody, so there is no hand-back target"
+    );
+}
+
 /// A bystander that never held the lease still learns who the new
 /// controller is, live -- not just the connection actually being preempted.
 /// Found live (mobile-dev, real Chrome + iPhone on the same session): an

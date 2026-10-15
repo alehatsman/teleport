@@ -428,6 +428,17 @@ async fn run(
                             send_json(&mut socket, &json!({ "type": "control_revoked", "to": new_controller_name, "client_id": new_controller_id })).await;
                         }
                     }
+                    Ok(SessionEvent::ControlReleased { by, resume_hint }) => {
+                        // Everyone except the releaser, which already knows.
+                        // `resume_hint` is forwarded verbatim: the daemon
+                        // never hands a free lease to a client that didn't
+                        // ask for it, so acting on it is the hinted client's
+                        // own `claim_control`
+                        // (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
+                        if by != client_id {
+                            send_json(&mut socket, &json!({ "type": "control_released", "by": by, "resume_hint": resume_hint })).await;
+                        }
+                    }
                     // A lagged receiver only means a missed notification --
                     // every subsequent control/resize check re-reads
                     // authoritative state (`is_controller`, `size`), so

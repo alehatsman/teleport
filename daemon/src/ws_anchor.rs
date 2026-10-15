@@ -234,6 +234,23 @@ pub async fn run_anchor(proxy: Proxy) {
                         .await;
                     }
                 }
+                Ok(SessionEvent::ControlReleased { by, resume_hint }) => {
+                    // Everyone except the releaser, same frame ws.rs sends
+                    // (docs/04-api-protocol.md#releasing-and-handing-the-
+                    // lease-back) -- a client cannot tell the two backends
+                    // apart, so neither may the hand-back path.
+                    if by != client_id {
+                        send_json(
+                            &mut socket,
+                            &json!({
+                                "type": "control_released",
+                                "by": by,
+                                "resume_hint": resume_hint,
+                            }),
+                        )
+                        .await;
+                    }
+                }
                 Ok(SessionEvent::Resized { cols, rows }) => {
                     send_json(
                         &mut socket,

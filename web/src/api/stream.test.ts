@@ -116,16 +116,21 @@ function harness() {
   const states: StreamState[] = []
   const output: Uint8Array[] = []
   const errors: Array<{ code: string; message: string | undefined }> = []
+  const control: Array<{ has: boolean; name: string | null }> = []
+  let releases = 0
   const callbacks = {
     onState: (s: StreamState) => states.push(s),
     onOutput: (b: Uint8Array) => output.push(b),
     onGeometry: ignore,
-    onControlChange: ignore,
+    onControlChange: (has: boolean, name: string | null) => control.push({ has, name }),
+    onControlReleased: () => {
+      releases += 1
+    },
     onTruncated: ignore,
     onExit: ignore,
     onError: (code: string, message: string | undefined) => errors.push({ code, message }),
   }
-  return { states, output, errors, callbacks }
+  return { states, output, errors, control, releaseCount: () => releases, callbacks }
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -226,6 +231,30 @@ describe("ws-ticket handshake (#18)", () => {
     await Promise.resolve()
     await Promise.resolve()
     expect(FakeWebSocket.instances.length).toBe(1)
+  })
+})
+
+describe("control_released (docs/04-api-protocol.md#releasing-and-handing-the-lease-back)", () => {
+  it("reports the free lease and never claims it back", async () => {
+    const h = harness()
+    const stream = mkStream("s1", h.callbacks)
+    stream.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0))
+    const ws = FakeWebSocket.latest()
+    ws.open()
+    ws.receiveText(JSON.stringify(readyFrame({ control: false, controller: "Chrome on iOS" })))
+    const sentBefore = ws.sent.length
+
+    ws.receiveText(
+      JSON.stringify({ type: "control_released", by: "other-client", resume_hint: "cli-client" })
+    )
+
+    expect(h.releaseCount()).toBe(1)
+    // The hint is the CLI's to act on. A web tab that claimed here would be
+    // the silent preemption the lease exists to prevent, and `hasControl`
+    // stays exactly where the last granting frame left it.
+    expect(ws.sent.length).toBe(sentBefore)
+    expect(h.control.at(-1)).toEqual({ has: false, name: "Chrome on iOS" })
   })
 })
 

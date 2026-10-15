@@ -178,6 +178,13 @@ pub(super) struct ControlLease {
     pub(super) holder_name: Option<String>,
     pub(super) grace: bool,
     pub(super) epoch: u64,
+    /// `client_id` the *current* holder preempted when it claimed, if any.
+    /// Carried only so a later `release_control` can name who to hand the
+    /// lease back to (`control_released`'s `resume_hint`,
+    /// docs/04-api-protocol.md#releasing-and-handing-the-lease-back). Set by
+    /// `claim_control`, cleared by every other transition -- an
+    /// `attach_control` grant preempts nobody, and a release consumes it.
+    pub(super) preempted: Option<String>,
 }
 
 /// Asynchronous, out-of-band notifications a WS connection needs beyond raw
@@ -215,6 +222,21 @@ pub enum SessionEvent {
         new_controller_id: String,
         /// Display name of the connection control was given to.
         new_controller_name: String,
+    },
+    /// Fires on a `release_control` that actually freed the lease. `ws.rs`
+    /// forwards it to every connection except the releaser itself, which
+    /// already knows. The lease is free when this goes out: it tells
+    /// observers to stop attributing control to anyone, and tells the
+    /// client named by `resume_hint` that the lease it was preempted from
+    /// is available to claim again
+    /// (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
+    ControlReleased {
+        /// `client_id` of the connection that released the lease.
+        by: String,
+        /// `client_id` the releaser preempted when it claimed, if any. A
+        /// hint, never a grant -- the named client still has to send
+        /// `claim_control`, and can still lose that race.
+        resume_hint: Option<String>,
     },
 }
 

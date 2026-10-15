@@ -76,6 +76,14 @@
           setControlling(sessionId, has)
           if (wasHolding && !has && name) showToast(`Control taken by ${name}`)
         },
+        // The lease went free (someone else released it). `hasControl` is
+        // untouched -- only the holder can release, so it was already false
+        // -- but the observer's "Take control (from X)" must stop naming a
+        // controller that no longer exists, immediately rather than on the
+        // next poll (CONTROLLER_POLL_MS above).
+        onControlReleased: () => {
+          controllerName = null
+        },
         onTruncated: () => {
           terminalRef?.reset()
           truncatedNotice = true

@@ -396,6 +396,16 @@ given up. Releasing while the socket is down is still correct: the message is dr
 but the holder's `control_grace_ms` window lapses on its own and the next attach asks
 only to observe.
 
+Every *other* attached client gets a `control_released` frame
+([04-api-protocol.md](04-api-protocol.md#releasing-and-handing-the-lease-back)). The web
+client's response to it is deliberately minimal: clear the displayed controller name, so
+an observer's button stops reading "Take control (from X)" immediately instead of on the
+next poll, and **never** claim — not even when the frame's `resume_hint` names this
+client. A backgrounded phone tab silently becoming the writer for a session the user
+walked away from is the exact failure the lease exists to prevent; `hasControl` stays
+written only by a granting frame. `teleport attach` does act on the hint, because its
+alternative is a human noticing a quiet terminal and remembering the `~!` escape.
+
 **A session ending is a fact about the record, not about the socket** — same principle
 as [Connection status](#connection-status)'s "record first, socket second". `hasControl`
 and the controller's name are written only by control frames (`ready`, `control_granted`,

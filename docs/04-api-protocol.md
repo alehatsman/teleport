@@ -565,6 +565,9 @@ Server → client:
 {"type":"control_revoked","to":"aleh's phone","client_id":"01K5Q…"}
 ```
 ```json
+{"type":"control_released","by":"01K5Q…","resume_hint":"01K4N…"}
+```
+```json
 {"type":"resized","cols":120,"rows":36}
 ```
 ```json
@@ -815,6 +818,54 @@ the grace holder is this client_id
 
 Otherwise the attach succeeds as an observer with `control:false`, and the user can tap
 to preempt deliberately.
+
+### Releasing, and handing the lease back
+
+`release_control` frees the lease when the sender still holds it at the epoch it was
+granted — a stale release from a superseded connection clears nothing. The daemon sends
+the releaser no acknowledgement (there is nothing it doesn't already know), but it does
+broadcast **`control_released`** to every *other* attached connection, for the same
+reason `control_revoked` goes to all of them: a lease change nobody is told about shows
+up as a stale "(from X)" label and a terminal that silently ignores typing.
+
+```json
+{"type":"control_released","by":"01K5Q…","resume_hint":"01K4N…"}
+```
+
+- `by` — `client_id` of the connection that released.
+- `resume_hint` — `client_id` of the controller that the *claim which gave the releaser
+  the lease* preempted, or `null` if that claim took a free lease. The lease records it
+  on `claim_control` and clears it on every other transition.
+
+`resume_hint` exists for the hand-back round trip, which is the common two-device shape:
+
+```text
+desktop CLI holds control
+phone taps "Take control"         → phone controls, lease remembers the CLI
+phone taps "Controlling" to release → lease free, resume_hint = the CLI's client_id
+CLI claims                         → the desktop pane types again
+```
+
+Without it, the desktop sits in observer mode with no idea the lease ever came free, and
+the user is left pressing keys into a pane that drops them.
+
+It is a **hint, not a grant**. The lease is genuinely free when this frame goes out; the
+hinted client still has to send `claim_control`, and can still lose that race to someone
+faster. The daemon never hands a lease to a client that didn't ask for it — the same
+rule grace expiry follows. A client that is *not* the hinted one must not auto-claim on
+this frame: it updates its displayed controller (now nobody) and nothing else.
+
+Who acts on the hint is a client decision, recorded here so the clients agree:
+
+| Client | On `control_released` |
+|---|---|
+| `teleport attach` (CLI) | claims automatically when `resume_hint` is its own `client_id`; otherwise prints nothing — it is already showing "observing" |
+| Web UI | never auto-claims; drops the "(from X)" attribution so the button reads plain "Take control" |
+
+The CLI auto-claims because its alternative is a human noticing that an un-prompted
+terminal has gone quiet and remembering the `~!` escape. The web UI does not, because a
+backgrounded phone tab silently becoming the writer for a session the user walked away
+from is the failure this whole lease exists to prevent.
 
 ### Disconnect grace
 
