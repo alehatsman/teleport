@@ -122,12 +122,9 @@ the exit drain (`ws.rs:337,396`).
 What the anchor path does not do today. **This is the half that matters** —
 each is a blocker or a known, written-down regression. Ordered by severity.
 
-1. **`POST /api/v1/ws-ticket` always 404s.** `api.rs:1629` calls
-   `find_session`, which only reads `state.sessions` (`api.rs:1644`). On the
-   anchor path that map is empty, so every ticket request fails for sessions
-   that exist. The route exists to keep the bearer token out of reconnect URLs
-   (docs/06-security.md mitigation 2); on the anchor path clients fall back to
-   `?token=`. No test covers it on either path. **Issue #100. Blocker.**
+1. ~~**`POST /api/v1/ws-ticket` always 404s.**~~ **Fixed** (#100). Resolution
+   now goes to whichever backend owns sessions. Both paths have tests; the
+   route previously had none on either, which is how it stayed broken.
 
 2. **Session rows and agent metadata are never persisted.** Nothing writes
    teleport's `sessions` table on the anchor path. `title` and
@@ -138,6 +135,25 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    the daemon restarting under it." The anchor path reintroduces exactly the
    bug that comment records fixing. `session_events` rows are never written
    either. **Blocker.**
+
+   **Decided with anchor:** the two fields split on *write frequency*, not on
+   ownership.
+
+   - **`claude_resume_id` becomes an anchor label.** It is emitted once, in
+     an agent's startup banner (`session/manager.rs:43-46`), so the write is
+     rare. A label survives a teleport restart for free, needs no table, and
+     creates no second source of truth. Anchor never interprets a label and
+     has a test pinning that, so `teleport.claude_resume_id` stays
+     self-evidently teleport's opinion.
+   - **`title` stays in a teleport table.** It is re-emitted on every prompt
+     (`session/manager.rs:349-353`) — chatty by construction, which is
+     exactly why the in-process path throttles it to 1/s
+     (`AGENT_META_PERSIST_INTERVAL_MS`, `session/manager.rs:41-47`). Labels
+     have no rate protection and every label write is a SQLite write on
+     anchor's side, so this one must not go there.
+
+   That throttle is itself the evidence for the split: it exists because the
+   title is chatty and the resume id is not.
 
 3. **`controller` and `subscribers` are hardcoded** in list and get
    (`api.rs:908-909`) versus live values in-process (`api.rs:936-937`). The
@@ -178,6 +194,13 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    workmanager) produces no `resized` frame for teleport's browsers —
    `anchor_watch` tracks output, not geometry.
 
+   **Known limitation, confirmed with anchor.** The attach stream's `RESIZE`
+   frame is client→daemon only; nothing fans geometry back out, so there is
+   no way for teleport to learn about a third-party resize today. Do not add
+   a poll for it. Surfacing it would be new protocol surface on anchor's
+   side — proposed there, not assumed here. If anchor grows the frame, this
+   gap closes by consuming it and this note goes.
+
 9. **Idleness diverges.** `anchor_watch.rs:60` duplicates the threshold from
    `session/mod.rs:111`. Two differences: `Derived::idle_since_ms` has no
    state guard, so an **exited** session with stale data still reports
@@ -198,16 +221,21 @@ each is a blocker or a known, written-down regression. Ordered by severity.
     (`ws_anchor.rs:152`); the operator-facing knobs are not, silently. Delete
     them or document them as anchord's.
 
-12. **Purge may not wait for exit.** `api.rs:1130-1133` claims purge
-    "terminates first and waits, which is what the in-process path below does
-    too". The code at `:1135-1145` terminates then purges with **no wait**;
-    in-process explicitly awaits `session.exited()` (`api.rs:1186`). Whether
-    this is correct depends on whether anchord's `terminate` is synchronous
-    through to exit. **Open question for anchor — resolve before the delete.**
+12. ~~**Purge may not wait for exit.**~~ **Resolved — it was anchor's bug,
+    fixed in anchor `00f3eaa`.** `terminate` always blocked until the child
+    was reaped, but the session's *recorded state* was written by a different
+    thread and nothing ordered the two. So a successful `terminate` could
+    reply `closing`, and the `purge` teleport sends next could be refused
+    `already_exited` — the race, in the opposite direction from the obvious
+    one. Anchor's reply now waits, bounded, for the state to land.
 
-Separately, and not a coverage gap but found alongside: purging leaks the
-session's lease and event channel, because `anchor_lease::forget`
-(`anchor_lease.rs:278`) has zero callers. **Issue #101.**
+    **Teleport adds no wait.** `api.rs:1135-1145` is correct against
+    `00f3eaa` and the comment at `:1130-1133` stays. Teleport now has a
+    minimum anchor version for this behaviour; against an older anchord the
+    race is real.
+
+~~Separately, purging leaks the session's lease and event channel, because
+`anchor_lease::forget` has zero callers.~~ **Fixed** (#101).
 
 ## Tests
 
@@ -235,18 +263,19 @@ Anchor's session flagged this class as the one that goes quietly wrong:
 - Anything asserting a *close* on a dropped connection: `1013` and `1001` are
   both "the socket closed" to a test that does not check the code (gap 5).
 
-**New tests the delete needs**, none of which exist:
-ws-ticket on the anchor path (gap 1); title and resume id surviving a teleport
+**New tests the delete needs.** Done: ws-ticket on both paths (gap 1), lease
+freed on purge (#101). Still missing: title and resume id surviving a teleport
 restart (gap 2); `controller` in the session list matching the WS frame
-(gap 3); close codes asserted by value (gap 5); lease freed on purge (#101).
+(gap 3); close codes asserted by value (gap 5).
 
 ## Ordering
 
 Nothing below moves until the one above it is true.
 
-1. **Fix the blockers.** Gaps 1, 2, 3 and issue #101. Each is a defect on the
-   anchor path *today*, independent of any deletion.
-2. **Resolve gap 12** with anchor — a question, not code.
+1. ~~**Resolve gap 12** with anchor.~~ Done — it was anchor's bug, fixed in
+   `00f3eaa`. Teleport changes nothing.
+2. **Fix the remaining blockers.** Gaps 2 and 3. ~~Gap 1 and #101~~ are done.
+   Each is a defect on the anchor path *today*, independent of any deletion.
 3. **Close the cheap divergences**, gaps 4 and 5, while both paths still exist
    and can be compared.
 4. **Package `anchord`** as its own launchd/systemd unit with its own
@@ -260,12 +289,24 @@ Nothing below moves until the one above it is true.
    `api.rs`, `ws.rs`, then the modules. Keep the residue listed in
    [What stays](#what-stays).
 
-Steps 1–3 are available now and are worth doing regardless of whether the
+Steps 2–3 are available now and are worth doing regardless of whether the
 delete ever happens — they are bugs in the path teleport is moving to.
+
+## Minimum anchor version
+
+Three fixes teleport now depends on, all found by auditing it against anchor's
+protocol doc. Against an older anchord each is a live bug:
+
+| Anchor commit | Why teleport needs it |
+|---|---|
+| `8b47537` | `log` clamps an oversized `max` instead of refusing it, so `get_log`'s paging loop works past 4 MiB. |
+| `00f3eaa` | `terminate`'s reply means the exit is *recorded*, so the `purge` teleport sends next is not refused. |
+
+Teleport's own half of that audit: input is split at 64 KiB (#97), so a paste
+cannot drop an attach.
 
 ## Open questions
 
-- **Gap 12**: is anchord's `terminate` synchronous through to exit?
 - **Gap 11**: do `log_warn_bytes` / `log_max_bytes` get deleted, or
   re-documented as anchord's to apply?
 - **Gap 7**: is `delivered_to` or the authoritative offset the right
