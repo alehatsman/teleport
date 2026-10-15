@@ -1,0 +1,271 @@
+//! The anchor client against a real `anchord`.
+//!
+//! Skipped unless `ANCHORD_BIN` points at an `anchord` binary: anchor is a
+//! separate project with its own release cycle (that is the point of the
+//! extraction), so teleport's suite cannot assume it is built here. Run it
+//! with, e.g.:
+//!
+//! ```sh
+//! ANCHORD_BIN=../anchor/target/debug/anchord cargo test --test anchor_client
+//! ```
+
+#![cfg(unix)]
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+use teleportd::anchor_client::{AnchorClient, AnchorFrame, AnchorSpec};
+
+/// `None` when `ANCHORD_BIN` is unset, which skips every test here.
+///
+/// Set but not a file is a hard failure, not a skip: that combination means
+/// someone meant to run these and pointed at the wrong path, and silently
+/// reporting a pass for tests that never ran is worse than not having them.
+fn anchord_bin() -> Option<PathBuf> {
+    let raw = std::env::var_os("ANCHORD_BIN")?;
+    let path = PathBuf::from(&raw);
+    assert!(
+        path.is_file(),
+        "ANCHORD_BIN is set to {raw:?}, which is not a file"
+    );
+    Some(path)
+}
+
+/// Short path: a unix socket path is capped near 104 bytes.
+struct Daemon {
+    child: Child,
+    dir: PathBuf,
+}
+
+impl Daemon {
+    fn start(tag: &str) -> Self {
+        let dir = PathBuf::from(format!("/tmp/tp-anchor-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
+        let bin = anchord_bin().expect("checked by the caller");
+        let child = Command::new(bin)
+            .env("XDG_DATA_HOME", &dir)
+            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env("ANCHOR_LOG", "warn")
+            .spawn()
+            .expect("spawning anchord");
+        Self { child, dir }
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.dir.join("run/anchor.sock")
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Waits until the daemon answers, so a test never races its startup.
+async fn ready(client: &AnchorClient) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client.list(&BTreeMap::new()).await.is_err() {
+        assert!(Instant::now() < deadline, "anchord never came up");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn spec(script: &str) -> AnchorSpec {
+    AnchorSpec {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), script.to_owned()],
+        cwd: std::env::temp_dir(),
+        env: BTreeMap::new(),
+        cols: 80,
+        rows: 24,
+        login_shell: false,
+    }
+}
+
+fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_ops_round_trip_against_a_real_anchord() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let daemon = Daemon::start("control");
+    let client = AnchorClient::new(daemon.socket());
+    ready(&client).await;
+
+    let id = client
+        .create(
+            &spec("stty raw -echo; echo hello-teleport; sleep 30"),
+            &labels(&[("teleport.kind", "shell")]),
+        )
+        .await
+        .expect("create");
+
+    let session = client.get(&id).await.expect("get");
+    assert_eq!(session.state, "running");
+    assert_eq!(session.command, "/bin/sh");
+    assert_eq!(
+        session.labels.get("teleport.kind").map(String::as_str),
+        Some("shell")
+    );
+    assert!(session.pid.is_some());
+
+    // The label-filtered query is the capability teleport does not have
+    // today — no side-table needed to find a session by what it is for.
+    let found = client
+        .list(&labels(&[("teleport.kind", "shell")]))
+        .await
+        .expect("list");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id);
+    assert!(client
+        .list(&labels(&[("teleport.kind", "nope")]))
+        .await
+        .expect("list")
+        .is_empty());
+
+    // The log is readable by range, and carries the child's output.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let range = client.log(&id, 0, 65536).await.expect("log");
+        if range.bytes.windows(14).any(|w| w == b"hello-teleport") {
+            assert_eq!(range.from, 0);
+            assert_eq!(range.to, range.bytes.len() as u64);
+            break;
+        }
+        assert!(Instant::now() < deadline, "no output arrived");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    client.resize(&id, 132, 50).await.expect("resize");
+    let updated = client
+        .label(&id, &labels(&[("teleport.x", "1")]), &[])
+        .await;
+    assert_eq!(
+        updated
+            .expect("label")
+            .get("teleport.x")
+            .map(String::as_str),
+        Some("1")
+    );
+
+    client.terminate(&id).await.expect("terminate");
+    let after = client.get(&id).await.expect("get after terminate");
+    assert_eq!(after.state, "exited");
+
+    // An unknown session is an error carrying anchor's own code, so a
+    // caller can map it onto teleport's 404 rather than parsing prose.
+    let missing = client.get("01JNOPE0000000000000000000").await;
+    let message = missing.expect_err("unknown session").to_string();
+    assert!(message.starts_with("not_found:"), "got {message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_replays_then_streams_and_reports_the_exit() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let daemon = Daemon::start("attach");
+    let client = AnchorClient::new(daemon.socket());
+    ready(&client).await;
+
+    let id = client
+        .create(
+            &spec("stty raw -echo; echo ready-for-input; cat; exit 3"),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("create");
+
+    let mut attach = client.attach(&id, 0, true).await.expect("attach");
+    assert!(attach.has_control(), "the lease was free");
+
+    // Replay carries what the session produced before this attach existed.
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen.windows(15).any(|w| w == b"ready-for-input") {
+        assert!(Instant::now() < deadline, "no replay arrived");
+        match attach.next_frame().await.expect("a frame") {
+            Some(AnchorFrame::Output { bytes, .. }) => seen.extend_from_slice(&bytes),
+            Some(AnchorFrame::Lease { held }) => assert!(held),
+            Some(AnchorFrame::Exit { .. }) | None => panic!("ended before replaying"),
+        }
+    }
+
+    // Input reaches the PTY and comes back through the same stream.
+    attach
+        .send_input(b"echo round-trip\n")
+        .await
+        .expect("send_input");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen.windows(10).any(|w| w == b"round-trip") {
+        assert!(Instant::now() < deadline, "input never echoed back");
+        match attach.next_frame().await.expect("a frame") {
+            Some(AnchorFrame::Output { bytes, .. }) => seen.extend_from_slice(&bytes),
+            Some(_) => {}
+            None => panic!("stream ended early"),
+        }
+    }
+
+    // Ending `cat`'s input lets the script exit, and the exit arrives as a
+    // frame carrying the code.
+    client.terminate(&id).await.expect("terminate");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "no exit frame arrived");
+        match attach.next_frame().await.expect("a frame") {
+            Some(AnchorFrame::Exit { code }) => {
+                // Terminated rather than left to exit 3, so the code is
+                // whatever the signal produced — the point is that it is
+                // reported at all, exactly once, at the end of the stream.
+                assert!(attach.next_frame().await.expect("after exit").is_none());
+                let _ = code;
+                break;
+            }
+            Some(_) => {}
+            None => panic!("the stream ended without an exit frame"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_observer_attaches_without_taking_the_lease() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let daemon = Daemon::start("observe");
+    let client = AnchorClient::new(daemon.socket());
+    ready(&client).await;
+
+    let id = client
+        .create(&spec("stty raw -echo; echo up; sleep 30"), &BTreeMap::new())
+        .await
+        .expect("create");
+
+    let controller = client.attach(&id, 0, true).await.expect("attach");
+    assert!(controller.has_control());
+
+    // Anchor never preempts: a second connection asking for control still
+    // attaches, as an observer. Teleport's own lease layer sits above this.
+    let observer = client.attach(&id, 0, true).await.expect("attach");
+    assert!(
+        !observer.has_control(),
+        "attach must not preempt a held lease"
+    );
+
+    client.terminate(&id).await.expect("terminate");
+}
