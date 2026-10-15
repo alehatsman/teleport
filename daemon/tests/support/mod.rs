@@ -410,6 +410,7 @@ async fn spawn_inner(
             client.clone(),
             Arc::clone(&watch),
             config.anchor_owner.clone(),
+            db.clone(),
         );
     }
 

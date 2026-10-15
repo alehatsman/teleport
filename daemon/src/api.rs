@@ -914,7 +914,15 @@ impl SessionView {
             last_bell_ms: derived.and_then(|d| d.last_bell_ms),
             idle_since_ms: derived.and_then(|d| d.idle_since_ms(crate::now_ms())),
             title: derived.and_then(|d| d.title.clone()),
-            claude_resume_id: derived.and_then(|d| d.claude_resume_id.clone()),
+            // The label first, the watcher second. The label is authoritative
+            // and needs no watcher to have seen the session -- which is the
+            // point, since a resume id is most useful for a session that has
+            // already exited.
+            claude_resume_id: s
+                .labels
+                .get(crate::anchor_watch::LABEL_CLAUDE_RESUME_ID)
+                .cloned()
+                .or_else(|| derived.and_then(|d| d.claude_resume_id.clone())),
         }
     }
 
@@ -1159,6 +1167,14 @@ async fn delete_session(
         // life of the process.
         state.watch.forget(&id);
         state.leases.forget(&id);
+        if let Some(db) = &state.db {
+            // A purge forgets the session everywhere, so its derived title
+            // goes too -- otherwise the row outlives the session it
+            // describes and nothing would ever clean it up.
+            if let Err(e) = db.forget_anchor_meta(&id).await {
+                tracing::warn!(session_id = %id, error = %e, "forgetting anchor metadata failed");
+            }
+        }
         return Ok(StatusCode::NO_CONTENT);
     }
 

@@ -816,3 +816,128 @@ async fn purging_a_session_releases_its_lease() {
         "the purged session's lease and event channel are still held"
     );
 }
+
+/// Derived agent metadata survives teleport restarting, for a session that
+/// has **exited**.
+///
+/// On the anchor path `title` and `claude_resume_id` lived only in
+/// `WatchRegistry` memory. A *running* session hides that: the new teleport
+/// starts a watcher from offset 0 and re-derives both from the replayed log,
+/// so it recovers without any persistence at all. An exited session gets no
+/// watcher (`anchor_watch::reconcile` skips anything not running or closing),
+/// so nothing re-derives and both fields come back null.
+///
+/// That is the case `api.rs`'s own comment is about: "a resume id is only
+/// ever useful once the session that had it is gone, and the usual way it
+/// goes is the daemon restarting under it." A test against a running session
+/// passes either way and proves nothing -- it was written that way first.
+///
+/// The two are stored differently and this asserts both survive. The title
+/// goes to teleport's SQLite (chatty, re-emitted every prompt); the resume id
+/// becomes an anchor label (written once, in a startup banner).
+#[tokio::test(flavor = "multi_thread")]
+async fn derived_agent_metadata_survives_a_teleport_restart() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("metasurvive");
+    anchord.ready().await;
+    let dir = PathBuf::from(format!("/tmp/tp-meta-{}", std::process::id()));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a previous run"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("creating the state dir");
+    let (db, _guard) =
+        teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
+            .expect("open test db");
+
+    // An agent that sets a terminal title and prints a resume link, the way
+    // a real one does in its opening banner.
+    let before =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+    let (status, created) = post_json(
+        &before,
+        "/api/v1/sessions",
+        &json!({
+            "kind": "agent",
+            "command": "/bin/sh",
+            "args": [
+                "-c",
+                "stty raw -echo; \
+                 printf '\\033]0;Fixing the parser\\007'; \
+                 printf '\\033]8;id=gq2qz2;https://claude.ai/code/session_013YMNvvZ2U1fUjQsxAbqRjj?from=cli\\007'; \
+                 sleep 2",
+            ],
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created}");
+    let id = created["id"].as_str().expect("a session id").to_string();
+
+    // Wait for the watcher to derive both before restarting; asserting on a
+    // restart that happened before anything was derived proves nothing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
+        if view["title"] == "Fixing the parser" && !view["claude_resume_id"].is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first teleport never derived them: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Let it exit. An exited session is the one that loses its metadata,
+    // because nothing re-derives it after a restart.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
+        if view["state"] == "exited" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the agent never exited: {view}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Ship a release: teleport goes away, the record does not.
+    drop(before);
+
+    // The new teleport. Same anchord, same SQLite, no in-memory state.
+    let after =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let view = loop {
+        let (_, view) = get_json(&after, &format!("/api/v1/sessions/{id}")).await;
+        if !view["title"].is_null() && !view["claude_resume_id"].is_null() {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "metadata did not survive the restart: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        view["title"], "Fixing the parser",
+        "the title did not survive: {view}"
+    );
+    assert_eq!(
+        view["claude_resume_id"], "session_013YMNvvZ2U1fUjQsxAbqRjj",
+        "the resume id did not survive: {view}"
+    );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort teardown of the test's state dir"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
+}
