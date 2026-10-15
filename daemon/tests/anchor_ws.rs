@@ -313,3 +313,58 @@ async fn an_observer_is_refused_resize_but_still_sees_output() {
     assert_eq!(error["type"], "error");
     assert_eq!(error["code"], "not_controller");
 }
+
+/// A paste larger than one anchor frame survives, and the attach survives
+/// with it.
+///
+/// Anchor caps an inbound frame at 64 KiB and drops the *connection* on the
+/// header alone when one claims more — not the frame, the connection, since
+/// an attached connection ends as soon as either direction does. Teleport
+/// used to forward a browser's binary message as a single frame, so a large
+/// paste killed the terminal it was pasted into (#97).
+///
+/// `cat` echoes raw, so the bytes come back as proof the whole paste reached
+/// the PTY in order rather than being truncated at a frame boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paste_larger_than_one_frame_reaches_the_pty_whole() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("bigpaste");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo paste-ready; cat").await;
+
+    let mut ws = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=control&client_id=browser-a&client_name=A"
+    )))
+    .await;
+    assert_eq!(next_json(&mut ws).await["control"], true);
+    read_until(&mut ws, "paste-ready").await;
+
+    // Three frames' worth, so the split is exercised rather than straddled:
+    // one full chunk, a second full chunk, and a short remainder.
+    let filler = 150_000;
+    let mut paste = vec![b'z'; filler];
+    paste.extend_from_slice(b"end-of-paste\n");
+    ws.send(Message::Binary(paste.into()))
+        .await
+        .expect("send a large paste");
+
+    // Arriving at all means the connection outlived the paste. The filler
+    // immediately before the marker means the bytes arrived whole and in
+    // order, rather than a chunk being dropped or reordered at a boundary.
+    let seen = read_until(&mut ws, "end-of-paste").await;
+    let marker = seen
+        .windows(12)
+        .position(|w| w == b"end-of-paste")
+        .expect("read_until returned once it matched");
+    let run = seen
+        .get(marker - filler..marker)
+        .expect("the filler precedes the marker");
+    assert!(
+        run.iter().all(|b| *b == b'z'),
+        "the {filler} bytes before the marker were not the filler that was pasted"
+    );
+}

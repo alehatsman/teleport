@@ -42,6 +42,14 @@ mod frame {
     pub(super) const RESIZE: u8 = 0x05;
     /// Tag, offset, payload length.
     pub(super) const HEADER_LEN: usize = 1 + 8 + 4;
+    /// The largest payload anchor will accept on an inbound frame.
+    ///
+    /// Anchor's, not ours: a `len` arriving from a client is an unverified
+    /// claim it would allocate on, so it drops the connection on the header
+    /// alone rather than trusting one. Exceeding this does not cost a frame,
+    /// it costs the whole attach — an attached connection ends as soon as
+    /// either direction does. See anchor's `docs/04-protocol.md`.
+    pub(super) const MAX_INBOUND: usize = 64 * 1024;
 }
 
 /// How a session is spawned. Mirrors anchor's `spec` object.
@@ -500,13 +508,27 @@ impl AnchorAttach {
 
     /// Sends input to the PTY. Only the lease holder's input is applied;
     /// anchor silently ignores the rest.
+    ///
+    /// Split across frames at [`frame::MAX_INBOUND`]. A browser paste is the
+    /// one thing a client sends that is not keystroke-sized, and a single
+    /// oversized frame would not merely be refused — anchor drops the
+    /// connection on the header, taking the whole attach down and killing
+    /// the terminal. The PTY sees one byte stream either way; frame
+    /// boundaries are not message boundaries.
     pub async fn send_input(&mut self, bytes: &[u8]) -> Result<()> {
-        let mut out = Vec::with_capacity(frame::HEADER_LEN + bytes.len());
-        out.push(frame::INPUT);
-        out.extend_from_slice(&0_u64.to_be_bytes());
-        out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
-        out.extend_from_slice(bytes);
-        self.writer.write_all(&out).await.context("sending input")?;
+        for chunk in bytes.chunks(frame::MAX_INBOUND) {
+            let mut out = Vec::with_capacity(frame::HEADER_LEN + chunk.len());
+            out.push(frame::INPUT);
+            out.extend_from_slice(&0_u64.to_be_bytes());
+            // Never truncates: a chunk is at most `MAX_INBOUND`.
+            out.extend_from_slice(&u32::try_from(chunk.len()).unwrap_or(0).to_be_bytes());
+            out.extend_from_slice(chunk);
+            self.writer.write_all(&out).await.context("sending input")?;
+        }
+        // `chunks` yields nothing for an empty slice, so an empty write sends
+        // no frame at all. That is right: a zero-length input frame would ask
+        // anchor to deliver nothing, and the PTY cannot tell it apart from
+        // not having been written to.
         self.writer.flush().await.context("flushing input")
     }
 }
