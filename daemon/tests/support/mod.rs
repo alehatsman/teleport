@@ -172,10 +172,14 @@ impl Anchord {
                 .as_nanos()
         ));
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
+        // Captured, so a daemon that dies on startup says why instead of
+        // being diagnosed as "slow" by a timeout.
+        let log = std::fs::File::create(dir.join("anchord.log")).expect("creating the log");
         let child = std::process::Command::new(&bin)
             .env("XDG_DATA_HOME", &dir)
             .env("XDG_RUNTIME_DIR", dir.join("run"))
-            .env("ANCHOR_LOG", "warn")
+            .env("ANCHOR_LOG", "info")
+            .stderr(std::process::Stdio::from(log))
             .spawn()
             .expect("spawning anchord");
         Some(Self { child, dir })
@@ -194,7 +198,12 @@ impl Anchord {
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(60);
         while std::os::unix::net::UnixStream::connect(self.socket()).is_err() {
-            assert!(Instant::now() < deadline, "anchord never came up");
+            assert!(
+                Instant::now() < deadline,
+                "anchord never came up; its log said: {}",
+                std::fs::read_to_string(self.dir.join("anchord.log"))
+                    .unwrap_or_else(|e| format!("<unreadable: {e}>"))
+            );
             std::thread::sleep(Duration::from_millis(25));
         }
     }
@@ -383,6 +392,30 @@ pub(crate) fn default_config() -> Config {
 /// Creates a `shell`-kind `/bin/sh` session directly through the
 /// `SessionManager` (bypassing HTTP) -- the fastest way for a WS-focused
 /// test to get a session id to attach to.
+/// A session's authoritative output offset, from whichever backend holds
+/// it.
+///
+/// Reaching into `state.sessions` asserts the same thing but only on the
+/// in-process path; a test that does so is pinned to an implementation
+/// rather than to the protocol it means to check.
+pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::SessionId) -> u64 {
+    match &daemon.state.anchor {
+        Some(anchor) => {
+            anchor
+                .get(&id.to_string())
+                .await
+                .expect("anchord knows the session")
+                .output_bytes
+        }
+        None => daemon
+            .state
+            .sessions
+            .get(id)
+            .expect("session still listed")
+            .next_offset(),
+    }
+}
+
 /// Creates a session in whichever backend this daemon uses.
 ///
 /// Routing by backend matters: creating in the in-process manager while the

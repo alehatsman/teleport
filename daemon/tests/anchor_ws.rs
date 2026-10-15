@@ -243,10 +243,13 @@ async fn control_moves_between_browsers_and_both_are_told() {
     let granted = next_json(&mut second).await;
     assert_eq!(granted["type"], "control_granted");
 
+    // The same frame shape ws.rs sends, asserted against teleport's own
+    // field names rather than ones invented for the anchor path — a client
+    // must not be able to tell the two backends apart.
     let revoked = next_json(&mut first).await;
     assert_eq!(revoked["type"], "control_revoked");
-    assert_eq!(revoked["new_controller_id"], "browser-b");
-    assert_eq!(revoked["new_controller_name"], "B");
+    assert_eq!(revoked["client_id"], "browser-b");
+    assert_eq!(revoked["to"], "B");
 
     // Input now follows the lease across the process boundary.
     second

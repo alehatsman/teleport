@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::time::{Duration, Instant};
 
 use crate::anchor_client::{AnchorClient, AnchorFrame};
-use crate::anchor_lease::LeaseRegistry;
+use crate::anchor_lease::{LeaseRegistry, SessionEvent};
 
 /// How often to ping an idle client, matching `ws.rs`.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
@@ -158,6 +158,11 @@ pub async fn run_anchor(proxy: Proxy) {
     )
     .await;
 
+    // One past the last byte handed to this client. `attach.next_offset()`
+    // is the boundary as of the attach and never moves, so using it for the
+    // exit frame would claim a client received less than it did — the frame
+    // is how a client knows it has the whole transcript.
+    let mut delivered_to = from;
     let mut lease_events = leases.subscribe(&session_id);
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // the first tick is immediate; consume it.
@@ -167,6 +172,7 @@ pub async fn run_anchor(proxy: Proxy) {
         tokio::select! {
             frame = attach.next_frame() => match frame {
                 Ok(Some(AnchorFrame::Output { offset, bytes })) => {
+                    delivered_to = delivered_to.max(offset + bytes.len() as u64);
                     if send_binary(&mut socket, offset, &bytes).await.is_err() {
                         break;
                     }
@@ -177,7 +183,7 @@ pub async fn run_anchor(proxy: Proxy) {
                         &json!({
                             "type": "exit",
                             "code": code,
-                            "final_offset": attach.next_offset(),
+                            "final_offset": delivered_to,
                         }),
                     )
                     .await;
@@ -203,22 +209,43 @@ pub async fn run_anchor(proxy: Proxy) {
                 }
             },
 
-            event = lease_events.recv() => {
-                if let Ok(event) = event {
-                    if event.new_controller_id != client_id {
+            event = lease_events.recv() => match event {
+                Ok(SessionEvent::ControlRevoked {
+                    new_controller_id,
+                    new_controller_name,
+                    ..
+                }) => {
+                    // Everyone except the new controller: the previous
+                    // holder and every bystander alike, so an idle client's
+                    // "take control (from X)" label is right without
+                    // waiting for its next reconnect. The shape matches
+                    // ws.rs's frame exactly — a client cannot tell the two
+                    // backends apart, which is the whole point.
+                    if new_controller_id != client_id {
                         control_epoch = None;
+                        send_json(
+                            &mut socket,
+                            &json!({
+                                "type": "control_revoked",
+                                "to": new_controller_name,
+                                "client_id": new_controller_id,
+                            }),
+                        )
+                        .await;
                     }
+                }
+                Ok(SessionEvent::Resized { cols, rows }) => {
                     send_json(
                         &mut socket,
-                        &json!({
-                            "type": "control_revoked",
-                            "lost_by": event.lost_by,
-                            "new_controller_id": event.new_controller_id,
-                            "new_controller_name": event.new_controller_name,
-                        }),
+                        &json!({ "type": "resized", "cols": cols, "rows": rows }),
                     )
                     .await;
                 }
+                // A lagged receiver missed a notification; every later
+                // check re-reads authoritative state, so there is nothing
+                // to resync. A closed sender means teardown, which the
+                // other arms notice.
+                Err(_) => {}
             },
 
             message = socket.recv() => match message {
@@ -228,8 +255,23 @@ pub async fn run_anchor(proxy: Proxy) {
                     // mid-stream stops typing immediately.
                     let allowed = control_epoch
                         .is_some_and(|epoch| leases.is_controller(&session_id, &client_id, epoch));
-                    if allowed && attach.send_input(&bytes).await.is_err() {
-                        break;
+                    if allowed {
+                        if attach.send_input(&bytes).await.is_err() {
+                            break;
+                        }
+                    } else {
+                        // Told, not dropped silently: an observer whose
+                        // keystrokes vanish without explanation looks like
+                        // a broken terminal rather than a taken lease.
+                        send_json(
+                            &mut socket,
+                            &json!({
+                                "type": "error",
+                                "code": "not_controller",
+                                "message": "input rejected: observer mode",
+                            }),
+                        )
+                        .await;
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
@@ -321,7 +363,12 @@ async fn handle_control(
             }
             if let Err(e) = anchor.resize(session_id, cols, rows).await {
                 tracing::debug!(session_id = %session_id, error = %e, "resize rejected");
+                return true;
             }
+            // There is one effective size per session, so everyone attached
+            // is told — an observer that keeps rendering at the old width
+            // shows a wrapped, broken terminal.
+            leases.announce_resize(session_id, cols, rows);
         }
         ClientMessage::ClaimControl => {
             // Teleport's lease moves first; anchor's follows, so the client

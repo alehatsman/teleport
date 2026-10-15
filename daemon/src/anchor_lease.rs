@@ -29,15 +29,30 @@ use tokio::sync::broadcast;
 /// lagged badly enough that resyncing on its next frame is the right fix.
 const EVENT_CAPACITY: usize = 16;
 
-/// A lease change worth telling other connections about.
+/// Something every connection attached to a session should hear about.
+///
+/// Teleport's in-process path gets these from `Session`'s own event
+/// broadcast. On the anchor path there is no `Session`, so this registry —
+/// which already has a per-session channel for the lease — carries them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ControlRevoked {
-    /// The client that lost it, if anyone held it.
-    pub lost_by: Option<String>,
-    /// The client that holds it now.
-    pub new_controller_id: String,
-    /// That client's display name.
-    pub new_controller_name: String,
+pub enum SessionEvent {
+    /// The lease moved.
+    ControlRevoked {
+        /// The client that lost it, if anyone held it.
+        lost_by: Option<String>,
+        /// The client that holds it now.
+        new_controller_id: String,
+        /// That client's display name.
+        new_controller_name: String,
+    },
+    /// The PTY was resized. There is one effective size per session, so
+    /// every attached client needs it, not just the one that asked.
+    Resized {
+        /// The new width.
+        cols: u16,
+        /// The new height.
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -54,7 +69,7 @@ struct Lease {
 #[derive(Debug, Default)]
 pub struct LeaseRegistry {
     leases: Mutex<HashMap<String, Lease>>,
-    events: Mutex<HashMap<String, broadcast::Sender<ControlRevoked>>>,
+    events: Mutex<HashMap<String, broadcast::Sender<SessionEvent>>>,
 }
 
 impl LeaseRegistry {
@@ -65,7 +80,7 @@ impl LeaseRegistry {
 
     /// Subscribes to lease changes for one session, so a bystander learns
     /// who controls it now rather than finding out on its next reconnect.
-    pub fn subscribe(&self, session: &str) -> broadcast::Receiver<ControlRevoked> {
+    pub fn subscribe(&self, session: &str) -> broadcast::Receiver<SessionEvent> {
         let mut events = self.events.lock();
         events
             .entry(session.to_owned())
@@ -116,7 +131,7 @@ impl LeaseRegistry {
         if let Some(tx) = self.events.lock().get(session) {
             // A failure here means nobody is listening, which is not a
             // problem worth propagating.
-            drop(tx.send(ControlRevoked {
+            drop(tx.send(SessionEvent::ControlRevoked {
                 lost_by,
                 new_controller_id: client_id.to_owned(),
                 new_controller_name: client_name.to_owned(),
@@ -205,6 +220,13 @@ impl LeaseRegistry {
                 }
             }
         });
+    }
+
+    /// Tells every attached connection the PTY was resized.
+    pub fn announce_resize(&self, session: &str, cols: u16, rows: u16) {
+        if let Some(tx) = self.events.lock().get(session) {
+            drop(tx.send(SessionEvent::Resized { cols, rows }));
+        }
     }
 
     /// Forgets a session's lease and its subscribers. Called when a session
@@ -315,8 +337,13 @@ mod tests {
 
         registry.claim_control("s", "bob", "Bob");
         let event = events.try_recv().expect("a revocation was broadcast");
-        assert_eq!(event.lost_by.as_deref(), Some("alice"));
-        assert_eq!(event.new_controller_id, "bob");
-        assert_eq!(event.new_controller_name, "Bob");
+        assert_eq!(
+            event,
+            SessionEvent::ControlRevoked {
+                lost_by: Some("alice".to_owned()),
+                new_controller_id: "bob".to_owned(),
+                new_controller_name: "Bob".to_owned(),
+            }
+        );
     }
 }

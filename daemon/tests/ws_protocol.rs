@@ -697,10 +697,9 @@ async fn exit_frame_carries_the_final_offset() {
                 let value: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(value["type"], "exit");
                 assert_eq!(value["code"], 7);
-                let session = daemon.state.sessions.get(id).expect("session still listed");
                 assert_eq!(
                     value["final_offset"].as_u64().unwrap(),
-                    session.next_offset()
+                    support::session_offset(&daemon, id).await
                 );
                 break;
             }
