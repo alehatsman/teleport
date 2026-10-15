@@ -149,8 +149,16 @@ pub async fn upgrade(
     let control_grace_ms = state.config.control_grace_ms;
 
     if let Some(anchor) = anchor_path {
-        let leases = Arc::clone(&state.leases);
         let id = session_id.to_string();
+        // Checked before the upgrade, so an unknown session is a 404 on the
+        // HTTP response exactly as it is on the in-process path. Letting
+        // the upgrade succeed and reporting the error as a frame would be a
+        // difference a client can see — and the whole premise of the flag
+        // is that it cannot tell which backend it is talking to.
+        if anchor.get(&id).await.is_err() {
+            return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+        }
+        let leases = Arc::clone(&state.leases);
         return ws.on_upgrade(move |socket| {
             crate::ws_anchor::run_anchor(crate::ws_anchor::Proxy {
                 socket,
