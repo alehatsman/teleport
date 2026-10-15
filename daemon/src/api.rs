@@ -231,11 +231,9 @@ impl IntoResponse for ApiError {
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", msg),
-            ApiError::BackendUnavailable(msg) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "backend_unavailable",
-                msg,
-            ),
+            ApiError::BackendUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable", msg)
+            }
             // docs/04-api-protocol.md#post-apiv1sessions: 422 for a
             // resolvable-at-validation-time problem, 429 for max_sessions,
             // 500 for a spawn failure past that point. Never 404 -- the
@@ -873,9 +871,14 @@ struct SessionView {
 impl SessionView {
     /// A session anchord holds.
     ///
-    /// `controller` and `subscribers` are anchor's to know and teleport's
-    /// not to guess: the lease lives in teleport's own layer above anchor
-    /// for now, and subscriber counts are per-connection inside anchord.
+    /// `controller` and `subscribers` come from teleport's own lease
+    /// registry, not from anchord. Teleport's lease is what decides which
+    /// browser may type (`ws_anchor.rs`'s module doc: anchor's lease is
+    /// per-connection and only mirrors it), so teleport is the authority on
+    /// both — and `ready` already reports the controller this way
+    /// (`ws_anchor.rs:156`). Reporting `None`/`0` here while the WebSocket
+    /// said otherwise was not caution, it was two answers to one question.
+    ///
     /// The four derived fields come from `anchor_watch`, which follows the
     /// session's output the way the in-process reader does. `None` when no
     /// watcher has seen it yet — a session created moments ago, or one
@@ -883,6 +886,7 @@ impl SessionView {
     fn from_anchor(
         bridged: &anchor_bridge::BridgedSession,
         derived: Option<&crate::anchor_watch::Derived>,
+        leases: &crate::anchor_lease::LeaseRegistry,
     ) -> Self {
         let s = &bridged.session;
         SessionView {
@@ -905,12 +909,20 @@ impl SessionView {
             exited_at_ms: s.exited_at,
             exit_code: s.exit_code,
             lost_reason: s.lost_reason.clone(),
-            controller: None,
-            subscribers: 0,
+            controller: leases.controller_name(&s.id),
+            subscribers: leases.subscriber_count(&s.id),
             last_bell_ms: derived.and_then(|d| d.last_bell_ms),
             idle_since_ms: derived.and_then(|d| d.idle_since_ms(crate::now_ms())),
             title: derived.and_then(|d| d.title.clone()),
-            claude_resume_id: derived.and_then(|d| d.claude_resume_id.clone()),
+            // The label first, the watcher second. The label is authoritative
+            // and needs no watcher to have seen the session -- which is the
+            // point, since a resume id is most useful for a session that has
+            // already exited.
+            claude_resume_id: s
+                .labels
+                .get(crate::anchor_watch::LABEL_CLAUDE_RESUME_ID)
+                .cloned()
+                .or_else(|| derived.and_then(|d| d.claude_resume_id.clone())),
         }
     }
 
@@ -1016,7 +1028,11 @@ async fn list_sessions(
             .into_iter()
             .map(|s| {
                 let derived = state.watch.get(&s.id);
-                SessionView::from_anchor(&anchor_bridge::BridgedSession::new(s), derived.as_ref())
+                SessionView::from_anchor(
+                    &anchor_bridge::BridgedSession::new(s),
+                    derived.as_ref(),
+                    &state.leases,
+                )
             })
             .collect();
         views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
@@ -1062,6 +1078,7 @@ async fn get_session(
         return Ok(Json(SessionView::from_anchor(
             &anchor_bridge::BridgedSession::new(session),
             derived.as_ref(),
+            &state.leases,
         )));
     }
     if let Ok(session) = find_session(&state, &id) {
@@ -1143,7 +1160,21 @@ async fn delete_session(
             .purge(&id)
             .await
             .map_err(|e| anchor_bridge::api_error(&e))?;
+        // Both registries, not just the watch one: the lease registry holds a
+        // `Lease` and a `broadcast::Sender` per session, and a purge is the
+        // one point where teleport knows a session id will never be used
+        // again. Forgetting one and not the other leaked the pair for the
+        // life of the process.
         state.watch.forget(&id);
+        state.leases.forget(&id);
+        if let Some(db) = &state.db {
+            // A purge forgets the session everywhere, so its derived title
+            // goes too -- otherwise the row outlives the session it
+            // describes and nothing would ever clean it up.
+            if let Err(e) = db.forget_anchor_meta(&id).await {
+                tracing::warn!(session_id = %id, error = %e, "forgetting anchor metadata failed");
+            }
+        }
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -1626,15 +1657,48 @@ async fn create_ws_ticket(
     Json(req): Json<WsTicketRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
-    let session = find_session(&state, &req.session_id)?;
+    // Resolved against whichever backend owns sessions. Going straight to
+    // `find_session` would consult the in-process map, which is empty on the
+    // anchor path -- so every ticket 404'd for sessions that exist, and
+    // clients fell back to the `?token=` URL this route exists to avoid.
+    let id = resolve_ticket_session(&state, &req.session_id).await?;
     let ticket = state
         .ws_tickets
-        .issue(session.id)
+        .issue(id)
         .map_err(|e| ApiError::Internal(format!("reading OS CSPRNG for ticket: {e}")))?;
     Ok(Json(WsTicketResponse {
         ticket,
         expires_in: auth::TICKET_TTL.as_secs(),
     }))
+}
+
+/// The session a ws-ticket is being asked for, if it exists.
+///
+/// A ticket is scoped to one session, so the session has to exist -- there is
+/// no point handing out a ticket for an id nobody could attach to. Which
+/// backend answers that depends on the path, exactly as it does for
+/// `get_session`.
+///
+/// Only a live session counts, on either path: the ticket's whole purpose is
+/// the `/stream` upgrade, and an exited session that is only a SQLite row
+/// cannot be attached to. That is why this does not fall back to
+/// `historical_row` the way `get_session` does.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
+)]
+async fn resolve_ticket_session(state: &AppState, id: &str) -> Result<SessionId, ApiError> {
+    if let Some(anchor) = &state.anchor {
+        // The id still has to parse: the ticket store is keyed by
+        // `SessionId`, and both id spaces are ULIDs.
+        let parsed: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
+        anchor
+            .get(id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        return Ok(parsed);
+    }
+    find_session(state, id).map(|session| session.id)
 }
 
 #[expect(

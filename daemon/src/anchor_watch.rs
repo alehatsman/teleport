@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 
 use crate::anchor_bridge;
 use crate::anchor_client::{AnchorClient, AnchorFrame};
+use crate::persistence::Db;
 use crate::session::osc::{OscScanner, OscUpdate};
 
 /// How often the supervisor reconciles watchers against anchord's session
@@ -31,6 +32,23 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long a session must produce nothing before it counts as idle.
 const IDLE_THRESHOLD_MS: i64 = 30_000;
+
+/// Ceiling on how often a derived title reaches SQLite.
+///
+/// The same rate the in-process path uses, for the same reason: an agent
+/// re-emits its title on every prompt, so an unthrottled write would put a
+/// SQLite round-trip on a busy session's output path. Leading-edge, so the
+/// first title after a quiet second lands immediately rather than waiting
+/// out a window it may never survive.
+const TITLE_PERSIST_INTERVAL_MS: i64 = 1000;
+
+/// The label a `claude_resume_id` is stored under.
+///
+/// A label rather than a row: it is written once, in an agent's startup
+/// banner, so it survives a teleport restart for free and needs nothing kept
+/// in step. Anchor never interprets a label, and the `teleport.` prefix says
+/// whose opinion it is.
+pub const LABEL_CLAUDE_RESUME_ID: &str = "teleport.claude_resume_id";
 
 /// What teleport derives for one session from its own output.
 #[derive(Debug, Clone, Default)]
@@ -43,6 +61,9 @@ pub struct Derived {
     pub last_bell_ms: Option<i64>,
     /// When output last arrived, used to decide idleness.
     pub last_output_ms: i64,
+    /// When the title was last written through to SQLite. Throttling state,
+    /// not something the API serves.
+    pub title_persisted_ms: i64,
     /// One past the last byte this session's watcher has scanned.
     ///
     /// A watcher dropped for falling behind is restarted by the supervisor,
@@ -96,22 +117,55 @@ impl WatchRegistry {
 
 /// Starts the supervisor that keeps a watcher on every session teleport
 /// owns. Returns immediately; the work runs on the runtime.
-pub fn spawn_supervisor(anchor: AnchorClient, registry: Arc<WatchRegistry>, owner: String) {
+pub fn spawn_supervisor(
+    anchor: AnchorClient,
+    registry: Arc<WatchRegistry>,
+    owner: String,
+    db: Option<Db>,
+) {
     tokio::spawn(async move {
+        // Titles outlive the process that derived them, so a restart starts
+        // from what was stored rather than blank. Without this the fields
+        // the UI shows reset to null on every daemon restart -- which is
+        // exactly the bug this is here to fix.
+        if let Some(db) = &db {
+            match db.anchor_titles().await {
+                Ok(titles) => {
+                    for (id, title) in titles {
+                        registry.update(&id, |d| d.title = Some(title));
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "reloading anchor titles failed"),
+            }
+        }
         loop {
-            reconcile(&anchor, &registry, &owner).await;
+            reconcile(&anchor, &registry, &owner, db.as_ref()).await;
             tokio::time::sleep(RECONCILE_INTERVAL).await;
         }
     });
 }
 
 /// Starts a watcher for every running session that does not have one.
-async fn reconcile(anchor: &AnchorClient, registry: &Arc<WatchRegistry>, owner: &str) {
+async fn reconcile(
+    anchor: &AnchorClient,
+    registry: &Arc<WatchRegistry>,
+    owner: &str,
+    db: Option<&Db>,
+) {
     let Ok(sessions) = anchor.list(&anchor_bridge::owned_by(owner)).await else {
         return; // anchord is down or restarting; try again next tick
     };
 
     for session in sessions {
+        // A resume id is stored as a label, so it is readable without a
+        // watcher -- including for an exited session, which is precisely
+        // when it is useful.
+        if let Some(resume) = session.labels.get(LABEL_CLAUDE_RESUME_ID) {
+            registry.update(&session.id, |d| {
+                d.claude_resume_id = Some(resume.clone());
+            });
+        }
+
         // Only live sessions produce anything to derive. An exited one
         // keeps whatever was derived while it ran.
         if session.state != "running" && session.state != "closing" {
@@ -119,14 +173,29 @@ async fn reconcile(anchor: &AnchorClient, registry: &Arc<WatchRegistry>, owner: 
         }
         let fresh = registry.watched.lock().insert(session.id.clone());
         if fresh {
-            spawn_watcher(anchor.clone(), Arc::clone(registry), session.id.clone());
+            spawn_watcher(
+                anchor.clone(),
+                Arc::clone(registry),
+                session.id.clone(),
+                db.cloned(),
+            );
         }
     }
 }
 
 /// Follows one session's output, deriving signals from it until it ends.
-fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String) {
+fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String, db: Option<Db>) {
     tokio::spawn(async move {
+        // **Starting from 0 is load-bearing beyond the reason below.**
+        // Replaying a running session's whole log re-derives its title and
+        // resume id after a teleport restart, which is why a restart test
+        // against a *running* session passes even with persistence removed.
+        // Only an exited session — which never gets a watcher — actually
+        // depends on the stored copies. Anyone optimising this to start at
+        // the head must keep the persistence in `OscUpdate::Title` and the
+        // resume label: without them, running sessions would start losing
+        // their metadata too, and no existing test would say so.
+        //
         // From 0 the first time. The signals worth deriving are mostly
         // emitted at startup — an agent sets its title and prints its
         // resume link in its opening banner — and the supervisor cannot
@@ -161,12 +230,53 @@ fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String)
                     // Same reasoning as the in-process reader: this pass
                     // already touches every byte, so the scans ride along.
                     for update in scanner.feed(&bytes) {
-                        registry.update(&id, |d| match update {
-                            OscUpdate::Title(title) => d.title = Some(title),
-                            OscUpdate::ClaudeResumeId(resume) => {
-                                d.claude_resume_id = Some(resume);
+                        match update {
+                            OscUpdate::Title(title) => {
+                                // Written through on a leading-edge throttle.
+                                // Deciding here rather than in `persistence`
+                                // keeps the rate next to the thing that knows
+                                // how often titles arrive.
+                                let persist = registry.get(&id).is_none_or(|d| {
+                                    now - d.title_persisted_ms >= TITLE_PERSIST_INTERVAL_MS
+                                });
+                                registry.update(&id, |d| {
+                                    d.title = Some(title.clone());
+                                    if persist {
+                                        d.title_persisted_ms = now;
+                                    }
+                                });
+                                if persist {
+                                    if let Some(db) = &db {
+                                        if let Err(e) = db.note_anchor_title(&id, &title).await {
+                                            tracing::warn!(session_id = %id, error = %e, "persisting a title failed");
+                                        }
+                                    }
+                                }
                             }
-                        });
+                            OscUpdate::ClaudeResumeId(resume) => {
+                                // Already known means already labelled: an
+                                // agent re-printing its banner must not cost
+                                // a label write every time.
+                                let known = registry
+                                    .get(&id)
+                                    .is_some_and(|d| d.claude_resume_id.as_ref() == Some(&resume));
+                                registry.update(&id, |d| {
+                                    d.claude_resume_id = Some(resume.clone());
+                                });
+                                if !known {
+                                    let mut set = std::collections::BTreeMap::new();
+                                    drop(
+                                        set.insert(
+                                            LABEL_CLAUDE_RESUME_ID.to_owned(),
+                                            resume.clone(),
+                                        ),
+                                    );
+                                    if let Err(e) = anchor.label(&id, &set, &[]).await {
+                                        tracing::warn!(session_id = %id, error = %e, "labelling a resume id failed");
+                                    }
+                                }
+                            }
+                        }
                     }
                     if bytes.contains(&0x07) {
                         registry.update(&id, |d| d.last_bell_ms = Some(now));

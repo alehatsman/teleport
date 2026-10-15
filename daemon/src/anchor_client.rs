@@ -281,6 +281,15 @@ impl AnchorClient {
         check_ok(&response)?;
 
         Ok(AnchorAttach {
+            size: match (
+                response.get("cols").and_then(Value::as_u64),
+                response.get("rows").and_then(Value::as_u64),
+            ) {
+                // An older anchord does not send them; `None` means "ask
+                // elsewhere", not "zero by zero".
+                (Some(cols), Some(rows)) => u16::try_from(cols).ok().zip(u16::try_from(rows).ok()),
+                _ => None,
+            },
             has_control: response
                 .get("control")
                 .and_then(Value::as_bool)
@@ -321,6 +330,7 @@ impl AnchorClient {
 /// A live attachment: the frames anchor sends, and input back to the PTY.
 #[derive(Debug)]
 pub struct AnchorAttach {
+    size: Option<(u16, u16)>,
     has_control: bool,
     next_offset: u64,
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -355,6 +365,17 @@ pub enum AnchorFrame {
         /// Whether this connection now holds it.
         held: bool,
     },
+    /// The PTY's size changed. Carries the size **actually applied** —
+    /// after anchor's clamping and coalescing — not the size anyone asked
+    /// for. Sent to every attached client including the one that asked, so
+    /// a client that requested 5000 and got 1000 learns the truth rather
+    /// than rendering its own request back.
+    Resized {
+        /// The width now in effect.
+        cols: u16,
+        /// The height now in effect.
+        rows: u16,
+    },
 }
 
 impl AnchorAttach {
@@ -373,6 +394,16 @@ impl AnchorAttach {
     /// The session's authoritative offset when the attach was answered.
     pub fn next_offset(&self) -> u64 {
         self.next_offset
+    }
+
+    /// The PTY's size when the attach was answered.
+    ///
+    /// Taken from the attach reply rather than a `get`, so a client starts
+    /// from the real size instead of waiting for a `Resized` frame that a
+    /// session nobody resizes will never send. `None` against an anchord
+    /// too old to report it.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        self.size
     }
 
     /// Reads until `pending` holds at least `want` bytes. `false` means the
@@ -455,6 +486,24 @@ impl AnchorAttach {
             },
             frame::LEASE => AnchorFrame::Lease {
                 held: payload.first() == Some(&1),
+            },
+            // Two u16s big-endian. A short payload is a daemon speaking a
+            // dialect this build does not know, which is skipped rather
+            // than guessed at — the same reasoning as an unknown tag.
+            frame::RESIZE => match (
+                payload.get(..2).and_then(|b| <[u8; 2]>::try_from(b).ok()),
+                payload.get(2..4).and_then(|b| <[u8; 2]>::try_from(b).ok()),
+            ) {
+                (Some(cols), Some(rows)) => AnchorFrame::Resized {
+                    cols: u16::from_be_bytes(cols),
+                    rows: u16::from_be_bytes(rows),
+                },
+                _ => {
+                    return Ok(Some(AnchorFrame::Output {
+                        offset,
+                        bytes: Vec::new(),
+                    }))
+                }
             },
             // An unknown tag is a newer daemon, not a broken one: skipping
             // it keeps an older teleport working against it.

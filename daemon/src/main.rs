@@ -250,6 +250,7 @@ async fn main() -> Result<()> {
             client.clone(),
             Arc::clone(&watch),
             config.anchor_owner.clone(),
+            Some(db.clone()),
         );
     }
 

@@ -637,3 +637,68 @@ fn urlencode(s: &str) -> String {
         })
         .collect()
 }
+
+/// The in-process half of the ws-ticket route.
+///
+/// The route had no test on either path, which is how it came to be broken on
+/// the anchor path without anyone noticing (#100). This pins the behaviour
+/// the anchor branch now has to match: a ticket for a live session, a 404 for
+/// an id nobody knows, and the same 404 for a malformed one.
+#[tokio::test]
+async fn a_ws_ticket_is_issued_for_a_live_session() {
+    let daemon = support::spawn(support::default_config()).await;
+    let (status, created) = request(
+        &daemon,
+        post_json(
+            "/api/v1/sessions",
+            Some(support::TOKEN),
+            &json!({
+                "kind": "shell",
+                "command": "/bin/sh",
+                "args": ["-c", "sleep 30"],
+                "cwd": std::env::temp_dir().to_string_lossy(),
+                "cols": 80,
+                "rows": 24,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "could not create: {created}");
+    let id = created["id"].as_str().expect("an id").to_owned();
+
+    let (status, body) = request(
+        &daemon,
+        post_json(
+            "/api/v1/ws-ticket",
+            Some(support::TOKEN),
+            &json!({ "session_id": id }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the ticket was refused: {body}");
+    assert!(
+        body["ticket"].as_str().is_some_and(|t| !t.is_empty()),
+        "no ticket in {body}"
+    );
+    assert!(
+        body["expires_in"].as_u64().is_some_and(|s| s > 0),
+        "no TTL in {body}"
+    );
+
+    for unknown in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "not-a-ulid"] {
+        let (status, _) = request(
+            &daemon,
+            post_json(
+                "/api/v1/ws-ticket",
+                Some(support::TOKEN),
+                &json!({ "session_id": unknown }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{unknown} should not get a ticket"
+        );
+    }
+}

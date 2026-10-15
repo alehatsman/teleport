@@ -64,6 +64,7 @@
 //! `log.rs`'s standalone `LogReader::open` for its log, rather than this
 //! module reconstructing a fake live session.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -285,6 +286,23 @@ enum Command {
     },
     RemovePin {
         path: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Upsert one anchor-hosted session's derived title.
+    NoteAnchorTitle {
+        session_id: String,
+        title: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Every stored anchor title, by session id. Read whole: the list view
+    /// needs all of them at once, and one query beats one per session.
+    AnchorTitles {
+        reply: oneshot::Sender<Result<HashMap<String, String>>>,
+    },
+    /// Drop one anchor session's derived metadata, on purge.
+    ForgetAnchorMeta {
+        session_id: String,
         reply: oneshot::Sender<Result<()>>,
     },
 }
@@ -581,6 +599,35 @@ impl Db {
         })
         .await
     }
+
+    /// Records the latest derived title for a session anchord owns.
+    ///
+    /// Throttled by the caller, not here: `anchor_watch` already knows how
+    /// often it is seeing titles and this layer does not.
+    pub async fn note_anchor_title(&self, session_id: &str, title: &str) -> Result<()> {
+        self.call(|reply| Command::NoteAnchorTitle {
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+            now_ms: now_ms(),
+            reply,
+        })
+        .await
+    }
+
+    /// Every stored anchor title, by session id.
+    pub async fn anchor_titles(&self) -> Result<HashMap<String, String>> {
+        self.call(|reply| Command::AnchorTitles { reply }).await
+    }
+
+    /// Forgets one anchor session's derived metadata. Called on purge, so a
+    /// forgotten session does not leave a title behind.
+    pub async fn forget_anchor_meta(&self, session_id: &str) -> Result<()> {
+        self.call(|reply| Command::ForgetAnchorMeta {
+            session_id: session_id.to_string(),
+            reply,
+        })
+        .await
+    }
 }
 
 /// Passkey login (docs/17-passkey-login.md). A separate `impl` block from
@@ -765,6 +812,7 @@ const MIGRATIONS: &[&str] = &[
     SCHEMA_V2,
     crate::auth_store::SCHEMA_V3,
     SCHEMA_V4,
+    SCHEMA_V5,
 ];
 
 const SCHEMA_V1: &str = r"
@@ -827,6 +875,31 @@ const SCHEMA_V4: &str = r"
 CREATE TABLE IF NOT EXISTS pinned_locations (
     path            TEXT PRIMARY KEY,
     pinned_at_ms    INTEGER NOT NULL
+);
+";
+
+/// Derived metadata for a session **anchord** owns
+/// (docs/20-retiring-the-in-process-pty.md, gap 2).
+///
+/// Its own table rather than a `sessions` row: teleport writes no session
+/// rows on the anchor path -- anchord is the source of truth for a session's
+/// existence -- and inventing half a row to hang a title off would create a
+/// second answer to "does this session exist".
+///
+/// Deliberately no foreign key, for the same reason `pinned_locations` has
+/// none: the thing being referenced lives in another process's database.
+///
+/// **Title only.** A `claude_resume_id` is written once, in an agent's
+/// startup banner, so it rides as an anchor label instead and survives a
+/// teleport restart with nothing to keep in step. A title is re-emitted on
+/// every prompt, and labels have no rate protection -- every label write is a
+/// SQLite write on anchor's side -- so the chatty field is the one that stays
+/// local.
+const SCHEMA_V5: &str = r"
+CREATE TABLE IF NOT EXISTS anchor_session_meta (
+    session_id      TEXT PRIMARY KEY,
+    title           TEXT,
+    updated_at_ms   INTEGER NOT NULL
 );
 ";
 
@@ -1195,8 +1268,68 @@ fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
                 )]
                 let _ = reply.send(remove_pin(conn, &path));
             }
+            Command::NoteAnchorTitle {
+                session_id,
+                title,
+                now_ms,
+                reply,
+            } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(note_anchor_title(conn, &session_id, &title, now_ms));
+            }
+            Command::AnchorTitles { reply } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(anchor_titles(conn));
+            }
+            Command::ForgetAnchorMeta { session_id, reply } => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
+                )]
+                let _ = reply.send(forget_anchor_meta(conn, &session_id));
+            }
         }
     }
+}
+
+/// Upsert, because a title is re-emitted constantly and only the latest
+/// matters -- there is no history worth keeping here, only a current value.
+fn note_anchor_title(conn: &Connection, id: &str, title: &str, now_ms: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO anchor_session_meta (session_id, title, updated_at_ms)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET title = ?2, updated_at_ms = ?3",
+        params![id, title, now_ms],
+    )?;
+    Ok(())
+}
+
+fn anchor_titles(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt =
+        conn.prepare("SELECT session_id, title FROM anchor_session_meta WHERE title IS NOT NULL")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, title) = row?;
+        drop(out.insert(id, title));
+    }
+    Ok(out)
+}
+
+fn forget_anchor_meta(conn: &Connection, id: &str) -> Result<()> {
+    // The row count is not interesting: forgetting a session that never had
+    // a title is a no-op, not a failure.
+    conn.execute(
+        "DELETE FROM anchor_session_meta WHERE session_id = ?1",
+        params![id],
+    )?;
+    Ok(())
 }
 
 /// The fire-and-forget half of [`writer_loop`]: nobody is waiting on a

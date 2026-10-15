@@ -150,8 +150,12 @@ pub async fn run_anchor(proxy: Proxy) {
             "next_offset": attach.next_offset(),
             "truncated": truncated,
             "log_capped_at": session.log_capped_at,
-            "cols": session.cols,
-            "rows": session.rows,
+            // The attach reply's size, not the earlier `get`'s: the attach
+            // is the later observation, and between the two the session may
+            // have been resized by someone else. Falls back to `get` against
+            // an anchord too old to report it in the reply.
+            "cols": attach.size().map_or(session.cols, |(cols, _)| cols),
+            "rows": attach.size().map_or(session.rows, |(_, rows)| rows),
             "control": control_epoch.is_some(),
             "controller": leases.controller_name(&session_id),
         }),
@@ -194,6 +198,25 @@ pub async fn run_anchor(proxy: Proxy) {
                     // Anchor's lease moved. Teleport's is authoritative for
                     // who may type, so this only keeps the handle honest.
                     attach.set_control(held);
+                }
+                Ok(Some(AnchorFrame::Resized { cols, rows })) => {
+                    // The size anchor actually applied, which is not
+                    // necessarily the size anyone asked for -- it survives
+                    // clamping and coalescing first. Forwarded to this
+                    // browser even when this browser is what caused it: a
+                    // client that asked for 5000 and got 1000 must render
+                    // 1000, and `resized` is the only thing that says so.
+                    //
+                    // This is also the only way teleport hears about a
+                    // resize by a *different* anchord client -- an `anchor`
+                    // CLI, or another teleport -- which it otherwise could
+                    // not observe at all, since geometry is not in the
+                    // output bytes.
+                    send_json(
+                        &mut socket,
+                        &json!({ "type": "resized", "cols": cols, "rows": rows }),
+                    )
+                    .await;
                 }
                 // The stream ended without an exit: anchor dropped this
                 // subscriber for falling behind. Closing is the signal to
@@ -251,18 +274,16 @@ pub async fn run_anchor(proxy: Proxy) {
                         .await;
                     }
                 }
-                Ok(SessionEvent::Resized { cols, rows }) => {
-                    send_json(
-                        &mut socket,
-                        &json!({ "type": "resized", "cols": cols, "rows": rows }),
-                    )
-                    .await;
-                }
-                // A lagged receiver missed a notification; every later
-                // check re-reads authoritative state, so there is nothing
-                // to resync. A closed sender means teardown, which the
-                // other arms notice.
-                Err(_) => {}
+                // `Resized`: nothing announces one through the lease
+                // registry on this path any more — anchor's own frame does
+                // it, with the applied size rather than the requested one.
+                // The variant stays because `ws.rs` still uses it.
+                //
+                // `Err`: a lagged receiver missed a notification; every
+                // later check re-reads authoritative state, so there is
+                // nothing to resync. A closed sender means teardown, which
+                // the other arms notice.
+                Ok(SessionEvent::Resized { .. }) | Err(_) => {}
             },
 
             message = socket.recv() => match message {
@@ -379,10 +400,13 @@ async fn handle_control(
                 tracing::debug!(session_id = %session_id, error = %e, "resize rejected");
                 return true;
             }
-            // There is one effective size per session, so everyone attached
-            // is told — an observer that keeps rendering at the old width
-            // shows a wrapped, broken terminal.
-            leases.announce_resize(session_id, cols, rows);
+            // Deliberately no local announce. Anchor sends a `resize` frame
+            // to every attached connection, this one included, carrying the
+            // size it *applied* — after clamping and coalescing. Teleport
+            // broadcasting its own would race that frame and carry the
+            // requested size instead, so a client asking for 5000 would be
+            // told 5000 and then 1000. The authoritative one wins by being
+            // the only one.
         }
         ClientMessage::ClaimControl => {
             // Teleport's lease moves first; anchor's follows, so the client

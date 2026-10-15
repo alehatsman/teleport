@@ -217,6 +217,24 @@ impl LeaseRegistry {
             .and_then(|l| l.holder_name.clone())
     }
 
+    /// How many of **teleport's** clients are attached to `session`.
+    ///
+    /// Every proxied connection subscribes for lease events and drops its
+    /// receiver when the socket ends, so the receiver count is the live
+    /// attachment count without a second thing to keep in step.
+    ///
+    /// Deliberately not the same question anchord would answer. A `anchor`
+    /// CLI attached straight to anchord is a subscriber *there* and invisible
+    /// here — teleport reports the clients it is serving, which is what its
+    /// own `subscribers` field has always meant.
+    #[must_use]
+    pub fn subscriber_count(&self, session: &str) -> usize {
+        self.events
+            .lock()
+            .get(session)
+            .map_or(0, broadcast::Sender::receiver_count)
+    }
+
     /// Starts `client_id`'s disconnect grace window, if that connection
     /// still holds the lease as its socket ends.
     ///
@@ -278,6 +296,17 @@ impl LeaseRegistry {
     pub fn forget(&self, session: &str) {
         drop(self.leases.lock().remove(session));
         drop(self.events.lock().remove(session));
+    }
+
+    /// Whether this registry still holds anything for `session`.
+    ///
+    /// Exists so a test can assert a purge actually released it. The call
+    /// that does the releasing is in `api.rs`'s delete handler, not here, so
+    /// a unit test of [`forget`](Self::forget) would prove the wrong half —
+    /// it was the missing call site, not the function, that leaked.
+    #[must_use]
+    pub fn is_tracking(&self, session: &str) -> bool {
+        self.leases.lock().contains_key(session) || self.events.lock().contains_key(session)
     }
 }
 

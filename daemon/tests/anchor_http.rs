@@ -616,10 +616,14 @@ async fn an_agent_survives_teleport_restarting_under_it() {
     // is about a session that really ran rather than one that merely exists.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (status, bytes) =
-            request(&before, authed("GET", &format!("/api/v1/sessions/{id}/log"))).await;
+        let (status, bytes) = request(
+            &before,
+            authed("GET", &format!("/api/v1/sessions/{id}/log")),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        if bytes.windows(12).any(|w| w == b"agent-is-up\n") || bytes.windows(11).any(|w| w == b"agent-is-up")
+        if bytes.windows(12).any(|w| w == b"agent-is-up\n")
+            || bytes.windows(11).any(|w| w == b"agent-is-up")
         {
             break;
         }
@@ -772,4 +776,225 @@ async fn a_log_past_one_response_cap_is_assembled_from_several() {
          paging loop exists to get past",
         body.len()
     );
+}
+
+/// A ws-ticket is issued for a session anchord owns.
+///
+/// The route trades the long-lived bearer token for a short-lived one scoped
+/// to a single session, so the real credential never rides in a `stream.ts`
+/// reconnect URL (docs/06-security.md mitigation 2). It resolved the session
+/// through the in-process map, which is empty on the anchor path — so every
+/// request 404'd for sessions that plainly exist, and clients were pushed
+/// back onto `?token=`, silently losing the mitigation (#100).
+///
+/// A mitigation that is off is worse than one that was never there, so this
+/// asserts the ticket is issued *and* that an unknown id is still refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ws_ticket_is_issued_for_a_session_in_anchord() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("wsticket");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+
+    let (status, body) =
+        post_json(&daemon, "/api/v1/ws-ticket", &json!({ "session_id": id })).await;
+    assert_eq!(status, StatusCode::OK, "the ticket was refused: {body}");
+    assert!(
+        body["ticket"].as_str().is_some_and(|t| !t.is_empty()),
+        "no ticket in {body}"
+    );
+    assert!(
+        body["expires_in"].as_u64().is_some_and(|s| s > 0),
+        "no TTL in {body}"
+    );
+
+    // A well-formed id nobody knows is still a 404: the ticket is scoped to a
+    // session, so one that does not exist must not get a credential.
+    let (status, _) = post_json(
+        &daemon,
+        "/api/v1/ws-ticket",
+        &json!({ "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "an unknown id got a ticket");
+
+    // A malformed id is the same 404, not a 500.
+    let (status, _) = post_json(
+        &daemon,
+        "/api/v1/ws-ticket",
+        &json!({ "session_id": "not-a-ulid" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a malformed id was not a 404"
+    );
+}
+
+/// Purging a session releases its lease, not just its derived signals.
+///
+/// `LeaseRegistry::forget` existed and documented exactly this, but nothing
+/// called it: the delete handler forgot the watch entry and left the `Lease`
+/// and its `broadcast::Sender` behind for the life of the process (#101).
+/// Create-and-purge is the normal workload, so it grew without bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn purging_a_session_releases_its_lease() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("leasepurge");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+
+    // Claiming is what puts the session in the registry; a session nobody
+    // ever controlled would pass this test without the fix.
+    daemon.state.leases.claim_control(&id, "browser-a", "A");
+    assert!(
+        daemon.state.leases.is_tracking(&id),
+        "the claim did not register"
+    );
+
+    let (status, _) = request(
+        &daemon,
+        authed("DELETE", &format!("/api/v1/sessions/{id}?purge=true")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        !daemon.state.leases.is_tracking(&id),
+        "the purged session's lease and event channel are still held"
+    );
+}
+
+/// Derived agent metadata survives teleport restarting, for a session that
+/// has **exited**.
+///
+/// On the anchor path `title` and `claude_resume_id` lived only in
+/// `WatchRegistry` memory. A *running* session hides that: the new teleport
+/// starts a watcher from offset 0 and re-derives both from the replayed log,
+/// so it recovers without any persistence at all. An exited session gets no
+/// watcher (`anchor_watch::reconcile` skips anything not running or closing),
+/// so nothing re-derives and both fields come back null.
+///
+/// That is the case `api.rs`'s own comment is about: "a resume id is only
+/// ever useful once the session that had it is gone, and the usual way it
+/// goes is the daemon restarting under it." A test against a running session
+/// passes either way and proves nothing -- it was written that way first.
+///
+/// The two are stored differently and this asserts both survive. The title
+/// goes to teleport's SQLite (chatty, re-emitted every prompt); the resume id
+/// becomes an anchor label (written once, in a startup banner).
+#[tokio::test(flavor = "multi_thread")]
+async fn derived_agent_metadata_survives_a_teleport_restart() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("metasurvive");
+    anchord.ready().await;
+    let dir = PathBuf::from(format!("/tmp/tp-meta-{}", std::process::id()));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a previous run"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("creating the state dir");
+    let (db, _guard) =
+        teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
+            .expect("open test db");
+
+    // An agent that sets a terminal title and prints a resume link, the way
+    // a real one does in its opening banner.
+    let before =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+    let (status, created) = post_json(
+        &before,
+        "/api/v1/sessions",
+        &json!({
+            "kind": "agent",
+            "command": "/bin/sh",
+            "args": [
+                "-c",
+                "stty raw -echo; \
+                 printf '\\033]0;Fixing the parser\\007'; \
+                 printf '\\033]8;id=gq2qz2;https://claude.ai/code/session_013YMNvvZ2U1fUjQsxAbqRjj?from=cli\\007'; \
+                 sleep 2",
+            ],
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created}");
+    let id = created["id"].as_str().expect("a session id").to_string();
+
+    // Wait for the watcher to derive both before restarting; asserting on a
+    // restart that happened before anything was derived proves nothing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
+        if view["title"] == "Fixing the parser" && !view["claude_resume_id"].is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first teleport never derived them: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Let it exit. An exited session is the one that loses its metadata,
+    // because nothing re-derives it after a restart.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
+        if view["state"] == "exited" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the agent never exited: {view}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Ship a release: teleport goes away, the record does not.
+    drop(before);
+
+    // The new teleport. Same anchord, same SQLite, no in-memory state.
+    let after =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let view = loop {
+        let (_, view) = get_json(&after, &format!("/api/v1/sessions/{id}")).await;
+        if !view["title"].is_null() && !view["claude_resume_id"].is_null() {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "metadata did not survive the restart: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        view["title"], "Fixing the parser",
+        "the title did not survive: {view}"
+    );
+    assert_eq!(
+        view["claude_resume_id"], "session_013YMNvvZ2U1fUjQsxAbqRjj",
+        "the resume id did not survive: {view}"
+    );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort teardown of the test's state dir"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
 }
