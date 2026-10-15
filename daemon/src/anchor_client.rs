@@ -208,6 +208,17 @@ impl AnchorClient {
             .map(|_| ())
     }
 
+    /// Forgets a session entirely: its row, its labels and its output log.
+    ///
+    /// Anchor refuses this while the session is still running, so a caller
+    /// terminates first. `terminate` then `purge` is the sequence teleport's
+    /// `DELETE ?purge=true` maps onto.
+    pub async fn purge(&self, id: &str) -> Result<()> {
+        self.call("purge", json!({ "session": id }))
+            .await
+            .map(|_| ())
+    }
+
     /// Reads a range of a session's output log.
     pub async fn log(&self, id: &str, from: u64, max: u64) -> Result<AnchorLogRange> {
         let response = self

@@ -777,6 +777,45 @@ struct SessionView {
 }
 
 impl SessionView {
+    /// A session anchord holds.
+    ///
+    /// `controller` and `subscribers` are anchor's to know and teleport's
+    /// not to guess: the lease lives in teleport's own layer above anchor
+    /// for now, and subscriber counts are per-connection inside anchord.
+    /// The four derived fields (`title`, `claude_resume_id`, `last_bell_ms`,
+    /// `idle_since_ms`) come from scanning the output stream, which lands
+    /// with the ws proxy — `None` until then rather than invented here.
+    fn from_anchor(bridged: &anchor_bridge::BridgedSession) -> Self {
+        let s = &bridged.session;
+        SessionView {
+            id: s.id.clone(),
+            kind: bridged.kind(),
+            preset: bridged.preset(),
+            command: s.command.clone(),
+            args: s.args.clone(),
+            cwd: s.cwd.display().to_string(),
+            state: s.state.clone(),
+            pid: s.pid,
+            cols: s.cols,
+            rows: s.rows,
+            output_bytes: s.output_bytes,
+            created_at_ms: s.created_at,
+            // Anchor records creation, not a separate start: the row exists
+            // before the child can emit a byte, so the two are the same
+            // instant to any observer.
+            started_at_ms: Some(s.created_at),
+            exited_at_ms: s.exited_at,
+            exit_code: s.exit_code,
+            lost_reason: s.lost_reason.clone(),
+            controller: None,
+            subscribers: 0,
+            last_bell_ms: None,
+            idle_since_ms: None,
+            title: None,
+            claude_resume_id: None,
+        }
+    }
+
     fn from(session: &crate::session::Session) -> Self {
         let (cols, rows) = session.size();
         SessionView {
@@ -859,6 +898,27 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
 ) -> impl IntoResponse {
+    // On the anchor path anchord is the source of truth, and its own list
+    // already folds live sessions over stored rows. Teleport's SQLite rows
+    // are deliberately not merged in: they describe sessions from the
+    // in-process era that no longer exist anywhere, and showing entries a
+    // client cannot open is worse than not showing them.
+    if let Some(anchor) = &state.anchor {
+        let sessions = match anchor.list(&std::collections::BTreeMap::new()).await {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::warn!(error = %e, "listing sessions from anchord failed");
+                Vec::new()
+            }
+        };
+        let mut views: Vec<SessionView> = sessions
+            .into_iter()
+            .map(|s| SessionView::from_anchor(&anchor_bridge::BridgedSession::new(s)))
+            .collect();
+        views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
+        return Json(serde_json::json!({ "sessions": views }));
+    }
+
     let live = state.sessions.list();
     let live_ids: std::collections::HashSet<SessionId> = live.iter().map(|s| s.id).collect();
     let mut views: Vec<SessionView> = live.iter().map(|s| SessionView::from(s)).collect();
@@ -889,6 +949,15 @@ async fn get_session(
     _principal: Principal,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(anchor) = &state.anchor {
+        let session = anchor
+            .get(&id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        return Ok(Json(SessionView::from_anchor(
+            &anchor_bridge::BridgedSession::new(session),
+        )));
+    }
     if let Ok(session) = find_session(&state, &id) {
         return Ok(Json(SessionView::from(&session)));
     }
@@ -951,6 +1020,26 @@ async fn delete_session(
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
+
+    // anchord owns the session, its row and its log, so both halves are
+    // control requests. Terminate is idempotent there, and purge refuses a
+    // session that is still running — so purge terminates first and waits,
+    // which is what the in-process path below does too.
+    if let Some(anchor) = &state.anchor {
+        anchor
+            .terminate(&id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        if !q.purge {
+            return Ok(StatusCode::ACCEPTED);
+        }
+        anchor
+            .purge(&id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     let Ok(session) = find_session(&state, &id) else {
         let row = historical_row(&state, &id).await?;
         if q.purge {
@@ -1035,6 +1124,36 @@ async fn get_log(
     Query(q): Query<LogQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
+    // anchord owns the log, so the range is read over the socket. Its `log`
+    // op caps one response at 4 MiB whatever is asked for, so a wider range
+    // is assembled from several — the same bytes, just not in one reply.
+    if let Some(anchor) = &state.anchor {
+        let session = anchor
+            .get(&id)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        let end = session.output_bytes;
+        let (from, to) = requested_range(&q, &headers, end);
+
+        let mut bytes = Vec::new();
+        let mut cursor = from;
+        while cursor < to {
+            let range = anchor
+                .log(&id, cursor, to - cursor)
+                .await
+                .map_err(|e| anchor_bridge::api_error(&e))?;
+            if range.bytes.is_empty() {
+                // Short of the requested end: the log is capped there, or
+                // the file is shorter than the row claims. Either way there
+                // is nothing more to send, and stopping beats looping.
+                break;
+            }
+            cursor += range.bytes.len() as u64;
+            bytes.extend_from_slice(&range.bytes);
+        }
+        return Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes));
+    }
+
     let (end, mut reader) = if let Ok(session) = find_session(&state, &id) {
         (
             session.next_offset(),
@@ -1065,6 +1184,21 @@ async fn get_log(
         (row.output_bytes, reader)
     };
 
+    let (from, to) = requested_range(&q, &headers, end);
+
+    let bytes = reader
+        .read_range(from, to)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
+}
+
+/// Which byte range this request asks for: explicit query parameters, then
+/// a `Range` header, then the whole log. Clamped to what exists.
+///
+/// Shared by the in-process and anchor paths so the two cannot drift on
+/// something a client would notice.
+fn requested_range(q: &LogQuery, headers: &HeaderMap, end: u64) -> (u64, u64) {
     let (from, to) = if q.from.is_some() || q.to.is_some() {
         (q.from.unwrap_or(0), q.to.unwrap_or(end))
     } else if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
@@ -1073,13 +1207,7 @@ async fn get_log(
         (0, end)
     };
     let to = to.min(end);
-    let from = from.min(to);
-
-    let bytes = reader
-        .read_range(from, to)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
+    (from.min(to), to)
 }
 
 /// Parses a single `bytes=start-end` range (the only form this endpoint
