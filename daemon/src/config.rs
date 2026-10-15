@@ -51,6 +51,7 @@ struct ConfigFile {
     log_max_bytes: Option<u64>,
     retain_days: Option<u64>,
     use_anchor: Option<bool>,
+    anchor_owner: Option<String>,
     anchor_socket: Option<PathBuf>,
 }
 
@@ -104,6 +105,18 @@ pub struct Config {
     /// point of the extraction — it is what lets teleport ship a release
     /// while agents keep running — but it is not flipped by being written.
     pub use_anchor: bool,
+    /// Which sessions in `anchord` are this teleport's.
+    ///
+    /// anchord is shared by design — teleport and workmanager both drive it
+    /// — so teleport lists and counts only sessions carrying this owner.
+    /// Another tool's sessions are visible to anyone who asks anchord
+    /// directly, but they are not teleport's to show or to count against
+    /// its own `max_sessions`.
+    ///
+    /// Stable across restarts on purpose: a value derived per process would
+    /// orphan teleport's own sessions on every restart, which is the exact
+    /// thing running on anchor is meant to prevent.
+    pub anchor_owner: String,
     /// Where `anchord` listens. Unset uses anchor's own resolution:
     /// `$XDG_RUNTIME_DIR/anchor.sock`, falling back to
     /// `$XDG_DATA_HOME/anchor/anchor.sock`.
@@ -125,6 +138,7 @@ impl Default for Config {
             log_max_bytes: DEFAULT_LOG_MAX_BYTES,
             retain_days: DEFAULT_RETAIN_DAYS,
             use_anchor: false,
+            anchor_owner: "teleport".to_string(),
             anchor_socket: None,
         }
     }
@@ -157,6 +171,7 @@ impl Config {
             log_max_bytes: file.log_max_bytes.unwrap_or(defaults.log_max_bytes),
             retain_days: file.retain_days.unwrap_or(defaults.retain_days),
             use_anchor: file.use_anchor.unwrap_or(defaults.use_anchor),
+            anchor_owner: file.anchor_owner.unwrap_or(defaults.anchor_owner),
             anchor_socket: file.anchor_socket.or(defaults.anchor_socket),
         })
     }

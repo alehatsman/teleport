@@ -599,7 +599,7 @@ async fn health(
         // health is what a supervisor decides to restart on.
         body["sessions_running"] = match &state.anchor {
             Some(anchor) => anchor
-                .list(&std::collections::BTreeMap::new())
+                .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
                 .await
                 .map(|sessions| sessions.iter().filter(|s| s.state == "running").count())
                 .unwrap_or_default()
@@ -693,7 +693,7 @@ async fn create_session(
         // that would need a reservation protocol for a cap whose job is
         // stopping runaway loops, not arbitrating a photo finish.
         let live = anchor
-            .list(&std::collections::BTreeMap::new())
+            .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
             .await
             .map_err(|e| anchor_bridge::api_error(&e))?
             .into_iter()
@@ -705,7 +705,8 @@ async fn create_session(
             )));
         }
 
-        let labels = anchor_bridge::labels_for(&kind, preset_id.as_deref());
+        let labels =
+            anchor_bridge::labels_for(&state.config.anchor_owner, &kind, preset_id.as_deref());
         let spec = anchor_bridge::spec_for(command, args, cwd, env, cols, rows, login_shell);
         let id = anchor
             .create(&spec, &labels)
@@ -941,7 +942,10 @@ async fn list_sessions(
     // in-process era that no longer exist anywhere, and showing entries a
     // client cannot open is worse than not showing them.
     if let Some(anchor) = &state.anchor {
-        let sessions = match anchor.list(&std::collections::BTreeMap::new()).await {
+        let sessions = match anchor
+            .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
+            .await
+        {
             Ok(sessions) => sessions,
             Err(e) => {
                 tracing::warn!(error = %e, "listing sessions from anchord failed");

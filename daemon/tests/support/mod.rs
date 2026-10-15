@@ -138,17 +138,42 @@ pub(crate) struct Daemon {
     pub addr: std::net::SocketAddr,
     pub state: Arc<AppState>,
     server: JoinHandle<()>,
-    /// The `anchord` this daemon's sessions live in, when the suite is run
-    /// against the anchor path. Killed with the daemon.
-    _anchord: Option<Anchord>,
 }
 
-/// An `anchord` started for one fixture.
+/// A distinct owner per fixture, so one fixture's sessions are invisible to
+/// another's list and uncounted by its `max_sessions`.
+fn next_owner_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The one `anchord` this test binary shares.
 ///
-/// Exists so the whole suite can be pointed at the anchor path with an env
-/// var rather than forking every fixture: that is the only honest way to
-/// check anchor's M4 exit criterion, which is teleport's *own* tests
-/// passing against it.
+/// One per binary, not one per fixture: a daemon per fixture meant dozens
+/// of processes with four threads per live session, and creates began
+/// failing under that load — a harness that cannot hold still is no way to
+/// judge a product. Fixtures stay isolated by owning their sessions under a
+/// unique `anchor_owner`, which is the same mechanism that keeps two real
+/// tools sharing one daemon out of each other's lists.
+///
+/// Never dropped: a `static` lives for the process, so the daemon outlives
+/// every fixture in the binary and its directory is cleaned up by the OS.
+static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new();
+
+/// The shared daemon's socket, or `None` when not running on anchor.
+pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
+    SHARED
+        .get_or_init(|| {
+            let anchord = Anchord::start_if_requested()?;
+            anchord.wait_ready();
+            Some(anchord)
+        })
+        .as_ref()
+        .map(Anchord::socket)
+}
+
+/// An `anchord` the suite drives, so teleport's own tests can run against
+/// the anchor path rather than a suite written to agree with it.
 pub(crate) struct Anchord {
     child: std::process::Child,
     dir: PathBuf,
@@ -305,21 +330,20 @@ pub(crate) async fn spawn_on_anchor(
 }
 
 async fn spawn_inner(
-    config: Config,
+    mut config: Config,
     web: WebAssets,
     db: Option<teleportd::persistence::Db>,
     anchor: Option<teleportd::anchor_client::AnchorClient>,
 ) -> Daemon {
-    // When the suite is pointed at the anchor path, every fixture gets its
-    // own anchord and routes through it.
-    let anchord = Anchord::start_if_requested();
-    let anchor = match (&anchor, &anchord) {
-        (Some(client), _) => Some(client.clone()),
-        (None, Some(anchord)) => {
-            anchord.wait_ready();
-            Some(teleportd::anchor_client::AnchorClient::new(
-                anchord.socket(),
-            ))
+    // On the anchor path every fixture shares one daemon and is isolated by
+    // owning its sessions: teleport lists and counts only its own, so a
+    // unique owner per fixture is exactly the isolation the product already
+    // gives two real tools sharing a daemon.
+    let anchor = match (anchor, shared_anchord_socket()) {
+        (Some(client), _) => Some(client),
+        (None, Some(socket)) => {
+            config.anchor_owner = format!("test-{}", next_owner_id());
+            Some(teleportd::anchor_client::AnchorClient::new(socket))
         }
         (None, None) => None,
     };
@@ -381,7 +405,6 @@ async fn spawn_inner(
         addr,
         state,
         server,
-        _anchord: anchord,
     }
 }
 

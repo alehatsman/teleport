@@ -21,19 +21,29 @@ use crate::anchor_client::{AnchorSession, AnchorSpec};
 use crate::api::ApiError;
 use crate::session::CreateError;
 
+/// Label naming which teleport owns a session. See `Config::anchor_owner`.
+pub const LABEL_OWNER: &str = "teleport.owner";
 /// Label carrying teleport's `kind`.
 pub const LABEL_KIND: &str = "teleport.kind";
 /// Label carrying the preset a session was launched from, if any.
 pub const LABEL_PRESET: &str = "teleport.preset";
 
 /// The labels teleport attaches to a session it owns.
-pub fn labels_for(kind: &str, preset: Option<&str>) -> BTreeMap<String, String> {
+pub fn labels_for(owner: &str, kind: &str, preset: Option<&str>) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
+    labels.insert(LABEL_OWNER.to_owned(), owner.to_owned());
     labels.insert(LABEL_KIND.to_owned(), kind.to_owned());
     if let Some(preset) = preset {
         labels.insert(LABEL_PRESET.to_owned(), preset.to_owned());
     }
     labels
+}
+
+/// The filter that selects this teleport's sessions and nobody else's.
+pub fn owned_by(owner: &str) -> BTreeMap<String, String> {
+    let mut filter = BTreeMap::new();
+    filter.insert(LABEL_OWNER.to_owned(), owner.to_owned());
+    filter
 }
 
 /// A spawn spec in anchor's shape.
@@ -125,7 +135,7 @@ mod tests {
 
     #[test]
     fn teleport_metadata_round_trips_through_labels() {
-        let labels = labels_for("agent", Some("claude"));
+        let labels = labels_for("teleport", "agent", Some("claude"));
         assert_eq!(labels.get(LABEL_KIND).map(String::as_str), Some("agent"));
         assert_eq!(labels.get(LABEL_PRESET).map(String::as_str), Some("claude"));
 
@@ -140,7 +150,11 @@ mod tests {
         }
 
         // No preset means no label at all, rather than an empty one.
-        assert!(!labels_for("shell", None).contains_key(LABEL_PRESET));
+        assert!(!labels_for("teleport", "shell", None).contains_key(LABEL_PRESET));
+        assert_eq!(
+            labels.get(LABEL_OWNER).map(String::as_str),
+            Some("teleport")
+        );
     }
 
     #[test]
