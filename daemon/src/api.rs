@@ -548,6 +548,31 @@ const CAPABILITIES: &[&str] = &[
     "browse",
 ];
 
+/// Advertised when sessions live in `anchord` rather than in this process,
+/// which is what makes restarting this daemon survivable.
+///
+/// The updater is the consumer: it refuses to restart while sessions are
+/// running, and that refusal is correct exactly when a restart would kill
+/// them. Named for the guarantee rather than for the backend, because that
+/// is the question the caller is actually asking -- a client keying off
+/// "is it anchor" would have to be taught again the next time the answer
+/// comes from somewhere else.
+const SESSIONS_SURVIVE_RESTART: &str = "sessions_survive_restart";
+
+/// This daemon's capabilities.
+///
+/// Keyed off whether an anchor client actually exists, not off the config
+/// flag that usually produces one: the capability is a promise about where
+/// sessions are right now, and a promise read from intent rather than from
+/// fact is the kind that gets broken.
+fn capabilities(state: &AppState) -> Vec<&'static str> {
+    let mut caps = CAPABILITIES.to_vec();
+    if state.anchor.is_some() {
+        caps.push(SESSIONS_SURVIVE_RESTART);
+    }
+    caps
+}
+
 /// `GET /api/v1/health` -- the one route reachable without a credential
 /// (docs/04-api-protocol.md#get-apiv1health). Calls [`auth::resolve`]
 /// directly rather than taking a [`Principal`] extractor: an extractor
@@ -566,7 +591,7 @@ async fn health(
         "status": "ok",
         "version": state.version,
         "api_versions": API_VERSIONS,
-        "capabilities": CAPABILITIES,
+        "capabilities": capabilities(&state),
     });
     #[expect(
         clippy::indexing_slicing,

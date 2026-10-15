@@ -80,6 +80,18 @@ async fn unauthenticated_health_omits_device_fields() {
     assert_eq!(body["status"], "ok");
     assert!(body.get("api_versions").is_some());
     assert!(body.get("capabilities").is_some());
+    // `sessions_survive_restart` is a promise the updater acts on, so it
+    // must track where sessions actually are rather than being advertised
+    // unconditionally: in-process sessions die with the daemon. This file
+    // runs on both paths, so the invariant is the pairing, not a fixed
+    // answer (docs/08-packaging.md).
+    let caps = body["capabilities"].as_array().expect("a capability list");
+    let promises_survival = caps.iter().any(|c| c == "sessions_survive_restart");
+    assert_eq!(
+        promises_survival,
+        support::shared_anchord_socket().is_some(),
+        "the promise must match where sessions actually run: {caps:?}"
+    );
     assert!(
         body.get("device_id").is_none(),
         "unauthenticated /health must not leak device_id"

@@ -98,8 +98,14 @@ every running agent dies.
 
 Rules for the updater:
 
-- Never restart the daemon while sessions are `running`. Stage the new binary and apply
-  it on the next start when no session is live.
+- Never restart the daemon while sessions are `running` **and a restart would kill
+  them**. Those are two conditions, not one. When sessions run in `anchord` the daemon
+  advertises `sessions_survive_restart` on `/health`, and the updater may restart under
+  any load: the websockets drop, the clients reconnect by offset, and the ptys never
+  notice. Without that capability -- an older daemon, or sessions running in-process --
+  stage the new binary and apply it on the next start when no session is live.
+- A missing capability is never read as a promise. An old daemon and an in-process one
+  answer identically, and both mean "a restart kills sessions".
 - If the user asks to update now, use the tray-quit confirmation: name the session count
   and make them confirm.
 - Updating the **shell** alone is always safe — the WebView is disposable, which is the
@@ -110,6 +116,9 @@ Rules for the updater:
   be shipped as a daemon restart.
 - A daemon that must restart marks its sessions `lost` / `daemon_restart` like any other
   restart. The UI states the truth; it never pretends a session survived.
+- None of this makes a *crash* survivable, on either path. If `anchord` dies its ptys die
+  with it; anchor makes updates survivable by being small and changing rarely, nothing
+  more (anchor's docs/07-lifecycle.md). The UI must not imply otherwise.
 
 ### Autostart at login
 

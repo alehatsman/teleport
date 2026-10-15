@@ -470,3 +470,28 @@ async fn a_bell_is_noticed_without_anyone_attached() {
     let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
     client.terminate(&id).await.expect("terminate");
 }
+
+/// The whole payoff of running sessions in anchord, stated on the wire:
+/// restarting this daemon no longer kills them, and the updater reads
+/// exactly this to decide whether it may restart under load
+/// (docs/08-packaging.md). The in-process path's half of this pair is in
+/// `http_api.rs`, which asserts the promise is *absent* there.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_anchor_path_advertises_that_sessions_survive_a_restart() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("caps");
+    anchord.ready().await;
+
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let (status, body) = get_json(&daemon, "/api/v1/health").await;
+
+    assert_eq!(status, StatusCode::OK, "health: {body}");
+    let caps = body["capabilities"].as_array().expect("a capability list");
+    assert!(
+        caps.iter().any(|c| c == "sessions_survive_restart"),
+        "sessions live in anchord, so a restart does not kill them: {caps:?}"
+    );
+}
