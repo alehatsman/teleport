@@ -399,3 +399,74 @@ async fn delete_terminates_and_purge_forgets() {
     let (status, _) = get_json(&daemon, &format!("/api/v1/sessions/{id}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_title_is_derived_from_its_output() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("title");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+
+    // Sets a terminal title the way an agent does, then goes quiet. Nobody
+    // attaches to this session from the UI at any point — the title has to
+    // come from teleport watching the stream on its own, which is the
+    // whole reason the watcher exists.
+    let id = create(
+        &daemon,
+        "stty raw -echo; printf '\\033]2;deriving-this\\007'; sleep 30",
+        "agent",
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (status, body) = get_json(&daemon, &format!("/api/v1/sessions/{id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        if body["title"] == "deriving-this" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the title was never derived; got {:?}",
+            body["title"]
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
+    client.terminate(&id).await.expect("terminate");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bell_is_noticed_without_anyone_attached() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("bell");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+
+    let id = create(
+        &daemon,
+        "stty raw -echo; sleep 1; printf 'needs you\\007'; sleep 30",
+        "agent",
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (_status, body) = get_json(&daemon, &format!("/api/v1/sessions/{id}")).await;
+        if body["last_bell_ms"].as_i64().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the bell was never noticed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
+    client.terminate(&id).await.expect("terminate");
+}

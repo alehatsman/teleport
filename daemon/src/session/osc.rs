@@ -41,7 +41,7 @@ enum State {
 
 /// One update found in a chunk of PTY output.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum OscUpdate {
+pub(crate) enum OscUpdate {
     /// OSC 0 or 2 -- xterm "set window title" (0 sets the icon name too;
     /// nothing here has a use for that half).
     Title(String),
@@ -52,7 +52,7 @@ pub(super) enum OscUpdate {
 }
 
 #[derive(Default)]
-pub(super) struct OscScanner {
+pub(crate) struct OscScanner {
     state: State,
 }
 
@@ -60,7 +60,7 @@ impl OscScanner {
     /// Feeds one chunk of raw PTY output. Returns every update found in
     /// this chunk, in order -- almost always zero or one in practice, but
     /// nothing stops a chunk from carrying more than one full sequence.
-    pub(super) fn feed(&mut self, chunk: &[u8]) -> Vec<OscUpdate> {
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<OscUpdate> {
         let mut updates = Vec::new();
         for &b in chunk {
             match &mut self.state {

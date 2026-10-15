@@ -242,9 +242,21 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Follows every session teleport owns, so the fields the UI shows stay
+    // truthful for sessions nobody currently has open.
+    let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
+    if let Some(client) = &anchor {
+        teleportd::anchor_watch::spawn_supervisor(
+            client.clone(),
+            Arc::clone(&watch),
+            config.anchor_owner.clone(),
+        );
+    }
+
     let state = Arc::new(AppState {
         sessions,
         anchor,
+        watch,
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db: Some(db),
         origin_policy,

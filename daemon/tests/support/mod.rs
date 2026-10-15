@@ -402,6 +402,17 @@ async fn spawn_inner(
         (None, None) => None,
     };
 
+    // Fixtures get the supervisor too, so the anchor path they exercise is
+    // the one that ships rather than a quieter variant of it.
+    let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
+    if let Some(client) = &anchor {
+        teleportd::anchor_watch::spawn_supervisor(
+            client.clone(),
+            Arc::clone(&watch),
+            config.anchor_owner.clone(),
+        );
+    }
+
     let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -422,6 +433,7 @@ async fn spawn_inner(
         // `None` for the in-process path, which is what most fixtures
         // drive; `Some` routes sessions to a real anchord.
         anchor,
+        watch: Arc::clone(&watch),
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db,
         origin_policy,

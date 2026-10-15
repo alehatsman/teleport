@@ -54,6 +54,10 @@ pub struct AppState {
     /// the extraction — see anchor's `ROADMAP.md` M4, which flips the
     /// default only once this suite passes against the anchor path.
     pub anchor: Option<crate::anchor_client::AnchorClient>,
+    /// What teleport has derived from anchor-hosted sessions' output —
+    /// title, resume id, bell, idleness. Empty on the in-process path,
+    /// where the PTY reader derives them as it goes.
+    pub watch: Arc<crate::anchor_watch::WatchRegistry>,
     /// Control leases for anchor-hosted sessions. Unused on the in-process
     /// path, where the lease lives on each `Session`.
     pub leases: Arc<crate::anchor_lease::LeaseRegistry>,
@@ -820,10 +824,14 @@ impl SessionView {
     /// `controller` and `subscribers` are anchor's to know and teleport's
     /// not to guess: the lease lives in teleport's own layer above anchor
     /// for now, and subscriber counts are per-connection inside anchord.
-    /// The four derived fields (`title`, `claude_resume_id`, `last_bell_ms`,
-    /// `idle_since_ms`) come from scanning the output stream, which lands
-    /// with the ws proxy — `None` until then rather than invented here.
-    fn from_anchor(bridged: &anchor_bridge::BridgedSession) -> Self {
+    /// The four derived fields come from `anchor_watch`, which follows the
+    /// session's output the way the in-process reader does. `None` when no
+    /// watcher has seen it yet — a session created moments ago, or one
+    /// anchord is holding for a teleport that is not running.
+    fn from_anchor(
+        bridged: &anchor_bridge::BridgedSession,
+        derived: Option<&crate::anchor_watch::Derived>,
+    ) -> Self {
         let s = &bridged.session;
         SessionView {
             id: s.id.clone(),
@@ -847,10 +855,10 @@ impl SessionView {
             lost_reason: s.lost_reason.clone(),
             controller: None,
             subscribers: 0,
-            last_bell_ms: None,
-            idle_since_ms: None,
-            title: None,
-            claude_resume_id: None,
+            last_bell_ms: derived.and_then(|d| d.last_bell_ms),
+            idle_since_ms: derived.and_then(|d| d.idle_since_ms(crate::now_ms())),
+            title: derived.and_then(|d| d.title.clone()),
+            claude_resume_id: derived.and_then(|d| d.claude_resume_id.clone()),
         }
     }
 
@@ -954,7 +962,10 @@ async fn list_sessions(
         };
         let mut views: Vec<SessionView> = sessions
             .into_iter()
-            .map(|s| SessionView::from_anchor(&anchor_bridge::BridgedSession::new(s)))
+            .map(|s| {
+                let derived = state.watch.get(&s.id);
+                SessionView::from_anchor(&anchor_bridge::BridgedSession::new(s), derived.as_ref())
+            })
             .collect();
         views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
         return Json(serde_json::json!({ "sessions": views }));
@@ -995,8 +1006,10 @@ async fn get_session(
             .get(&id)
             .await
             .map_err(|e| anchor_bridge::api_error(&e))?;
+        let derived = state.watch.get(&session.id);
         return Ok(Json(SessionView::from_anchor(
             &anchor_bridge::BridgedSession::new(session),
+            derived.as_ref(),
         )));
     }
     if let Ok(session) = find_session(&state, &id) {
@@ -1078,6 +1091,7 @@ async fn delete_session(
             .purge(&id)
             .await
             .map_err(|e| anchor_bridge::api_error(&e))?;
+        state.watch.forget(&id);
         return Ok(StatusCode::NO_CONTENT);
     }
 

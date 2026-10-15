@@ -76,7 +76,7 @@
 mod control;
 mod fanout;
 mod manager;
-mod osc;
+pub(crate) mod osc;
 mod replay;
 mod types;
 
