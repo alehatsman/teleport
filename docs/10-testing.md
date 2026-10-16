@@ -176,6 +176,33 @@ equivalents chosen per platform.
   not a log without a row
 - log cap reached → appending stops, `log_capped_at` recorded, live streaming continues
 
+## Deadlines, preconditions and premises
+
+Three rules, each of which cost a day to learn.
+
+**A precondition waits on the condition, not on a clock.** A fixture that
+needs 12 MiB of backlog before it can begin is not testing how fast this
+machine produces 12 MiB. Spend patience on *stalling*: any progress resets
+the budget, only an unbroken streak of no movement fails
+(`support::await_offset`). The fixed-deadline version failed four fixtures at
+once on a loaded box (#68, #102, #103, #104) while every byte was still
+arriving, in order, undamaged.
+
+**An assertion measures the thing it names.** `slow_subscriber_is_...` asserted
+"10 MiB drained in under 10s" under a name about the reader never being
+blocked. The per-chunk stall timeout already measures that; the total was
+measuring the machine. Slow is not blocked, and slow is not wedged.
+
+**A premise has to be reachable, and green is not evidence that it was.**
+`terminate_is_not_wedged_by_a_stuck_write` passed from the day it was written
+without ever wedging anything: a tty in canonical mode *discards* an
+over-long line that never terminates rather than queueing it, so 4 KiB blobs
+of `x` went nowhere and `terminate()` raced nothing. Complete lines wedge the
+writer after ~9 KiB. Anchor found this class in their copy first (anchor#9);
+teleport's copy had it too. When a fixture depends on a resource filling up,
+make it print where it filled — a premise that quietly stops being reachable
+looks exactly like a passing test.
+
 ## Failure-injection checklist
 
 Every one of these must produce a defined, tested state — not an exception trace.
@@ -195,7 +222,7 @@ Every one of these must produce a defined, tested state — not an exception tra
 | Fill the disk | append fails → session marked with `io_error`, daemon stays up |
 | `cwd` deleted after spawn | child's problem, not a daemon crash |
 | Child exits leaving a grandchild holding the PTY | session reaches `exited` anyway; the master staying open must not strand it in `running` ([S2](15-open-questions.md#s2--eof-is-not-exit)) |
-| `terminate` while a 1 MiB write is blocked on an unreading child | terminate completes inside the bounded policy; input is dropped, never allowed to hold the session open ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)) |
+| `terminate` while a write is blocked on an unreading child | terminate completes inside the bounded policy; input is dropped, never allowed to hold the session open ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)). The write must be **complete lines**, or the tty discards it and nothing blocks — see above |
 | Spawn a nonexistent executable | `422` from pre-spawn validation — **no row, no directory** ([01](01-architecture.md#session-creation-sequence)) |
 | Spawn fails *after* validation (permissions, fork failure) | `500`, row recorded `exited` / `spawn_failed`, directory exists and is collected on schedule |
 | Second daemon started as another OS user | binds an ephemeral port; neither daemon can read the other's token |

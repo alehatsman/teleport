@@ -192,14 +192,10 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
     // `attach(0)` that races an actively-bursting producer can overflow a
     // subscriber's queue with no contention involved at all (see
     // `spawn_hot_session`'s doc comment).
-    let deadline = Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < BACKLOG {
-        assert!(
-            Instant::now() < deadline,
-            "the child never produced the backlog"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // Waits on the producer moving rather than on a clock -- see
+    // `support::await_offset`. This precondition is 12 MiB through a pty;
+    // timing it out was timing the machine (#102).
+    support::await_offset(&session, BACKLOG, "the backlog").await;
 
     // The control subscriber: attaches once, up front, like a client that
     // was already watching when the network blip that triggers the storm

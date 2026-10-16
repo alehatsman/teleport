@@ -132,6 +132,48 @@ pub(crate) fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
     }
 }
 
+/// Waits until a session's producer has reached `target`, failing only when
+/// it **stops**.
+///
+/// This is a precondition, not an assertion: a fixture that needs a 12 MiB
+/// backlog before it can begin is not testing how fast the machine produces
+/// one. A fixed total deadline turns it into exactly that measurement — the
+/// whole family (#68, #102, #103, #104) went red together on a loaded box
+/// while every byte was still arriving, correctly, a little slower.
+///
+/// So patience is spent on *stalling*, not on elapsed time: any progress
+/// resets the budget, and only an unbroken streak of samples with the offset
+/// unmoved fails. A wedged producer still fails inside `STALL_BUDGET`; a slow
+/// one finishes and the fixture goes on to test what it says it tests. Slow
+/// is not stuck — anchor's rule, which their own `terminate` fixture earned
+/// the hard way.
+pub(crate) async fn await_offset(session: &teleportd::session::Session, target: u64, what: &str) {
+    /// How often to look.
+    const SAMPLE: Duration = Duration::from_millis(50);
+    /// Consecutive unmoved samples that count as stopped: ~10s of silence.
+    const STALL_BUDGET: u32 = 200;
+
+    let mut last = 0;
+    let mut stalled = 0u32;
+    loop {
+        let now = session.next_offset();
+        if now >= target {
+            return;
+        }
+        if now == last {
+            stalled += 1;
+            assert!(
+                stalled < STALL_BUDGET,
+                "{what}: the producer stopped at {now}/{target} and stayed there"
+            );
+        } else {
+            stalled = 0;
+            last = now;
+        }
+        tokio::time::sleep(SAMPLE).await;
+    }
+}
+
 pub(crate) const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 pub(crate) struct Daemon {

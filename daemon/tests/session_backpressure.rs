@@ -8,6 +8,7 @@
 mod support;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,18 +80,63 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
         .create(&spec(&args, 80, 24, &cwd), "shell", None)
         .expect("create session");
 
-    // Runs on its own thread, not this test's async task, so a write that
-    // blocks doesn't block the assertion below from ever running.
+    // **Complete lines, and this is the whole fixture.** A tty in canonical
+    // mode discards an over-long line that never terminates rather than
+    // queueing it, so 4 KiB blobs of `x` are swallowed forever and no writer
+    // ever blocks -- this test spent its whole life green while terminate()
+    // raced nothing at all. Anchor found it in their copy and measured it:
+    // a non-reading child took 8.5 MB of blob writes without stalling, and
+    // wedged permanently after 1,022 bytes of complete lines (anchor#9).
+    let writes = Arc::new(AtomicU64::new(0));
+    let gave_up = Arc::new(AtomicBool::new(false));
     let writer_session = Arc::clone(&session);
+    let writer_writes = Arc::clone(&writes);
+    let writer_gave_up = Arc::clone(&gave_up);
     std::thread::spawn(move || {
-        let chunk = vec![b'x'; 4096];
-        while writer_session.write(&chunk).is_ok() {}
+        let mut line = vec![b'x'; 255];
+        line.push(b'\n');
+        // `write` enqueues onto a bounded channel, so once the writer thread
+        // is stuck in `write_all` this blocks rather than returning an
+        // error. Progress stopping is therefore the signal, not a rejection.
+        while writer_session.write(&line).is_ok() {
+            writer_writes.fetch_add(1, Ordering::Relaxed);
+        }
+        // A writer that *returned* also stops the counter, and would look
+        // exactly like a wedge to the wait below. Say which happened.
+        writer_gave_up.store(true, Ordering::Relaxed);
     });
 
-    // Give the writer thread time to actually fill the write channel and the
-    // pty's own kernel buffer -- otherwise terminate() could win the race by
-    // running before any write is stuck, proving nothing.
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the writer to be *wedged*, not merely slow. One sample with
+    // no progress proves nothing -- a busy machine produces those -- so this
+    // waits for an unbroken streak, reset by any write getting through.
+    let mut last = 0;
+    let mut stalled = 0;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while stalled < 20 {
+        assert!(
+            Instant::now() < deadline,
+            "the writer never wedged: {} writes and still moving",
+            writes.load(Ordering::Relaxed)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            !gave_up.load(Ordering::Relaxed),
+            "the writer stopped by erroring, not by wedging -- the premise never held"
+        );
+        let now = writes.load(Ordering::Relaxed);
+        if now == last {
+            stalled += 1;
+        } else {
+            stalled = 0;
+            last = now;
+        }
+    }
+
+    println!(
+        "wedged after {} complete lines ({} bytes)",
+        writes.load(Ordering::Relaxed),
+        writes.load(Ordering::Relaxed) * 256
+    );
 
     let t0 = Instant::now();
     session.terminate().expect("terminate should not error");
@@ -295,7 +341,17 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
     let (received_bytes, mut fast, _) = support::catch_up(replay, Duration::ZERO).await;
     let mut received = received_bytes.len();
 
-    let t0 = Instant::now();
+    // The invariant, measured by the thing that actually measures it: the
+    // fast subscriber never goes more than `DEFAULT_TIMEOUT` without a
+    // chunk. A reader blocked behind the never-reading subscriber shows up
+    // here, as a stall, immediately.
+    //
+    // There used to be a total-elapsed assertion underneath this loop --
+    // "10 MiB in under 10s or the reader looks backpressured". It measured
+    // how fast this machine moves 10 MiB through a pty, which is not the
+    // claim: on a loaded box it failed at 54s having received every byte,
+    // in order, with no stall longer than a blink (#68). Slow is not
+    // blocked.
     while received < N {
         let chunk = tokio::time::timeout(DEFAULT_TIMEOUT, fast.subscription.recv())
             .await
@@ -305,11 +361,6 @@ async fn slow_subscriber_is_disconnected_and_never_blocks_the_reader() {
             .expect("fast subscriber disconnected before receiving all output");
         received += chunk.bytes.len();
     }
-    let elapsed = t0.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "drain of {N} bytes took {elapsed:?}, reader looks backpressured"
-    );
 
     // The never-reading subscriber must have been dropped once it exceeded
     // the bound, not silently buffered -- that's what keeps memory flat.

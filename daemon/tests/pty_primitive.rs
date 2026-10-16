@@ -67,24 +67,34 @@ fn spawn_interactive_sh(cols: u16, rows: u16) -> (pty::SpawnedSession, Receiver<
     (spawned, out_rx)
 }
 
-/// Accumulates chunks from `rx` until `pred(&acc)` is true, or panics after
-/// `timeout` with whatever was collected so far.
+/// Accumulates chunks from `rx` until `pred(&acc)` is true.
+///
+/// `idle` is how long the pty may stay **silent**, not how long the whole
+/// read may take. The difference is the difference between a test of the
+/// reader and a test of the machine: `large_burst_read_drops_nothing` moves
+/// 8 MiB, and a total budget fails the moment the box is busy even though
+/// every byte is still arriving, in order, undamaged (#103). A reader that
+/// has actually stopped still fails, in `idle`.
+///
+/// `MAX_TOTAL` is a backstop against the other failure -- a predicate that
+/// never matches against a producer that never stops -- so a broken fixture
+/// fails the suite instead of hanging it.
 fn recv_until(
     rx: &Receiver<Vec<u8>>,
-    timeout: Duration,
+    idle: Duration,
     mut pred: impl FnMut(&[u8]) -> bool,
 ) -> Vec<u8> {
-    let deadline = Instant::now() + timeout;
+    let max_total = idle * 20;
+    let start = Instant::now();
     let mut acc = Vec::new();
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
-            !remaining.is_zero(),
-            "timed out waiting for predicate; got {} bytes: {:?}",
+            start.elapsed() < max_total,
+            "output kept arriving but the predicate never matched within {max_total:?}; got {} bytes: {:?}",
             acc.len(),
             String::from_utf8_lossy(&acc)
         );
-        match rx.recv_timeout(remaining) {
+        match rx.recv_timeout(idle) {
             Ok(chunk) => {
                 acc.extend_from_slice(&chunk);
                 if pred(&acc) {
@@ -96,7 +106,7 @@ fn recv_until(
                 reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
             )]
             Err(e) => panic!(
-                "output channel closed before predicate matched ({e}); got {} bytes: {:?}",
+                "the pty went silent for {idle:?} before the predicate matched ({e}); got {} bytes: {:?}",
                 acc.len(),
                 String::from_utf8_lossy(&acc)
             ),
