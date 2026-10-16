@@ -193,6 +193,26 @@ arriving, in order, undamaged.
 blocked. The per-chunk stall timeout already measures that; the total was
 measuring the machine. Slow is not blocked, and slow is not wedged.
 
+**Silence is evidence only if there was something to hear.** The corollary,
+and the one that closed `reconnect_storm`. Its control subscriber is read
+against a per-`recv()` stall bound — the right instrument for "the storm never
+blocks the reader", except that the thing on the other end is a shell loop
+(`printf; sleep 0.01`). Under 16 spinners that loop delivered **1–4 chunks per
+2s window against a nominal 200**: gaps of seconds where idle gives 10ms. The
+bound was failing the reader for the producer's descheduling. A quiet `recv()`
+now reads `session.next_offset()` across the quiet period and fails only if
+the session produced bytes the subscriber did not get — which is the sentence
+the test's name makes. Before asserting on an absence, check that the thing
+you are measuring was running.
+
+**A timeout that duplicates a non-clock bound is pure flake.** `reconnect_storm`
+joined its 40 storm clients under a 30s timeout, to catch a client that never
+converges. `support::catch_up_allow_clamp` already fails that client at
+`MAX_TEST_ROUNDS` — a count of rounds, not of seconds. The timeout added no
+bound; it added a 30s budget on 480 MiB of concurrent replay. When a fixture
+already has a bound in the right units, a wall clock beside it is not a
+backstop, it is a second failure mode.
+
 **Three kinds of fixed number, and only one of them expires.** Audit a new
 one by asking which it is:
 
