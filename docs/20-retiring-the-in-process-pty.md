@@ -90,6 +90,14 @@ Collapsing them is the whole structural edit.
 
 ## What goes
 
+> **Scoped to Unix as of 2026-10-16** (#110; Constraint 3's superseding
+> decision). Anchor is Unix-only with no Windows date, so on Windows the
+> in-process layer is not residue being retired — it is the only session path
+> the product has. Everything below goes **on Unix**; on Windows it stays and
+> is maintained. "Delete `pty.rs`" now means "delete the Unix arms of
+> `pty.rs`", and a reader executing this list literally on a Windows checkout
+> would remove the product.
+
 Whole modules: `pty.rs` (except `login_shell_path`, **and except
 `ConptyDsrProbe` at `:423-520`, which transfers to anchor — see Constraint 3**),
 `session/manager.rs`,
@@ -380,6 +388,16 @@ build bug with an obvious local fix. **Once it is deleted, the cfg gate stops
 being a fix at all**: gating the module on `unix` would leave Windows with a
 daemon that compiles, boots, reports healthy, and cannot host a single session.
 
+> **Superseded 2026-10-16, five minutes after it was written.** The decision
+> recorded below depended on anchor growing a Windows arm. Anchor closed that
+> request `not-planned` the same afternoon (anchor#13, 13:50Z; this section was
+> committed at 13:45Z in `cad8b7f`). The reasoning was sound and its premise
+> died almost immediately. **Resolution: the cfg gate, landed as #107's fix.**
+> See [the superseding decision](#constraint-3-superseded-the-gate-is-the-fix)
+> below. The paragraphs that follow are kept as written because the argument
+> they make is still the right argument *if* the deletion proceeds — and that
+> conditional is exactly what changed.
+
 Two honest answers existed. **Decided 2026-10-16: anchor grows a Windows
 transport arm (named pipe).** "teleportd is unix-only" was considered and
 rejected, so Windows keeps a session path and #107 is resolved by that arm
@@ -400,6 +418,50 @@ sites, not a one-line attribute.
 The transport seam is anchor's design to make; teleport's side is to carry both
 arms behind one `AnchorClient` type and to stop assuming the socket config is a
 filesystem path. **This work lives in the anchor repo and gates this one.**
+
+#### Constraint 3, superseded: the gate is the fix
+
+**Decided 2026-10-16 (#110, mirrored as anchor#16): Windows stays supported,
+and the in-process PTY layer is its permanent session path.**
+
+What changed is not the reasoning above but its premise. That argument rejects
+`#[cfg(unix)]` because the gate is only correct *while the in-process layer
+remains Windows' session path*, and the deletion was going to remove it. With
+anchor Unix-only and no date attached, **the in-process layer stays.** The
+conditional never fires, so:
+
+- the gate is not work the deletion undoes — the deletion is now a *Unix-only*
+  deletion, and the gate is what makes that sentence expressible;
+- it does not manufacture Constraint 4's silent-healthy-but-useless daemon.
+  That failure mode is a daemon that accepts `use_anchor` and quietly hosts
+  nothing. `main.rs` refuses it outright on Windows instead, naming #107. A
+  loud refusal is the opposite of the hazard;
+- it needs nothing from another repo, and it restores a build that was green
+  until `780ff74` (2026-10-15) took it down.
+
+**The fact that forced this, and that the original argument did not weigh:**
+`daemon/tests/pty_primitive_windows.rs` is `#![cfg(windows)]`. While the daemon
+does not build for Windows, that fixture **cannot be compiled or run at all** —
+on CI or on any developer's machine. It is named below as the proof of
+`ConptyDsrProbe` and as an artifact that must be *transferred to anchor, not
+deleted*. A deletion gate whose evidence nothing can execute is not a gate, and
+no claim resting on it is falsifiable (docs/10-testing.md). The cfg gate is what
+buys that fixture back.
+
+Cost, measured: 10 gated sites across `lib.rs`, `api.rs`, `ws.rs`, `main.rs` and
+`tests/support/mod.rs`. Lower than the ~50 estimated above because every anchor
+branch in `api.rs` is an early-return guard, which takes one attribute each
+rather than a split of the function around it.
+
+**What Windows gives up, stated plainly:** no `sessions_survive_restart`. A
+teleportd upgrade or restart kills every Windows session, and `/health` reports
+that truthfully because `capabilities()` keys off the client's existence, not
+off a config flag. That is a real product gap, not a temporary one, and it is
+the price of option 1 in #110.
+
+**Consequence for step 9:** the deletion may no longer remove the in-process
+layer outright. See [What goes](#what-goes) — on Windows it is not residue, it
+is the product.
 
 #### Constraint 3 is three things, and one of them is already solved — here
 
@@ -438,10 +500,40 @@ exempt from [What goes](#what-goes). The deletion may not proceed past them unti
 that transfer has happened, and "transfer" means the behaviour is under test in
 anchor — not that the fix was described in a message.
 
-Note that #107 is not reproducible locally on macOS — `cargo check --target
-x86_64-pc-windows-msvc` dies in `libsqlite3-sys` for want of a Windows C
-toolchain. The error list in that issue is CI's. Nobody should read a local green
-as a refutation.
+**#107 is reproducible locally, and the tool was already in the repo.** Run
+`scripts/ci-local.sh windows`: it cross-compiles the daemon for
+`x86_64-pc-windows-gnu` in Docker with `gcc-mingw-w64-x86-64` and runs
+`cargo build --all-targets` plus `cargo clippy -- -D warnings` for the target.
+mingw compiles `libsqlite3-sys`'s C, which is the whole reason the obvious
+`cargo check --target x86_64-pc-windows-msvc` fails on macOS — that one dies in
+`libsqlite3-sys` for want of an MSVC toolchain, and **that failure is not
+evidence of anything about this crate.**
+
+This correction is the point of the paragraph, and it was paid for. The gate
+above was first "verified" by a cruder method — copying the daemon aside,
+rewriting `cfg(unix)`→`cfg(any())`, and compiling natively to enumerate
+unreachable items — on the belief that no local Windows build existed. That
+method reported **zero errors on a tree that does not build for Windows**, and
+the branch was pushed on the strength of it. CI disagreed within minutes.
+
+The failure mode is worth naming, because it is not obvious and it will recur:
+flipping cfg gates on a Unix host proves which *items* are reachable, and
+nothing about whether the *platform APIs they call* exist. `support/mod.rs`
+reaches `std::os::unix::net::UnixStream` directly at `:291` and `:328`, behind
+no cfg gate at all. On a Unix host that path is real whatever the cfg flags
+say, so the simulation compiled it happily. A cross-compile cannot be fooled
+that way: there is no `std::os::unix` in the target's std, and it said so
+immediately.
+
+**A simulation that shares the host's platform cannot falsify a platform
+claim** (docs/10-testing.md). Reach for `ci-local.sh windows` first; it is one
+command and it proves strictly more.
+
+What it still cannot do is run anything: a cross-compile proves the crate
+builds for Windows, not that ConPTY behaves. `pty_primitive_windows.rs` needs a
+real Windows host, which means CI's `windows-latest` job. That distinction is
+what `docs/11-mvp-plan.md`'s M4 gate means by "Windows: cross-compile-checked
+only."
 
 **Constraint 4 — every host running teleportd must have anchord first.**
 Deleting the in-process layer makes `anchord` mandatory. Fleet audit,
