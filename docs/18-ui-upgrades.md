@@ -358,16 +358,94 @@ it resolves the slot the way an installed one does):
 - A stale tab's hashed chunk still loads after the flip, with `immutable` on it, and a
   chunk that exists nowhere is a `404` that is not HTML.
 
+## Settled
+
+### Retention stays `3`, and stays a constant
+
+Decided ([#79](https://github.com/alehatsman/teleport/issues/79)): `RETAINED_VERSIONS = 3`
+(`cli/src/ui.rs:30`) does not change, and does not move to `config.toml`.
+
+The number is still a guess — the real input is "how long does a tab stay open across
+upgrades", which nobody has measured. What makes keeping it the right call rather than a
+deferral is that the guess is now **falsifiable**, and the evidence has never appeared.
+
+A hashed asset that misses the live slot **and** every retained version logs a `WARN`
+naming the path and the retention count in force at the time
+(`daemon/src/api.rs:462-469`, on the miss path in `spa_fallback`). That is precisely the
+symptom of retention being too short, and it is the only way the symptom ever shows up —
+without it, the tab's failure is a bare `404` in an access log, indistinguishable from a
+typo'd URL.
+
+So the rule is: **the log fires first, then the number changes.** Until it fires, three is
+not a number to tune; it is a number with no counter-evidence. And a config knob is worse
+than a bigger constant in any case — it asks every user to hold an opinion about a
+directory-retention policy to fix a problem exactly one of them would ever hit. If the
+`WARN` does start appearing, raise the constant; a knob only earns its place if two users
+need *different* values, which nothing suggests.
+
+Cost of being wrong: a stale tab gets a `404`, reloads, and is on the current bundle. No
+session is lost — the PTYs are in the daemon. That is what makes waiting for evidence
+cheap.
+
+No new code was needed for this decision. The observability it rests on already shipped
+(`feat(ui-slot): make the two deferred slot questions observable instead of guessed`), and
+`daemon/tests/web_static.rs`'s `a_hashed_asset_that_exists_nowhere_is_a_404_not_the_shell`
+covers the path the `WARN` sits on.
+
+### The desktop shell inherits the slot
+
+Decided ([#80](https://github.com/alehatsman/teleport/issues/80)), in two parts.
+
+**Which `<data_dir>`: the same one.** This was the part that could have surprised someone,
+and it does not. All three crates resolve it identically, and the shell does not leave it
+to agreement:
+
+| Who | Where | Resolution |
+|---|---|---|
+| daemon | `daemon/src/main.rs:294-301` | `--data-dir`, else `BaseDirs::data_local_dir()/teleport` |
+| CLI | `cli/src/connect.rs:37-44` | the same wrapper, same `directories` call |
+| Tauri shell | `desktop/src-tauri/src/daemon.rs:30-34` | the same wrapper (no override) |
+
+and `spawn_detached` passes the path it resolved to the sidecar **explicitly** —
+`cmd.arg("--data-dir").arg(data_dir)` (`desktop/src-tauri/src/daemon.rs:189`) — so the
+sidecar cannot drift onto a different directory even if the two defaults ever diverged.
+The shell also passes **no `--web-dist`**, so step 2 of [Resolution](#the-slot) governs it
+exactly as it governs an installed daemon.
+
+Therefore `teleport ui upgrade` run by a user upgrades the slot the desktop app is reading
+from, and the running WebView is offered its reload through the ordinary `ui_version`
+mechanism. There is no second slot and no silent no-op. The CLI's `--data-dir` override is
+the only way to point at a different one, and that is the user saying so out loud.
+
+**Tray action: no.** The shell inherits whatever the slot holds.
+
+- An "Upgrade UI" tray item would be capability that exists only inside Tauri, which
+  [08](08-packaging.md#browser-only-mode-is-a-first-class-deployment) forbids: the desktop
+  shell adds polish, never capability.
+- It would put download, TLS trust and archive extraction inside the GUI process — the
+  same argument [Why the CLI, not the daemon](#why-the-cli-not-the-daemon) makes about the
+  daemon, and the GUI is the process most exposed to untrusted content.
+- It would be a second updater beside the one the shell already has, with a different
+  mental model, for a user who has not asked for it.
+
+What a desktop-only user gets instead is coherent: the bundle ships only `teleportd`
+(`desktop/src-tauri/tauri.conf.json:25` — `externalBin: ["binaries/teleportd"]`, no
+`teleport` CLI), built with `embedded-web`, so the UI it serves is the sidecar's embedded
+one and the app updater is what moves it. The slot is simply empty until someone with a
+CLI uses it.
+
+**The one real consequence, written down because it will bite someone.** A slot shadows
+the binary's embedded UI *indefinitely*, including across a desktop app update
+([Returning to the embedded UI](#returning-to-the-embedded-ui)). So a user who ever ran
+`teleport ui upgrade` or `teleport ui install` and then updates the desktop app gets a new
+daemon with the **old** UI still in front of it. This is correct behavior — the slot is
+meant to win — but it looks like "the update did nothing". The diagnosis is `ui_version`
+on `/health` (non-`null` means the slot is in play) or `teleport ui status`; the fix is
+`teleport ui reset`. Nothing here needs a code change; the surprise is a documentation
+problem and this paragraph is the documentation.
+
 ## Open questions
 
-- **Retention count.** Three is still a guess, and deliberately still a constant rather
-  than a config knob ([#79](https://github.com/alehatsman/teleport/issues/79)) — the real
-  input is "how long does a tab stay open across upgrades", which nobody has measured.
-  What changed is that the guess is now *falsifiable*: a hashed asset that misses the
-  live slot **and** every retained version logs a `WARN` naming the path and the
-  retention count (`spa_fallback`, `api.rs`). That line is the evidence that would move
-  the number, and its absence is evidence three is enough. Adding the knob before the
-  log had ever fired would have been tuning by imagination.
 - **Who prunes.** `teleport ui upgrade` prunes old versions after a successful flip, and
   **sweeps every stray `.staging-*` before it starts** — not just the one its own tag
   would reuse ([#78](https://github.com/alehatsman/teleport/issues/78)). A retry after
@@ -381,6 +459,3 @@ it resolves the slot the way an installed one does):
   end to end against a real release until a tag is cut with the new
   `teleport-web-<tag>.tar.gz` in it. Everything up to and including the flip is covered
   by tests that build their own tarball; only the two `GET`s against github.com are not.
-- **Desktop shell.** The Tauri build ([08](08-packaging.md)) bundles its own daemon
-  sidecar; whether its tray offers "upgrade UI" separately, or the shell simply inherits
-  whatever the slot holds, is not decided here.
