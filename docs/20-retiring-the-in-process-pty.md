@@ -463,6 +463,16 @@ the price of option 1 in #110.
 layer outright. See [What goes](#what-goes) — on Windows it is not residue, it
 is the product.
 
+**Outcome, 2026-10-16 (PR #111).** `daemon (windows-latest)` is green for the
+first time since `780ff74`, and `pty_primitive_windows.rs` ran on a real
+Windows host: **8 passed, 0 failed, 49.49s**. That is the first execution of
+those assertions since the build broke, which retroactively supplies the
+evidence `ca72e7c` ("S4 is closed, the Windows terminate path is verified")
+was asserting without. Note what that means about the preceding day: the claim
+was not wrong, it was *unfalsifiable* — the fixture existed, was correct, and
+could not run. Those are different failures and only one of them is visible in
+a diff.
+
 #### Constraint 3 is three things, and one of them is already solved — here
 
 Anchor's `src/pty.rs:19` defers Windows and cites teleport's **#W1** ("a
