@@ -193,6 +193,36 @@ arriving, in order, undamaged.
 blocked. The per-chunk stall timeout already measures that; the total was
 measuring the machine. Slow is not blocked, and slow is not wedged.
 
+**Three kinds of fixed number, and only one of them expires.** Audit a new
+one by asking which it is:
+
+| Kind | Example | Expires? |
+|---|---|---|
+| Condition wait — poll with a bound, fail only if the event never happens | "the bell was never noticed", 15s | No. A slow box arrives later; it does not fail. |
+| Policy-derived bound — asserts the daemon's own documented limit | `terminate()` under 9s against a 7s `GRACEFUL_WAIT + KILL_WAIT` | No. It measures a policy, not throughput. |
+| Volume budget — covers a transfer whose duration scales with bytes | "12 MiB of backlog within 30s" | **Yes.** It is sized against today's hardware, and nothing writes the expiry date on the fixture. |
+
+Every volume budget in this suite has been converted to the progress rule
+above. If you add one, you are adding a fixture that will go red on someone's
+laptop for no reason — `reconnect_storm` took **11.5s on a fully idle machine
+against a 10s precondition budget**, which is how close one of these had
+already drifted before anybody looked.
+
+**Publish the pair, not the green.** A single passing number hides whether a
+fixture is at 60% of its budget or 115% of it, and those are the same colour.
+When a timing matters, record what it took and what it was allowed:
+
+| | loaded | quiet |
+|---|---|---|
+| `session_backpressure` | 33.7s | 6.2s |
+| `reconnect_storm` | 44.3s | 11.5s |
+| `session_catchup` | 80.9s | 16.7s |
+| `pty_primitive` | 29.9s | 5.7s |
+
+(Measured 2026-10-16. "Loaded" was 60 orphaned CPU spinners; "quiet" is the
+same machine with them gone. A 5x spread between the two is the whole reason
+a wall-clock budget is not an assertion.)
+
 **A premise has to be reachable, and green is not evidence that it was.**
 `terminate_is_not_wedged_by_a_stuck_write` passed from the day it was written
 without ever wedging anything: a tty in canonical mode *discards* an
