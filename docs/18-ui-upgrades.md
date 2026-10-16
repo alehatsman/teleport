@@ -105,6 +105,14 @@ Steps 1–6 are all recoverable: any failure leaves `current` pointing where it 
 syscall. Step 8 runs after the flip, so a failure there has already left the upgrade
 itself complete.
 
+**Steps 5–8 are one implementation, not two.** `upgrade` and
+[`install`](#installing-a-locally-built-bundle) differ only in how the staging directory
+gets *filled* — untar some verified bytes, or copy a directory — so that is the only
+thing either one passes in (`stage_and_flip` in [cli/src/ui.rs](../cli/src/ui.rs)).
+Retention, rollback ordering and the `.staging-*` namespace therefore cannot drift
+between the two paths, and a consumer that wants only the second half calls `install`
+instead of reimplementing the flip in shell.
+
 ### Stale tabs, and why old versions are retained
 
 A browser tab that loaded the old UI is still running old JavaScript. It will request
@@ -150,10 +158,10 @@ oldest retained version the only way further back is the daemon's embedded bundl
 
 ### Installing a locally built bundle
 
-`teleport ui install <dir>` takes a directory that already holds a built bundle — a
-`web/dist` tree — and runs the same steps 5–8 as an upgrade, minus the download and the
-checksum (there is no release to check against; the bytes are the ones the caller just
-built):
+`teleport ui install <dir> --version <NAME>` takes a directory that already holds a built
+bundle — a `web/dist` tree — and runs the same steps 5–8 as an upgrade, minus the download
+and the checksum (there is no release to check against; the bytes are the ones the caller
+just built):
 
 ```text
 1. validate <dir>/index.html exists and is non-empty   ← a dist that never got built
@@ -163,12 +171,33 @@ built):
 5. prune retained versions beyond the newest 3
 ```
 
-`--name <NAME>` names the version directory, which is what `ui status` lists and what
-`/health` reports as `ui_version`; it defaults to `local-<unix-seconds>`. A name must be
-one path segment, must not start with `.` (that is the staging/sentinel namespace) and
-must not be `current`. Installing over a name that already exists is refused rather than
-deleting a directory the daemon may be serving this instant — the same rule the upgrade
-path follows; pass a different `--name`.
+Steps 2–5 are literally `upgrade`'s steps 5–8 ([Flipping](#flipping)) — same function,
+same staging namespace, same retention — so there is exactly one place where the slot's
+layout is decided.
+
+**Two callers want this and neither has a tarball.** A source build (the dotfiles
+`components/teleport` step, alehatsman/dotfiles#25) clones, runs `npm run build`, and has
+a `web/dist` in a temp directory with no release to download. And testing a UI change
+against a real daemon needs a flip without cutting a release — `--web-dist` is not that,
+since it pins the daemon to one directory for its whole life and reports
+`ui_version: null`.
+
+`<dir>` is **copied, never symlinked**. The slot has to outlive the directory handed in,
+which for a source build is a temp directory about to be deleted. The copy applies the
+same owner-only modes as an extraction — `0700` directories, `0600` files — and takes
+regular files and directories only; anything else in the tree is refused rather than
+followed. The rest of [Extraction safety](#extraction-safety) does not apply: a local
+directory the caller just built is not untrusted input, and there is no archive, no
+checksum and no path to escape.
+
+`--version <NAME>` names the version directory, which is what `ui status` lists and what
+`/health` reports as `ui_version`. It is **required**, not inferred: there is no release
+tag to read it off, and a guessed name is a name nobody can roll forward to or match
+against a commit. A source build passes the commit sha; anything that sorts sanely works.
+A name must be one path segment, must not start with `.` (that is the staging/sentinel
+namespace) and must not be `current`. Installing over a name that already exists is
+refused rather than deleting a directory the daemon may be serving this instant — the
+same rule the upgrade path follows; pass a different `--version`.
 
 **This is the development path, and it is deliberately not the release path.** Nothing
 here is verified against a checksum, so what lands in the slot is exactly as trustworthy
@@ -301,7 +330,7 @@ machine's slot. Upgrading a remote daemon's UI means running the CLI on that hos
 ```text
 teleport ui status            # current version, retained versions, where it resolves from
 teleport ui upgrade [--version vX.Y.Z]
-teleport ui install <dir> [--name NAME]   # a locally built bundle; no download, no checksum
+teleport ui install <dir> --version NAME  # a locally built bundle; no download, no checksum
 teleport ui rollback
 teleport ui reset [--purge]   # drop the slot; serve the binary's embedded UI again
 ```
@@ -348,6 +377,16 @@ CLI (`cli/src/ui.rs` unit tests):
 - Retention keeps exactly the newest 3 behind the live one and never prunes `current`.
 - `rollback` returns to the previous version and stops at the oldest retained.
 - `--url` at a non-loopback host refuses.
+- `install` copies a built directory into the slot and flips to it: nested files come
+  along, the source tree is left alone, `0600` files land in a `0700` directory, and no
+  `.staging-*` survives a success.
+- `install` refuses a directory with no usable `index.html`, and refuses a `--version`
+  that is already installed — in both cases without leaving the slot half-built.
+- `install` copies rather than links: deleting the source directory afterwards leaves the
+  installed version intact and still served.
+- `install` then `rollback` walks between locally installed versions, and `install`
+  honours the same retention as `upgrade` (they are the same code path).
+- A version name must be one plain segment, and `--version` is required.
 
 E2E (`web/e2e/ui-upgrade.spec.ts`, against a daemon started with **no** `--web-dist` so
 it resolves the slot the way an installed one does):
@@ -381,6 +420,8 @@ it resolves the slot the way an installed one does):
   end to end against a real release until a tag is cut with the new
   `teleport-web-<tag>.tar.gz` in it. Everything up to and including the flip is covered
   by tests that build their own tarball; only the two `GET`s against github.com are not.
+  A source build sidesteps this entirely: it has a `web/dist` already and uses
+  [`install`](#installing-a-locally-built-bundle), which never looks at a release.
 - **Desktop shell.** The Tauri build ([08](08-packaging.md)) bundles its own daemon
   sidecar; whether its tray offers "upgrade UI" separately, or the shell simply inherits
   whatever the slot holds, is not decided here.

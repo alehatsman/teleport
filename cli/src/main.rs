@@ -100,9 +100,10 @@ enum UiAction {
     Install {
         /// Directory holding the built bundle, e.g. `web/dist`.
         dir: PathBuf,
-        /// Name for the version directory. Defaults to `local-<unix seconds>`.
+        /// Name for the version directory, e.g. a commit sha. Required:
+        /// there is no release tag here to infer one from.
         #[arg(long)]
-        name: Option<String>,
+        version: String,
     },
     /// Point the slot back at the previously installed version.
     Rollback,
@@ -140,7 +141,7 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 UiAction::Upgrade { version } => ui::upgrade(&data_dir, version.clone()).await,
-                UiAction::Install { dir, name } => ui::install(&data_dir, dir, name.clone()),
+                UiAction::Install { dir, version } => ui::install(&data_dir, dir, version),
                 UiAction::Rollback => ui::rollback(&data_dir),
                 UiAction::Reset { purge } => ui::reset(&data_dir, *purge),
             };
