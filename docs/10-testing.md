@@ -228,6 +228,48 @@ laptop for no reason — `reconnect_storm` took **11.5s on a fully idle machine
 against a 10s precondition budget**, which is how close one of these had
 already drifted before anybody looked.
 
+## A claim nothing can falsify is not evidence
+
+Two things in this repo read as evidence while being unable to fail. Both bit
+on 2026-10-16, within hours of each other, and they are the same defect wearing
+different clothes.
+
+**A test that cannot fail by not running.** The `ANCHORD_BIN`-gated suites
+early-return when the variable is unset, and a test that returns is a test that
+*passed*: `cargo test --test anchor_http` prints `ok. 17 passed` in 0.01s having
+executed nothing — including the test whose name asserts that sessions survive a
+restart. libtest swallows the `eprintln!("skipping")` on a pass, so not even the
+word reaches the log. Counting executed tests cannot catch this, because the
+count is never zero. Fixed by one *ungated* assertion per binary that goes red
+when `CI` is set without a binary (#108, `5db5fbd`) — the fix had to be something
+that could fail on its own.
+
+**A comment that cannot fail by being out of date.** `docs/03-pty-layer.md`
+carried "Unresolved blocker (2026-09-04)" for six weeks after W1 was resolved,
+and `pty.rs`'s Windows terminate arm said "Unverified on real Windows" long after
+S4 closed. Both were read as live risk by a second repository, which deferred a
+platform port on the strength of them. Code that rots breaks a build; prose that
+rots keeps persuading.
+
+Three cheap habits, the third from the trap described at the top of
+`15-open-questions.md`:
+
+- **Date the status.** "Unverified (2026-09-04)" invites a check; "Unverified"
+  invites belief. A status without a date has no expiry and so never gets one.
+- **A citation becomes yours when you restate it as fact.** Both stale notes
+  crossed into another repo and were built on. Verify at the point of repeating,
+  not at the point of writing.
+- **Prefer a reference that resolves to nothing over one that resolves to the
+  wrong thing.** A dangling link makes a reader keep looking; a plausible wrong
+  one makes them stop.
+
+The general form, and the reason this section is in the testing doc rather than
+a style guide: **assertions that can only succeed are not assertions.** When
+reviewing a status claim — in a fixture, a comment, or a doc — ask what would
+have to happen for it to go red. If the answer is "a person notices", it is
+decoration. Intending to re-read is exactly what failed here; prefer a check that
+can fail on its own.
+
 **Publish the pair, not the green.** A single passing number hides whether a
 fixture is at 60% of its budget or 115% of it, and those are the same colour.
 When a timing matters, record what it took and what it was allowed:
