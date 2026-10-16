@@ -140,6 +140,35 @@ the only thing in that scanner that does.
 The `claude_resume_id` column stays. Dropping it would mean a migration to delete it and
 a second migration to bring it back.
 
+### A second reason to do this: it removes teleport's only live-session label write
+
+`daemon/src/anchor_watch.rs:274` calls `anchor.label(&id, &set, &[])` on a session that is
+already running, to attach `teleport.claude_resume_id` the moment the scanner sees one.
+That is teleport's **only** label write outside `create`; everything else
+(`labels_for`, `anchor_bridge.rs:32-39`) is set once at creation and never touched again.
+
+It matters because of what a label write costs on the other side. anchor's `label` op
+looked per-key on the wire but was a read-modify-write across two separate critical
+sections ([anchor#12](https://github.com/alehatsman/anchor/issues/12)): two clients
+writing disjoint keys to the same live session could lose each other's keys, last writer
+replacing the whole map. anchor fixed it in `e1503c9` by holding one guard across read,
+edit, write **and persist** — the persist being inside the guard is the non-obvious half,
+since serializing only the in-memory edit still lets writers reach the store out of order
+and lose the key again on restart.
+
+So teleport is not exposed today, and will not be once that fix is deployed. But note
+*why* it was not exposed before the fix: not because teleport only labels at create — it
+does not — but because this particular call site has a dormant trigger, Claude Code
+having stopped emitting the OSC 8 hyperlink that fires it
+([#69](https://github.com/alehatsman/teleport/issues/69)). It is live code with a dead
+producer, not a path designed never to run. Anyone re-enabling an OSC path, or adding any
+other live-session label, would reintroduce a multi-writer story without noticing the
+premise had moved.
+
+Moving the id to a create-time flag deletes that call site, and teleport becomes
+single-writer-at-create **by construction rather than by accident** — a property that
+holds no matter what upstream does with its escape sequences.
+
 ### Validation
 
 - `presets.rs`: an older `presets.toml` without `session_id_args` loads with the field
