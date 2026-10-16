@@ -119,7 +119,15 @@ pub async fn upgrade(
     // proxy in `ws_anchor` speaks the same client protocol over an anchor
     // attach; keeping it a separate path leaves the authoritative
     // in-process loop below untouched.
+    #[cfg(unix)]
     let anchor_path = state.anchor.clone();
+    // Windows has no transport to anchord (`lib.rs`'s gate, #107), so the
+    // in-process lookup below is not one of two paths, it is the only one.
+    // Typed as an uninhabited `None` rather than deleted so the branch
+    // structure stays identical on both platforms -- the day a Windows
+    // transport exists, this line is what changes, not the control flow.
+    #[cfg(not(unix))]
+    let anchor_path: Option<std::convert::Infallible> = None;
     let session = if anchor_path.is_some() {
         None
     } else {
@@ -148,6 +156,7 @@ pub async fn upgrade(
     let max_replay_bytes = state.config.max_replay_bytes;
     let control_grace_ms = state.config.control_grace_ms;
 
+    #[cfg(unix)]
     if let Some(anchor) = anchor_path {
         let id = session_id.to_string();
         // Checked before the upgrade, so an unknown session is a 404 on the
@@ -155,8 +164,26 @@ pub async fn upgrade(
         // the upgrade succeed and reporting the error as a frame would be a
         // difference a client can see — and the whole premise of the flag
         // is that it cannot tell which backend it is talking to.
-        if anchor.get(&id).await.is_err() {
-            return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+        //
+        // Only `not_found` is a 404. An unreachable anchord is an outage, and
+        // reporting it as "session not found" tells a browser its work is
+        // gone at the one moment the session is most likely still alive --
+        // a teleportd or anchord restart, which is what this path exists to
+        // survive. A client that believes a 404 stops reconnecting.
+        // `list_sessions` already draws this line (`api.rs`, the comment
+        // about "a visible outage and silently vanished work"); the two
+        // surfaces must not answer the same condition differently.
+        if let Err(e) = anchor.get(&id).await {
+            return if crate::anchor_bridge::is_not_found(&e) {
+                (axum::http::StatusCode::NOT_FOUND, "session not found").into_response()
+            } else {
+                tracing::warn!(session_id = %id, error = %e, "cannot reach anchord for a stream upgrade");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "cannot reach anchord",
+                )
+                    .into_response()
+            };
         }
         let leases = Arc::clone(&state.leases);
         return ws.on_upgrade(move |socket| {

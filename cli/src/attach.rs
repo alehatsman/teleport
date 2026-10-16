@@ -807,7 +807,7 @@ mod escape_tests {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"hello world");
         assert_eq!(bytes, b"hello world");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
     }
 
     #[test]
@@ -816,14 +816,14 @@ mod escape_tests {
         e.process(b"x"); // not at line start any more
         let (bytes, actions) = e.process(b"~.");
         assert_eq!(bytes, b"~.");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
     }
 
     #[test]
     fn detach_at_line_start() {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"~.");
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, b"");
         assert_eq!(actions, vec![Action::Detach]);
     }
 
@@ -831,7 +831,7 @@ mod escape_tests {
     fn claim_control_at_line_start() {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"~!");
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, b"");
         assert_eq!(actions, vec![Action::ClaimControl]);
     }
 
@@ -839,7 +839,7 @@ mod escape_tests {
     fn help_at_line_start() {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"~?");
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, b"");
         assert_eq!(actions, vec![Action::Help]);
     }
 
@@ -848,7 +848,7 @@ mod escape_tests {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"~~");
         assert_eq!(bytes, b"~");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
     }
 
     #[test]
@@ -856,7 +856,7 @@ mod escape_tests {
         let mut e = EscapeState::new();
         let (bytes, actions) = e.process(b"~x");
         assert_eq!(bytes, b"~x");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
     }
 
     /// In raw mode, one keystroke is one `read()` -- `~` and its follow-up
@@ -865,10 +865,10 @@ mod escape_tests {
     fn escape_split_across_two_reads() {
         let mut e = EscapeState::new();
         let (bytes1, actions1) = e.process(b"~");
-        assert!(bytes1.is_empty());
-        assert!(actions1.is_empty());
+        assert_eq!(bytes1, b"");
+        assert_eq!(actions1, vec![]);
         let (bytes2, actions2) = e.process(b".");
-        assert!(bytes2.is_empty());
+        assert_eq!(bytes2, b"");
         assert_eq!(actions2, vec![Action::Detach]);
     }
 
@@ -878,9 +878,9 @@ mod escape_tests {
         e.process(b"echo hi"); // consumes the initial line-start
         let (bytes, actions) = e.process(b"\r");
         assert_eq!(bytes, b"\r");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
         let (bytes, actions) = e.process(b"~.");
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, b"");
         assert_eq!(actions, vec![Action::Detach]);
     }
 
@@ -894,6 +894,6 @@ mod escape_tests {
         assert_eq!(actions, vec![Action::ClaimControl]);
         let (bytes, actions) = e.process(b"~x");
         assert_eq!(bytes, b"~x");
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![]);
     }
 }

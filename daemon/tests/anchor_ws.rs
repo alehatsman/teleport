@@ -636,3 +636,93 @@ async fn a_dropped_controller_keeps_its_lease_through_the_grace_window() {
         .expect("send input");
     read_until(&mut again, "resumed-types").await;
 }
+
+/// The HTTP status a `/stream` upgrade is refused with, or `None` if it
+/// succeeded.
+///
+/// `connect` asserts the handshake works; this one is about the handshake
+/// failing, and specifically about *which* refusal the client is given.
+#[expect(
+    clippy::panic,
+    reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+)]
+async fn upgrade_status(url: &str) -> Option<u16> {
+    let mut request = url.into_client_request().expect("valid ws url");
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", support::TOKEN)
+            .parse()
+            .expect("valid header"),
+    );
+    match tokio_tungstenite::connect_async(request).await {
+        Ok(_) => None,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            Some(response.status().as_u16())
+        }
+        Err(e) => panic!("the upgrade failed for an unexpected reason: {e}"),
+    }
+}
+
+/// An anchord that has gone away is an outage, not a missing session.
+///
+/// `api.rs` already draws this distinction for the session list and says why
+/// in a comment: an empty list and an unreachable backend are "the difference
+/// between a visible outage and silently vanished work". `/stream` collapses
+/// both into `404`, and a browser told `404` has been told the session is
+/// gone -- so it stops reconnecting, during the one event the anchor path
+/// exists to survive.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_anchord_outage_is_not_a_missing_session() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let mut anchord = Anchord::start("outage");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "echo up; cat").await;
+
+    // Baseline: with anchord up, the upgrade succeeds. Without this the test
+    // could pass on a session id that was never valid.
+    let url = daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?mode=observe"));
+    assert_eq!(upgrade_status(&url).await, None, "baseline: should attach");
+
+    // anchord dies underneath a session that is still, from the user's point
+    // of view, running -- a restart, an upgrade, a crash.
+    anchord.child.kill().expect("killing anchord");
+    anchord.child.wait().expect("reaping anchord");
+
+    // What the REST surface says.
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/api/v1/sessions")
+        .header(axum::http::header::HOST, "127.0.0.1")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", support::TOKEN),
+        )
+        .body(axum::body::Body::empty())
+        .expect("valid request");
+    let router = teleportd::api::build_router(std::sync::Arc::clone(&daemon.state));
+    let list_status = tower::ServiceExt::oneshot(router, req)
+        .await
+        .expect("router call")
+        .status()
+        .as_u16();
+
+    // And what the WebSocket surface says about the same daemon, at the same
+    // moment, about the same sessions.
+    let stream_status = upgrade_status(&url).await;
+
+    assert_eq!(
+        list_status, 503,
+        "the list already reports an unreachable anchord as an outage"
+    );
+    assert_eq!(
+        stream_status,
+        Some(503),
+        "/stream must not call an outage a missing session: the list says \
+         {list_status} for the same condition, and a client that believes a \
+         404 stops reconnecting to a session that is still alive"
+    );
+}
