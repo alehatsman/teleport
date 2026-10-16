@@ -212,16 +212,35 @@ already drifted before anybody looked.
 fixture is at 60% of its budget or 115% of it, and those are the same colour.
 When a timing matters, record what it took and what it was allowed:
 
-| | loaded | quiet |
-|---|---|---|
-| `session_backpressure` | 33.7s | 6.2s |
-| `reconnect_storm` | 44.3s | 11.5s |
-| `session_catchup` | 80.9s | 16.7s |
-| `pty_primitive` | 29.9s | 5.7s |
+| | loaded | quiet | factor |
+|---|---|---|---|
+| `session_catchup` | 80.9s | 16.7s | 4.8x |
+| `reconnect_storm` | 44.3s | 11.5s | 3.9x |
+| `session_backpressure` | 33.7s | 6.2s | 5.4x |
+| `pty_primitive` | 29.9s | 5.7s | 5.2x |
+| `anchor_http` | 16.3s | 3.1s | 5.2x |
+| `http_api`, `ws_protocol`, `osc_*`, `output_log`, … | sub-second | sub-second | ~1x |
 
 (Measured 2026-10-16. "Loaded" was 60 orphaned CPU spinners; "quiet" is the
 same machine with them gone. A 5x spread between the two is the whole reason
 a wall-clock budget is not an assertion.)
+
+**The factor column is a tool, not a footnote.** Contention inflates exactly
+the fixtures that move volume and essentially nothing else — the sub-second
+suites barely move. So running a suite you do not know under deliberate load
+and sorting by inflation factor finds its volume budgets faster than reading
+it does. `anchor_http` is the proof: it was the one hidden volume budget in
+this suite, found by reading, and it inflated 5.2x alongside the four that
+were already failing. Use it as a second opinion on the taxonomy, never as a
+replacement — inflation tells you a fixture *depends* on throughput, not
+whether its budget is wrong. (Anchor's suggestion, and their suite's four
+heaviest fixtures are these same four by name, independently arrived at: the
+shape belongs to testing a PTY multiplexer, not to either implementation.)
+
+If you do generate load, collect the PIDs explicitly and verify they died.
+`jobs -p` in a non-interactive shell has no job table, so the obvious
+`kill $HOGS` kills nothing and leaks every spinner — which is how the 60
+above came to exist.
 
 **A premise has to be reachable, and green is not evidence that it was.**
 `terminate_is_not_wedged_by_a_stuck_write` passed from the day it was written
