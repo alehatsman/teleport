@@ -67,6 +67,21 @@ pub fn spec_for(
     }
 }
 
+/// Whether anchor answered "no such session", as opposed to teleport never
+/// having reached anchor at all.
+///
+/// The distinction is not cosmetic. An unknown session is permanent and a
+/// client should stop asking; an unreachable anchord is transient and a
+/// client should keep trying, because the session is very likely alive in a
+/// daemon that is coming back. Collapsing the two tells a browser its work
+/// is gone during the exact event the anchor path exists to survive.
+///
+/// Reads the code the same way [`api_error`] does, so the two cannot drift
+/// into disagreeing about what anchor said.
+pub fn is_not_found(e: &anyhow::Error) -> bool {
+    e.to_string().split(':').next() == Some("not_found")
+}
+
 /// Maps an anchor client error onto teleport's API error.
 ///
 /// Anchor's errors are `"<code>: <message>"`, and the codes are protocol,

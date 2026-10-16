@@ -155,8 +155,26 @@ pub async fn upgrade(
         // the upgrade succeed and reporting the error as a frame would be a
         // difference a client can see — and the whole premise of the flag
         // is that it cannot tell which backend it is talking to.
-        if anchor.get(&id).await.is_err() {
-            return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+        //
+        // Only `not_found` is a 404. An unreachable anchord is an outage, and
+        // reporting it as "session not found" tells a browser its work is
+        // gone at the one moment the session is most likely still alive --
+        // a teleportd or anchord restart, which is what this path exists to
+        // survive. A client that believes a 404 stops reconnecting.
+        // `list_sessions` already draws this line (`api.rs`, the comment
+        // about "a visible outage and silently vanished work"); the two
+        // surfaces must not answer the same condition differently.
+        if let Err(e) = anchor.get(&id).await {
+            return if crate::anchor_bridge::is_not_found(&e) {
+                (axum::http::StatusCode::NOT_FOUND, "session not found").into_response()
+            } else {
+                tracing::warn!(session_id = %id, error = %e, "cannot reach anchord for a stream upgrade");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "cannot reach anchord",
+                )
+                    .into_response()
+            };
         }
         let leases = Arc::clone(&state.leases);
         return ws.on_upgrade(move |socket| {
