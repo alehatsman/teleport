@@ -31,6 +31,18 @@ fn anchord_bin() -> Option<PathBuf> {
     Some(path)
 }
 
+/// The only test in this file that is not itself gated on `ANCHORD_BIN`.
+/// See the twin in `anchor_http.rs` for why a skip here reports as a pass.
+#[test]
+fn ci_must_supply_an_anchord_binary() {
+    if std::env::var_os("CI").is_some() {
+        assert!(
+            anchord_bin().is_some(),
+            "ANCHORD_BIN is unset under CI: every anchor test would report ok without running"
+        );
+    }
+}
+
 struct Anchord {
     child: Child,
     dir: PathBuf,

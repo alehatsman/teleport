@@ -86,6 +86,24 @@ fn anchord_bin() -> Option<PathBuf> {
     Some(path)
 }
 
+/// The only test in this file that is not itself gated on `ANCHORD_BIN`.
+///
+/// Every other test here early-returns when the variable is unset, and an
+/// early return is counted as a pass — so with no anchord the binary reports
+/// `ok. 17 passed` in 0.01s, naming tests that did nothing. That is the green
+/// run for tests that never executed which `anchord_bin` above exists to
+/// refuse. Locally it is the intended way to run; under CI it is a lie, so
+/// under CI it is an error.
+#[test]
+fn ci_must_supply_an_anchord_binary() {
+    if std::env::var_os("CI").is_some() {
+        assert!(
+            anchord_bin().is_some(),
+            "ANCHORD_BIN is unset under CI: every anchor test would report ok without running"
+        );
+    }
+}
+
 /// Short path: a unix socket path is capped near 104 bytes.
 struct Anchord {
     child: Child,
