@@ -116,9 +116,15 @@ versioned contract; an agent that stops emitting them just leaves both null
 
 > **That caveat has already come true for one of them.** Claude Code stopped emitting
 > the OSC 8 link as of v2.1.236, so `claude_resume_id` is null on every session it
-> produces today; only the OSC 0 title still arrives. Degrading to null rather than
-> breaking is the design working, but the field now carries nothing — see
-> [#69](https://github.com/alehatsman/teleport/issues/69) for removing the read path.
+> produces today; only the OSC 0 title still arrives. Re-verified 2026-10-16 against
+> that same build — zero OSC 8 sequences across twenty session logs. Degrading to null
+> rather than breaking is the design working, but the field now carries nothing, and the
+> OSC 8 read path has no live producer. The fix is to stop scraping and have teleport
+> choose the id at spawn time via `claude --session-id`, which also makes the write
+> happen with the session row instead of on a throttle — specified in
+> [21-claude-resume-id-by-injection.md](21-claude-resume-id-by-injection.md),
+> tracked by [#69](https://github.com/alehatsman/teleport/issues/69), not yet
+> implemented. The column stays either way.
 
 They are persisted, unlike `last_bell_ms`/`idle_since_ms`, because of **when** they are
 useful. `claude_resume_id` exists to relaunch a conversation whose session can no longer

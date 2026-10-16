@@ -31,6 +31,7 @@ phone are interchangeable clients that attach and detach freely.
 | 18 | [UI upgrades](18-ui-upgrades.md) | You touch how `web/dist` reaches a running daemon — `--web-dist` resolution, `spa_fallback`, the UI slot, or `teleport ui *`. Shipping a UI must not restart the daemon. |
 | 19 | [Locations](19-locations.md) | You touch the launcher's working-directory picker, pins, or form-input sizing on touch. |
 | 20 | [Retiring the in-process PTY](20-retiring-the-in-process-pty.md) | You are deleting teleport's own PTY layer, collapsing the `use_anchor` seam, or need to know what the anchor path does not cover yet. |
+| 21 | [The resume id, by injection](21-claude-resume-id-by-injection.md) | You are wondering why `claude_resume_id` is always null, or you are about to touch `session/osc.rs`'s OSC 8 half. Spec, not yet implemented. |
 
 Docs 01–14 describe the design. [15](15-open-questions.md) is the list of places where
 that design is asserted rather than proven — read it before writing `pty.rs`.
