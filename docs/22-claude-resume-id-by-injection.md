@@ -1,4 +1,4 @@
-# 21 — The resume id, by injection rather than by scraping
+# 22 — The resume id, by injection rather than by scraping
 
 Status: **spec, not implemented.** Tracking issue
 [#69](https://github.com/alehatsman/teleport/issues/69).

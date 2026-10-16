@@ -1,4 +1,4 @@
-# 18 — Locations: finding the folder you launch in
+# 19 — Locations: finding the folder you launch in
 
 The launcher's working-directory field is the only thing standing between "I want an
 agent here" and a running session. Today it is a text input plus a wall of full-path
