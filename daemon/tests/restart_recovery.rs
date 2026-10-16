@@ -50,6 +50,20 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Upper bound on every "has the daemon got there yet" wait below: the port
+/// file appearing, the first bytes of `output.vt` landing.
+///
+/// Deliberately far past what any of them needs. These are condition waits --
+/// they fail only if the daemon never arrives, and a slow box simply arrives
+/// later (docs/10-testing.md#deadlines-preconditions-and-premises) -- so the
+/// only thing a tight budget buys is a red run on a busy machine. It bought
+/// exactly that at 5s: both tests in this file failed together at "port file
+/// never appeared" during one full parallel `cargo test`, 3/3 green standalone
+/// on the same binaries, which is the signature of the machine and not of
+/// recovery. Spawning a debug-build daemon and binding a socket is a startup,
+/// and a startup under 22 other test binaries is not a 5s operation.
+const DAEMON_WAIT: Duration = Duration::from_secs(30);
+
 fn wait_for_file(path: &Path, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -98,7 +112,7 @@ fn spawn_daemon(data_dir: &Path) -> KillOnDrop {
 
 fn read_port(data_dir: &Path) -> u16 {
     assert!(
-        wait_for_file(&data_dir.join("port"), Duration::from_secs(5)),
+        wait_for_file(&data_dir.join("port"), DAEMON_WAIT),
         "port file never appeared"
     );
     std::fs::read_to_string(data_dir.join("port"))
@@ -179,13 +193,13 @@ fn sigkill_mid_session_recovers_as_lost_with_a_readable_log() {
 
     let log_path = data_dir.join("sessions").join(&id).join("output.vt");
     assert!(
-        wait_for_file(&log_path, Duration::from_secs(2)),
+        wait_for_file(&log_path, DAEMON_WAIT),
         "output.vt was never created"
     );
     // SIGKILL, not the graceful `terminate()` path -- this is the crash
     // docs/01-architecture.md#the-crash-boundary describes, not a clean
     // shutdown. Poll briefly for bytes to land rather than a fixed sleep.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + DAEMON_WAIT;
     while std::fs::metadata(&log_path).map_or(0, |m| m.len()) == 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }

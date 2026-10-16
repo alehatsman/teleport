@@ -29,7 +29,11 @@
 //! invisible there) and un-gated all three to `cfg(unix)`. Rather than
 //! re-guess, measured on real macOS hardware (Darwin 24.6.0, arm64): 20/20
 //! green, 6.77-6.84s wall clock, storm/baseline ratio 0.966-1.094 -- no
-//! measurable degradation, and nowhere near `STORM_CLIENT_TIMEOUT`.
+//! measurable degradation. (That run was also read as "nowhere near
+//! `STORM_CLIENT_TIMEOUT`", a 30s bound on the storm clients' join. The
+//! reading was right and the instrument was not: the same fixture takes
+//! 20-83s under spinners, which is how a quiet-machine margin turns into a
+//! red run on someone's laptop. That bound is gone -- see the join below.)
 //!
 //! It ports because of how this fixture is built, which is worth stating so
 //! the gate is not reintroduced by reflex: the hard assertions are invariants
@@ -53,15 +57,16 @@ use std::time::{Duration, Instant};
 use teleportd::pty::SpawnSpec;
 use teleportd::session::{Session, SessionManager};
 
-const RECV_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bound on how long any one storm client's whole catch-up may take. A
-/// client that is definitively losing ground is expected to hit
-/// `MAX_STALLED_ROUNDS` (session/replay.rs) and register within a handful of
-/// rounds; this is a loud, bounded backstop against the pathological case --
-/// a client that keeps gaining a little ground every round without ever
-/// converging -- rather than an open-ended `.await` that hangs CI if the
-/// clamp logic itself regresses.
-const STORM_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a single `recv()` may come back empty before the control
+/// subscriber is *asked about*, not failed on. This is a sampling period, not
+/// a budget: hitting it proves nothing on its own, because the trickle this
+/// subscriber is reading is a shell loop (`printf; sleep 0.01`) whose cadence
+/// is a property of the machine. Measured under 16 spinners on a 10-core box:
+/// 1-4 chunks per 2s window against a nominal 200, i.e. gaps of ~2s where
+/// idle gives 10ms. A fixed stall budget here was measuring that shell loop
+/// getting descheduled (#102). What `drain_for` does with the sample is the
+/// actual invariant -- see there.
+const STALL_SAMPLE: Duration = Duration::from_secs(10);
 /// How long to measure the control subscriber's throughput before, and then
 /// during, the storm. Long enough to average out scheduling noise, short
 /// enough that CI doesn't pay minutes for a measurement fixture.
@@ -142,12 +147,23 @@ fn spawn_hot_session(manager: &SessionManager) -> Arc<Session> {
 /// advancing `*next_offset` -- asserting each chunk starts exactly where the
 /// last one left off, so a gap or duplicate introduced by contention on the
 /// fan-out mutex fails loudly here rather than surviving as a length-only
-/// coincidence. Also asserts no single `recv()` ever stalls past
-/// `RECV_TIMEOUT` -- the actual invariant N4 cares about (the reader thread
-/// must never be blocked indefinitely by the storm) -- and never returns
-/// `None` (never disconnected). Returns bytes/chunks received in this window
-/// only, for the throughput printout.
+/// coincidence. Also asserts the invariant N4 actually cares about -- the
+/// reader thread is never blocked indefinitely by the storm -- and that the
+/// subscriber is never disconnected (`recv()` never returns `None`). Returns
+/// bytes/chunks received in this window only, for the throughput printout.
+///
+/// **Silence is only evidence against the reader if there was something to
+/// hear.** The previous version failed outright whenever one `recv()` went
+/// `STALL_SAMPLE` without a chunk, which measured the producer -- a shell
+/// loop that a loaded box deschedules for seconds at a time -- rather than
+/// the fan-out mutex (#102, and docs/10-testing.md#deadlines-preconditions-
+/// and-premises). So the session's own offset is read across the quiet
+/// period: a subscriber that received nothing while the session produced
+/// bytes *is* blocked and fails; a subscriber that received nothing because
+/// nothing was written is looking at a slow machine, which is not this
+/// fixture's claim, and it keeps waiting.
 async fn drain_for(
+    session: &Session,
     subscription: &mut teleportd::session::Subscription,
     acc: &mut Vec<u8>,
     next_offset: &mut u64,
@@ -157,10 +173,17 @@ async fn drain_for(
     let mut chunks = 0u64;
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
-        let chunk = tokio::time::timeout(RECV_TIMEOUT, subscription.recv())
-            .await
-            .expect("control subscriber stalled past RECV_TIMEOUT during measurement")
-            .expect("control subscriber was disconnected during measurement");
+        let produced_before = session.next_offset();
+        let Ok(recv) = tokio::time::timeout(STALL_SAMPLE, subscription.recv()).await else {
+            let produced = session.next_offset() - produced_before;
+            assert_eq!(
+                produced, 0,
+                "the control subscriber received nothing for {STALL_SAMPLE:?} \
+                 while the session produced {produced} bytes -- the storm blocked the reader"
+            );
+            continue;
+        };
+        let chunk = recv.expect("control subscriber was disconnected during measurement");
         assert_eq!(
             chunk.offset, *next_offset,
             "control subscriber must see contiguous offsets even under storm contention"
@@ -192,14 +215,10 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
     // `attach(0)` that races an actively-bursting producer can overflow a
     // subscriber's queue with no contention involved at all (see
     // `spawn_hot_session`'s doc comment).
-    let deadline = Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < BACKLOG {
-        assert!(
-            Instant::now() < deadline,
-            "the child never produced the backlog"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // Waits on the producer moving rather than on a clock -- see
+    // `support::await_offset`. This precondition is 12 MiB through a pty;
+    // timing it out was timing the machine (#102).
+    support::await_offset(&session, BACKLOG, "the backlog").await;
 
     // The control subscriber: attaches once, up front, like a client that
     // was already watching when the network blip that triggers the storm
@@ -221,6 +240,7 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
     // Baseline: how fast does this subscriber drain with nobody else
     // touching the fan-out mutex?
     let (baseline_bytes, baseline_chunks) = drain_for(
+        &session,
         &mut control_sub,
         &mut control_acc,
         &mut control_next_offset,
@@ -252,6 +272,7 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
     // concurrently with the storm tasks above, not after they finish, since
     // "after" would just measure the quiet aftermath.
     let (storm_bytes, storm_chunks) = drain_for(
+        &session,
         &mut control_sub,
         &mut control_acc,
         &mut control_next_offset,
@@ -259,11 +280,16 @@ async fn control_subscriber_survives_a_concurrent_reconnect_storm() {
     )
     .await;
 
+    // No wall-clock bound on the join. There used to be a 30s one, guarding
+    // "a client that keeps gaining a little ground every round without ever
+    // converging" -- but `support::catch_up_allow_clamp` already fails such a
+    // client at `MAX_TEST_ROUNDS`, which is a count of rounds and not a count
+    // of seconds. The timeout added no bound the rounds cap did not already
+    // give; what it added was a budget on 40 concurrent 12 MiB catch-ups,
+    // which is 480 MiB of replay measured against a fixed 30s (#102). These
+    // tasks terminate or the rounds cap panics; either way this join ends.
     for task in storm_tasks {
-        tokio::time::timeout(STORM_CLIENT_TIMEOUT, task)
-            .await
-            .expect("a storm client did not converge within the bounded timeout")
-            .expect("storm client task panicked");
+        task.await.expect("storm client task panicked");
     }
 
     // The invariant: the control subscriber was never disconnected and never

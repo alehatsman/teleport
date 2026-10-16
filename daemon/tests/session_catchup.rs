@@ -56,7 +56,7 @@
 mod support;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use teleportd::pty::SpawnSpec;
 use teleportd::session::{SessionManager, MAX_QUEUE_BYTES};
@@ -146,15 +146,10 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     let session = spawn_backlog_then_trickle(&manager);
 
     // Wait for the backlog to actually exist -- attaching before it does
-    // would test nothing.
-    let deadline = Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < BACKLOG {
-        assert!(
-            Instant::now() < deadline,
-            "the child never produced the backlog"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // would test nothing. Waits on the producer moving, not on a clock: how
+    // long 12 MiB takes to come out of a pty is a property of the machine,
+    // and failing on it tested the machine (#104).
+    support::await_offset(&session, BACKLOG, "the backlog").await;
 
     // A subscriber registered *before* its replay is written -- the ordering
     // D1 rejects. Nothing reads it, ever, which is exactly what a client on a
@@ -167,14 +162,7 @@ async fn attaching_far_behind_a_producing_session_reaches_live() {
     // on any platform at any speed. This is the one thing the fixture used to
     // leave to a wall-clock race; see the module doc.
     session.write(TRIGGER).expect("write the burst trigger");
-    let deadline = Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < BACKLOG + BURST {
-        assert!(
-            Instant::now() < deadline,
-            "the child never emitted the burst"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    support::await_offset(&session, BACKLOG + BURST, "the burst").await;
 
     let replay = session.attach(0).expect("attach at 0");
     assert_eq!(replay.replay_from, 0);

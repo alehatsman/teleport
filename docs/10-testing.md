@@ -176,6 +176,122 @@ equivalents chosen per platform.
   not a log without a row
 - log cap reached → appending stops, `log_capped_at` recorded, live streaming continues
 
+## Deadlines, preconditions and premises
+
+Three rules, each of which cost a day to learn.
+
+**A precondition waits on the condition, not on a clock.** A fixture that
+needs 12 MiB of backlog before it can begin is not testing how fast this
+machine produces 12 MiB. Spend patience on *stalling*: any progress resets
+the budget, only an unbroken streak of no movement fails
+(`support::await_offset`). The fixed-deadline version failed four fixtures at
+once on a loaded box (#68, #102, #103, #104) while every byte was still
+arriving, in order, undamaged.
+
+**An assertion measures the thing it names.** `slow_subscriber_is_...` asserted
+"10 MiB drained in under 10s" under a name about the reader never being
+blocked. The per-chunk stall timeout already measures that; the total was
+measuring the machine. Slow is not blocked, and slow is not wedged.
+
+**Silence is evidence only if there was something to hear.** The corollary,
+and the one that closed `reconnect_storm`. Its control subscriber is read
+against a per-`recv()` stall bound — the right instrument for "the storm never
+blocks the reader", except that the thing on the other end is a shell loop
+(`printf; sleep 0.01`). Under 16 spinners that loop delivered **1–4 chunks per
+2s window against a nominal 200**: gaps of seconds where idle gives 10ms. The
+bound was failing the reader for the producer's descheduling. A quiet `recv()`
+now reads `session.next_offset()` across the quiet period and fails only if
+the session produced bytes the subscriber did not get — which is the sentence
+the test's name makes. Before asserting on an absence, check that the thing
+you are measuring was running.
+
+**A timeout that duplicates a non-clock bound is pure flake.** `reconnect_storm`
+joined its 40 storm clients under a 30s timeout, to catch a client that never
+converges. `support::catch_up_allow_clamp` already fails that client at
+`MAX_TEST_ROUNDS` — a count of rounds, not of seconds. The timeout added no
+bound; it added a 30s budget on 480 MiB of concurrent replay. When a fixture
+already has a bound in the right units, a wall clock beside it is not a
+backstop, it is a second failure mode.
+
+**Three kinds of fixed number, and only one of them expires.** Audit a new
+one by asking which it is:
+
+| Kind | Example | Expires? |
+|---|---|---|
+| Condition wait — poll with a bound, fail only if the event never happens | "the bell was never noticed", 15s | No. A slow box arrives later; it does not fail. |
+| Policy-derived bound — asserts the daemon's own documented limit | `terminate()` under 9s against a 7s `GRACEFUL_WAIT + KILL_WAIT` | No. It measures a policy, not throughput. |
+| Volume budget — covers a transfer whose duration scales with bytes | "12 MiB of backlog within 30s" | **Yes.** It is sized against today's hardware, and nothing writes the expiry date on the fixture. |
+
+Every volume budget in this suite has been converted to the progress rule
+above. If you add one, you are adding a fixture that will go red on someone's
+laptop for no reason — `reconnect_storm` took **11.5s on a fully idle machine
+against a 10s precondition budget**, which is how close one of these had
+already drifted before anybody looked.
+
+**Publish the pair, not the green.** A single passing number hides whether a
+fixture is at 60% of its budget or 115% of it, and those are the same colour.
+When a timing matters, record what it took and what it was allowed:
+
+| | loaded | quiet | factor |
+|---|---|---|---|
+| `session_catchup` | 80.9s | 16.7s | 4.8x |
+| `reconnect_storm` | 44.3s | 11.5s | 3.9x |
+| `session_backpressure` | 33.7s | 6.2s | 5.4x |
+| `pty_primitive` | 29.9s | 5.7s | 5.2x |
+| `anchor_http` | 16.3s | 3.1s | 5.2x |
+| `http_api`, `ws_protocol`, `osc_*`, `output_log`, … | sub-second | sub-second | ~1x |
+
+(Measured 2026-10-16. "Loaded" was 60 orphaned CPU spinners; "quiet" is the
+same machine with them gone. A 5x spread between the two is the whole reason
+a wall-clock budget is not an assertion.)
+
+**The factor column is a tool, not a footnote.** Contention inflates exactly
+the fixtures that move volume and essentially nothing else — the sub-second
+suites barely move. So running a suite you do not know under deliberate load
+and sorting by inflation factor finds its volume budgets faster than reading
+it does. `anchor_http` is the proof: it was the one hidden volume budget in
+this suite, found by reading, and it inflated 5.2x alongside the four that
+were already failing. Use it as a second opinion on the taxonomy, never as a
+replacement — inflation tells you a fixture *depends* on throughput, not
+whether its budget is wrong. (Anchor's suggestion, and their suite's four
+heaviest fixtures are these same four by name, independently arrived at: the
+shape belongs to testing a PTY multiplexer, not to either implementation.)
+
+If you do generate load, collect the PIDs explicitly and verify they died.
+`jobs -p` in a non-interactive shell has no job table, so the obvious
+`kill $HOGS` kills nothing and leaks every spinner — which is how the 60
+above came to exist.
+
+**Where the progress counter lives is forced, not chosen.** The predicate
+above — any progress resets, only an unbroken stall fails — is portable. Its
+implementation is not, and a rule that fixed the implementation would break
+one of the two suites that learned it.
+
+`Session::write` enqueues onto a *bounded* channel, so once the writer thread
+is stuck in `write_all` the caller blocks instead of getting an error. A
+wedged writer therefore cannot report anything about itself, and the streak
+has to be sampled from outside — which is why
+`terminate_is_not_wedged_by_a_stuck_write` also needs the writer to publish
+"I returned": from outside, a writer that gave up and a writer that wedged
+look identical, and without that flag the fixed test walks straight back to
+vacuous. Anchor's equivalent returns an error on a full channel, so their
+writer thread is the only thing that *can* observe its own streak and an
+external watcher would be strictly worse — no flag needed, because "returned"
+and "observed a wedge" are the same event there.
+
+Same predicate, two correct implementations, decided by where the blocking
+lives. Carry the predicate; derive the rest locally.
+
+**A premise has to be reachable, and green is not evidence that it was.**
+`terminate_is_not_wedged_by_a_stuck_write` passed from the day it was written
+without ever wedging anything: a tty in canonical mode *discards* an
+over-long line that never terminates rather than queueing it, so 4 KiB blobs
+of `x` went nowhere and `terminate()` raced nothing. Complete lines wedge the
+writer after ~9 KiB. Anchor found this class in their copy first (anchor#9);
+teleport's copy had it too. When a fixture depends on a resource filling up,
+make it print where it filled — a premise that quietly stops being reachable
+looks exactly like a passing test.
+
 ## Failure-injection checklist
 
 Every one of these must produce a defined, tested state — not an exception trace.
@@ -195,7 +311,7 @@ Every one of these must produce a defined, tested state — not an exception tra
 | Fill the disk | append fails → session marked with `io_error`, daemon stays up |
 | `cwd` deleted after spawn | child's problem, not a daemon crash |
 | Child exits leaving a grandchild holding the PTY | session reaches `exited` anyway; the master staying open must not strand it in `running` ([S2](15-open-questions.md#s2--eof-is-not-exit)) |
-| `terminate` while a 1 MiB write is blocked on an unreading child | terminate completes inside the bounded policy; input is dropped, never allowed to hold the session open ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)) |
+| `terminate` while a write is blocked on an unreading child | terminate completes inside the bounded policy; input is dropped, never allowed to hold the session open ([S3](15-open-questions.md#s3--a-blocking-write-wedges-terminate)). The write must be **complete lines**, or the tty discards it and nothing blocks — see above |
 | Spawn a nonexistent executable | `422` from pre-spawn validation — **no row, no directory** ([01](01-architecture.md#session-creation-sequence)) |
 | Spawn fails *after* validation (permissions, fork failure) | `500`, row recorded `exited` / `spawn_failed`, directory exists and is collected on schedule |
 | Second daemon started as another OS user | binds an ephemeral port; neither daemon can read the other's token |

@@ -749,7 +749,13 @@ async fn a_log_past_one_response_cap_is_assembled_from_several() {
     .await;
 
     let cap = 4 * 1024 * 1024;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Waits on the log *growing*, not on a clock: this is 6 MB through a pty
+    // and back out over HTTP, so a fixed budget measures the machine (the
+    // #68/#102/#103/#104 family, docs/10-testing.md#deadlines-preconditions-
+    // and-premises). A producer that has actually stopped still fails, after
+    // an unbroken streak of polls with the body unchanged.
+    let mut longest = 0;
+    let mut stalled = 0;
     let body = loop {
         let (status, bytes) = request(
             &daemon,
@@ -762,11 +768,16 @@ async fn a_log_past_one_response_cap_is_assembled_from_several() {
         if bytes.windows(12).any(|w| w == b"big-log-done") {
             break bytes;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the log never finished; got {} bytes",
-            bytes.len()
-        );
+        if bytes.len() > longest {
+            longest = bytes.len();
+            stalled = 0;
+        } else {
+            stalled += 1;
+            assert!(
+                stalled < 100,
+                "the log stopped growing at {longest} bytes and stayed there"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 

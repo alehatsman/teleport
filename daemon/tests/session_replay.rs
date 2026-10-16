@@ -276,14 +276,7 @@ async fn attaching_past_next_offset_is_offset_ahead() {
     // alone, with nothing wrong in the product. Same precondition
     // `session_catchup.rs`'s D1 gate and `reconnect_storm.rs` already wait
     // on, for the same reason.
-    let deadline = std::time::Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < BURST {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the child never produced its burst"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    support::await_offset(&session, BURST, "the burst").await;
 
     let next_offset = session.next_offset();
     match session.attach(next_offset + 4096) {
@@ -337,15 +330,11 @@ async fn replay_across_a_cap_stops_at_the_cap_and_live_output_continues() {
     // the cap is that live streaming outlives persistence.
     let session = spawn_emitting_forever(&manager);
 
-    // Wait for the cap to actually be hit, then for output to run well past it.
-    let deadline = std::time::Instant::now() + RECV_TIMEOUT;
-    while session.next_offset() < CAP * 4 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "session never produced enough output to cap"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // Wait for the cap to actually be hit, then for output to run well past
+    // it. 256 KiB is small today and a fixed budget covers it easily, but
+    // the amount is a constant above and the budget was not -- waiting on
+    // the producer moving keeps the two from drifting apart.
+    support::await_offset(&session, CAP * 4, "output past the cap").await;
 
     assert_eq!(
         session.log_capped_at(),
