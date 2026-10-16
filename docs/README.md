@@ -30,7 +30,7 @@ phone are interchangeable clients that attach and detach freely.
 | 17 | [Passkey login](17-passkey-login.md) | You touch `/api/v1/auth/*`, login UI, or anything WebAuthn. Explains why there is no password and why an RP ID is never an IP. |
 | 18 | [UI upgrades](18-ui-upgrades.md) | You touch how `web/dist` reaches a running daemon — `--web-dist` resolution, `spa_fallback`, the UI slot, or `teleport ui *`. Shipping a UI must not restart the daemon. |
 | 19 | [Locations](19-locations.md) | You touch the launcher's working-directory picker, pins, or form-input sizing on touch. |
-| 20 | [Retiring the in-process PTY](20-retiring-the-in-process-pty.md) | You are deleting teleport's own PTY layer, collapsing the `use_anchor` seam, or need to know what the anchor path does not cover yet. |
+| 20 | [Retiring the in-process PTY](20-retiring-the-in-process-pty.md) | You are deleting teleport's own PTY layer, collapsing the `use_anchor` seam, or need to know what the anchor path does not cover yet. The release gate is met; the delete is blocked on a Windows transport arm and on anchord reaching every host. |
 | 21 | [Surviving a daemon restart](21-hot-restart.md) | You are asked to make an upgrade stop killing sessions. Read it before writing any `exec(2)`: the mechanism issues #65/#81 propose is superseded by the anchor path, and what is left is state reconstruction, not file descriptors. |
 | 22 | [The resume id, by injection](22-claude-resume-id-by-injection.md) | You are wondering why `claude_resume_id` is always null, or you are about to touch `session/osc.rs`'s OSC 8 half. Spec, not yet implemented. |
 

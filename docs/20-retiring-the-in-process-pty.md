@@ -17,6 +17,37 @@ inventory rather than a discovery exercise.
 Read anchor's `docs/06-teleport-seam.md` for why the seam sits at the session
 layer, and `docs/01-architecture.md` for what the in-process layer is.
 
+## Status — 2026-10-16
+
+**Steps 4–6 of [Ordering](#ordering) are satisfied.** `anchord` is packaged and
+running under its own lifecycle, `use_anchor=true` is deployed on `work_mac`, and
+a release has run on the anchor path. Both M5 exit criteria were demonstrated
+against the live daemon at `4912d9c`:
+
+- a session created by the **old** teleportd (`5c5e476`) survived the upgrade to
+  `4912d9c`, still running, transcript intact from byte 0, and the **new** daemon
+  served it from `GET /api/v1/sessions`
+- `anchord` was rebuilt and bounced underneath a running teleportd, which never
+  noticed — same pid, no warnings logged, reconnected lazily, created a session
+  immediately afterward
+
+That discharges Constraint 1: the restart that proves survival is no longer the
+restart that kills the thing being proved.
+
+**Step 7 — the deletion itself — is not unblocked by that.** It acquires two
+preconditions the earlier steps did not have, because deleting the in-process
+layer removes the fallback that made those steps reversible. They are Constraints
+3 and 4 below. Both involve machines and a second repository, so neither lands as
+a consequence of merging this doc.
+
+**One caveat on the evidence above.** The 26/26 anchor-suite run cited for step 6
+is real, but it is green because `ANCHORD_BIN` was exported by hand. Run without
+it, those same 26 tests print `ok` having executed nothing — they early-return,
+and a returning test counts as a pass (#108, fixed for CI in `5db5fbd`). This
+matters here specifically: after step 7 that suite is the **only** coverage of
+the session path, so a silent skip stops being an annoyance and becomes total
+blindness.
+
 ## Goal
 
 The daemon has **one** session path. `use_anchor` is gone, `anchord` is a
@@ -302,6 +333,64 @@ no amount of care makes a live restart safe before step 5.
 deleted there is nothing left to compare against, so a divergence not closed
 by then is simply the new behaviour, discovered later by a user.
 
+**Constraint 3 — anchor must have a Windows transport before the delete.**
+`anchor_client` speaks `UnixStream` (`daemon/src/anchor_client.rs:29`) and
+`daemon/src/lib.rs:8` declares the module with no cfg gate, so the daemon does
+not build for Windows today (#107). While the in-process layer exists that is a
+build bug with an obvious local fix. **Once it is deleted, the cfg gate stops
+being a fix at all**: gating the module on `unix` would leave Windows with a
+daemon that compiles, boots, reports healthy, and cannot host a single session.
+
+Two honest answers existed. **Decided 2026-10-16: anchor grows a Windows
+transport arm (named pipe).** "teleportd is unix-only" was considered and
+rejected, so Windows keeps a session path and #107 is resolved by that arm
+existing rather than by a cfg attribute.
+
+This inverts the obvious ordering, and the inversion is the point: **#107 is not
+fixed before the deletion, it is decided by it.** Landing a `#[cfg(unix)]` gate
+first would be work the deletion immediately undoes, and it would manufacture
+exactly the silent-healthy-but-useless failure mode Constraint 4 exists to
+prevent — only delivered by an attribute instead of a missing binary.
+
+Cost of the alternative, measured on `5db5fbd`, since "just gate it" sounds
+cheap: `api.rs` carries 32 anchor-dependent lines including two `AppState`
+fields threaded through the core request path (`api.rs:56`, `api.rs:60`), and
+`main.rs` another 20. The gate is a cfg-split of `AppState` and ~50 handler call
+sites, not a one-line attribute.
+
+The transport seam is anchor's design to make; teleport's side is to carry both
+arms behind one `AnchorClient` type and to stop assuming the socket config is a
+filesystem path. **This work lives in the anchor repo and gates this one.**
+
+Note that #107 is not reproducible locally on macOS — `cargo check --target
+x86_64-pc-windows-msvc` dies in `libsqlite3-sys` for want of a Windows C
+toolchain. The error list in that issue is CI's. Nobody should read a local green
+as a refutation.
+
+**Constraint 4 — every host running teleportd must have anchord first.**
+Deleting the in-process layer makes `anchord` mandatory. Fleet audit,
+2026-10-16:
+
+| Host | teleport | anchord | `use_anchor` |
+|---|---|---|---|
+| `work_mac` | yes | yes | `true` |
+| `mac` | yes | **no** | unset (`false`) |
+| `main_pc` | yes | **no** | unset (`false`) |
+| `mini_pc` | yes | **no** | unset (`false`) |
+
+Three hosts run teleportd on the in-process path with no anchord present. The
+delete strands them, and it strands them in the worst available shape: the
+anchor client connects lazily, so teleportd would **start healthy and then fail
+every session it was asked to create**. That is worse than refusing to boot,
+because it looks fine until someone needs it — which is, by construction, the
+moment they are away from the machine.
+
+The fix is two lines of dotfiles per host (`components/anchord`, plus
+`teleport_use_anchor: true`), the same pair `work_mac` already carries. But
+applying it is a host change on each box and needs a per-box go-ahead. **Treat
+this as a dependency with a human in it, not something that lands with the
+merge.**
+
 1. ~~**Resolve gap 12** with anchor.~~ Done — it was anchor's bug, fixed in
    `00f3eaa`. Teleport changes nothing.
 2. ~~**Fix the remaining blockers.**~~ Done — gaps 1, 2 and 3, and #101. All
@@ -309,19 +398,30 @@ by then is simply the new behaviour, discovered later by a user.
    `session_events` (half of gap 2) is left open as non-blocking.
 3. **Close the cheap divergences**, gaps 4 and 5, while both paths still exist
    and can be compared.
-4. **Package `anchord`** as its own launchd/systemd unit with its own
-   lifecycle (anchor M5). Until something starts anchord, flipping the default
-   makes teleport depend on a process nothing launches.
-5. **Flip `use_anchor` to `true`.** Ship it. Leave the flag in place so the
-   old path is one config line away.
-6. **Run a release on the anchor path.** This is the roadmap's gate and it
-   cannot be shortcut: the in-process layer is the rollback.
-7. **Then delete**, in the order the seam collapses: config, `main.rs`,
+4. ~~**Package `anchord`**~~ Done. Running under its own lifecycle on
+   `work_mac`.
+5. ~~**Flip `use_anchor` to `true`.**~~ Done on `work_mac`, 2026-10-16. The flag
+   stays in place, so the old path remains one config line away — and it is the
+   rollback until step 7 removes it.
+6. ~~**Run a release on the anchor path.**~~ Done at `4912d9c`; both exit
+   criteria demonstrated. See [Status](#status--2026-10-16).
+7. **Resolve Constraint 3** — anchor ships a Windows transport arm and teleport
+   carries both arms behind one client type. Cross-repo; anchor leads.
+8. **Satisfy Constraint 4** — anchord present on `mac`, `main_pc`, `mini_pc`,
+   per-box go-ahead obtained. The dotfiles commit may be prepared ahead of this;
+   it may not be applied ahead of it.
+9. **Then delete**, in the order the seam collapses: config, `main.rs`,
    `api.rs`, `ws.rs`, then the modules. Keep the residue listed in
    [What stays](#what-stays).
 
 Steps 2–3 are available now and are worth doing regardless of whether the
 delete ever happens — they are bugs in the path teleport is moving to.
+
+**The flag is the rollback, and step 9 is what spends it.** Up to that point
+every step above is reversible by one config line. Deleting the in-process layer
+is the first irreversible act in this sequence, which is why steps 7 and 8 are
+preconditions rather than follow-ups: there is no second chance to discover that
+a host or a platform was not ready.
 
 ## Minimum anchor version
 
@@ -337,6 +437,11 @@ protocol doc. Against an older anchord each is a live bug:
 Teleport's own half of that audit: input is split at 64 KiB (#97), so a paste
 cannot drop an attach.
 
+**Pending, and blocking step 9:** the Windows transport arm (Constraint 3). When
+it lands it becomes a fourth row here and raises teleport's minimum anchor
+version again — this time on a platform rather than a behaviour. Teleport cannot
+state the version until anchor cuts it.
+
 ## Open questions
 
 - **Gap 11**: do `log_warn_bytes` / `log_max_bytes` get deleted, or
@@ -346,3 +451,14 @@ cannot drop an attach.
   case the in-process path was wrong and this is a fix, not a regression.
 - Does the GC task (`main.rs:453`) have any role once anchord owns session
   lifetime, or does it go with `recover()`?
+- **Constraint 3**: what shape does the transport seam take? Teleport passes
+  `anchor_socket` as a filesystem path today (`main.rs:576`); a named pipe is
+  addressed differently, so either the config field becomes transport-agnostic
+  or each platform gets its own. Anchor's design decides; teleport conforms.
+- **Constraint 3**: is anchor's wire framing already transport-agnostic, or does
+  it assume stream semantics a named pipe will not give it unchanged?
+- **Constraint 4**: should teleportd refuse to start when it cannot reach
+  anchord, once anchord is mandatory? Today the client connects lazily, which is
+  what turns a missing anchord into "healthy but useless" rather than a loud
+  failure. Lazy connect is right while the in-process path exists and arguably
+  wrong after it goes.
