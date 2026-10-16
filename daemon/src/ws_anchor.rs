@@ -92,7 +92,13 @@ pub async fn run_anchor(proxy: Proxy) {
         Err(e) => {
             send_json(
                 &mut socket,
-                &json!({ "type": "error", "code": "not_found", "message": e.to_string() }),
+                // `session_gone`, not `not_found`: that is the code
+                // docs/04-api-protocol.md#error-codes defines for "id
+                // unknown or purged", and clients match these by value.
+                // Reaching here at all is a race — `upgrade` 404s an
+                // unknown id before the upgrade, so this is a session
+                // purged between that check and this one.
+                &json!({ "type": "error", "code": "session_gone", "message": e.to_string() }),
             )
             .await;
             drop(socket.send(close(1011, "session not found")).await);
@@ -108,6 +114,37 @@ pub async fn run_anchor(proxy: Proxy) {
         session.output_bytes,
     );
 
+    // An `after` past the head is the one attach failure teleport can name
+    // itself, and naming it matters: the client drops its cursor and
+    // restarts at the default tail on this code
+    // (web/src/api/stream.ts#onErrorFrame). Reporting it for *every* attach
+    // failure — anchord down, session exited mid-upgrade — threw away a
+    // perfectly good cursor over an error that had nothing to do with it.
+    // Same frame as the in-process path's (`ws.rs`): `next_offset`, no
+    // message, so a client cannot tell the two apart.
+    if from > session.output_bytes {
+        send_json(
+            &mut socket,
+            &json!({
+                "type": "error",
+                "code": "offset_ahead",
+                "next_offset": session.output_bytes,
+            }),
+        )
+        .await;
+        drop(socket.send(close(1008, "offset_ahead")).await);
+        return;
+    }
+
+    // Past a cap the log stops while the offset stream keeps advancing
+    // (anchor `docs/02-model.md#the-size-cap`), so a replay starting in
+    // that region has nothing to read and resumes at the head instead of at
+    // a file position that no longer means what the client thinks. Same
+    // clamp as `Session::attach` makes in-process (`session/mod.rs`), with
+    // `log_capped_at` standing in for the readable end — it is where the
+    // file stopped.
+    let from = clamp_past_cap(from, session.output_bytes, session.log_capped_at);
+
     // Teleport's lease first: it decides who may type, and anchor's is
     // claimed to match it below.
     let mut control_epoch = if requested_control {
@@ -121,13 +158,14 @@ pub async fn run_anchor(proxy: Proxy) {
         .await
     {
         Ok(attach) => attach,
+        // Anything left is anchord's problem, not the cursor's: it is down,
+        // it is restarting, the session went away mid-upgrade. The
+        // in-process path closes these `1011 internal error` with no frame
+        // at all, and a client treats the close as an ordinary drop and
+        // reconnects from where it was.
         Err(e) => {
-            send_json(
-                &mut socket,
-                &json!({ "type": "error", "code": "offset_ahead", "message": e.to_string() }),
-            )
-            .await;
-            drop(socket.send(close(1008, "attach refused")).await);
+            tracing::warn!(session_id = %session_id, error = %e, "attaching through anchor");
+            drop(socket.send(close(1011, "internal error")).await);
             return;
         }
     };
@@ -219,11 +257,19 @@ pub async fn run_anchor(proxy: Proxy) {
                     .await;
                 }
                 // The stream ended without an exit: anchor dropped this
-                // subscriber for falling behind. Closing is the signal to
-                // reconnect from the last offset, which is what the client
-                // already does after any disconnect.
+                // subscriber for falling behind. `1013 slow_consumer` is
+                // what the in-process path sends for its own backpressure
+                // eviction (`ws.rs`), and what
+                // docs/04-api-protocol.md#error-codes tells a client to
+                // reconnect with backoff on.
+                //
+                // An anchord that died mid-stream ends the stream the same
+                // way and is reported the same way. The two are not
+                // distinguishable from this side, and the client action is
+                // identical either way — reconnect from the last offset —
+                // so the ambiguity costs a log line, not a behaviour.
                 Ok(None) => {
-                    drop(socket.send(close(1001, "stream ended")).await);
+                    drop(socket.send(close(1013, "slow_consumer")).await);
                     break;
                 }
                 Err(e) => {
@@ -294,7 +340,27 @@ pub async fn run_anchor(proxy: Proxy) {
                     let allowed = control_epoch
                         .is_some_and(|epoch| leases.is_controller(&session_id, &client_id, epoch));
                     if allowed {
-                        if attach.send_input(&bytes).await.is_err() {
+                        if let Err(e) = attach.send_input(&bytes).await {
+                            // The lease said yes and the write still failed,
+                            // which on an attached connection means the far
+                            // end is going away: the session is terminating,
+                            // or anchord is. `session_closing` is the code
+                            // the in-process path raises for the first of
+                            // those (`ws.rs`), and the one that tells a
+                            // client to disable input rather than retype
+                            // (docs/04-api-protocol.md#error-codes). Sent
+                            // before breaking, because the close frame
+                            // behind it says nothing about why.
+                            tracing::debug!(session_id = %session_id, error = %e, "write rejected");
+                            send_json(
+                                &mut socket,
+                                &json!({
+                                    "type": "error",
+                                    "code": "session_closing",
+                                    "message": "input rejected: session is closing",
+                                }),
+                            )
+                            .await;
                             break;
                         }
                     } else {
@@ -443,4 +509,53 @@ fn close(code: u16, reason: &'static str) -> Message {
         code,
         reason: reason.into(),
     }))
+}
+
+/// Moves a replay cursor that lands in a capped region up to the head.
+///
+/// `log_capped_at` is where anchord's log file stopped; the offset stream
+/// kept going past it, so bytes at or above it were streamed live and are
+/// gone. A client asking for them gets no replay and is told where the
+/// stream resumes — the same answer `Session::attach` gives in-process,
+/// where the readable end plays this role.
+///
+/// `None` means nothing was capped, so there is nothing to clamp except the
+/// degenerate `from == head`, which is already the head.
+fn clamp_past_cap(from: u64, head: u64, log_capped_at: Option<u64>) -> u64 {
+    if from >= head.min(log_capped_at.unwrap_or(head)) {
+        head
+    } else {
+        from
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_past_cap;
+
+    #[test]
+    fn an_uncapped_log_replays_from_wherever_it_was_asked() {
+        assert_eq!(clamp_past_cap(500, 1000, None), 500);
+        assert_eq!(clamp_past_cap(0, 1000, None), 0);
+    }
+
+    #[test]
+    fn a_cursor_below_the_cap_still_has_bytes_to_read() {
+        assert_eq!(clamp_past_cap(500, 1000, Some(800)), 500);
+        assert_eq!(clamp_past_cap(799, 1000, Some(800)), 799);
+    }
+
+    #[test]
+    fn a_cursor_in_the_capped_region_resumes_at_the_head() {
+        // 800..1000 was streamed live and never written, so there is
+        // nothing between 800 and the head to replay.
+        assert_eq!(clamp_past_cap(800, 1000, Some(800)), 1000);
+        assert_eq!(clamp_past_cap(950, 1000, Some(800)), 1000);
+    }
+
+    #[test]
+    fn the_head_itself_is_the_head_either_way() {
+        assert_eq!(clamp_past_cap(1000, 1000, None), 1000);
+        assert_eq!(clamp_past_cap(1000, 1000, Some(800)), 1000);
+    }
 }
