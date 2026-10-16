@@ -1,9 +1,23 @@
 name: CI
 
+# issue #113: every branch push, not just `main`. Most of this repo's work
+# reaches `main` as direct merge commits rather than through PRs, so a
+# `branches: [main]` filter means the first time CI sees a change is after it
+# is already on `main` -- `780ff74` took the Windows daemon build down and
+# stayed red for a day on exactly that workflow. Running on the branch turns
+# the signal into something you get before the merge.
 on:
   push:
-    branches: [main]
   pull_request:
+
+# A branch with an open PR fires both `push` and `pull_request` for the same
+# commit. `head_ref || ref_name` resolves to the same branch name on both, so
+# the pair lands in one group and the duplicate is cancelled. `main` is
+# exempt from cancellation: there the run is the record of whether that commit
+# is good, and a later push must not erase an earlier commit's verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   daemon-fmt:
