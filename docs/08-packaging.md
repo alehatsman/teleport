@@ -114,6 +114,12 @@ Rules for the updater:
   assets live in a directory the daemon re-reads per request, and `teleport ui upgrade`
   swaps it atomically ([18-ui-upgrades.md](18-ui-upgrades.md)). A UI-only fix must never
   be shipped as a daemon restart.
+- **The shell does not get its own "Upgrade UI" tray action.** It reads the same
+  `<data_dir>` the CLI flips — resolved identically in all three crates and passed to the
+  sidecar explicitly as `--data-dir` — so it inherits whatever the slot holds, and a
+  populated slot keeps shadowing the sidecar's embedded UI across shell updates. Both
+  halves, and why, are in
+  [18](18-ui-upgrades.md#the-desktop-shell-inherits-the-slot).
 - A daemon that must restart marks its sessions `lost` / `daemon_restart` like any other
   restart. The UI states the truth; it never pretends a session survived.
 - None of this makes a *crash* survivable, on either path. If `anchord` dies its ptys die
