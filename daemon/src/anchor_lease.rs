@@ -242,6 +242,12 @@ impl LeaseRegistry {
     /// reclaimed it first, which bumps the epoch and clears the flag. It is
     /// **never auto-granted to anyone else** when the window expires;
     /// someone else taking it is always an explicit claim.
+    ///
+    /// An expiry that frees the lease announces [`SessionEvent::ControlReleased`]
+    /// just as [`release_control`](Self::release_control) does — the same
+    /// frame, for the same reason, because a client cannot tell a holder that
+    /// handed the lease back from one that simply went away, and must not have
+    /// to (docs/04-api-protocol.md#disconnect-grace).
     pub fn begin_control_grace(
         self: &Arc<Self>,
         session: &str,
@@ -264,21 +270,41 @@ impl LeaseRegistry {
         let session = session.to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(grace_ms)).await;
-            let mut leases = registry.leases.lock();
-            if let Some(lease) = leases.get_mut(&session) {
-                // Only free it if grace is still what protects this same
-                // epoch: a reconnect bumps the epoch and clears the flag, and
-                // a claim replaced the holder outright.
-                if lease.grace
-                    && lease.holder.as_deref() == Some(client_id.as_str())
-                    && lease.epoch == epoch
-                {
-                    lease.holder = None;
-                    lease.holder_name = None;
-                    lease.grace = false;
-                    // An empty lease has no holder to describe; see the
-                    // same clear in session/control.rs.
-                    lease.preempted = None;
+            // `Some(hint)` only when this expiry is what freed the lease, so
+            // a window that lapsed long after someone else took it announces
+            // nothing.
+            let freed = {
+                let mut leases = registry.leases.lock();
+                leases.get_mut(&session).and_then(|lease| {
+                    // Only free it if grace is still what protects this same
+                    // epoch: a reconnect bumps the epoch and clears the flag, and
+                    // a claim replaced the holder outright.
+                    if lease.grace
+                        && lease.holder.as_deref() == Some(client_id.as_str())
+                        && lease.epoch == epoch
+                    {
+                        lease.holder = None;
+                        lease.holder_name = None;
+                        lease.grace = false;
+                        // An empty lease has no holder to describe, so this
+                        // clears either way; it is taken rather than dropped
+                        // because who that holder displaced is the hand-back
+                        // hint the announcement carries. Same shape as the
+                        // expiry in session/control.rs.
+                        Some(lease.preempted.take())
+                    } else {
+                        None
+                    }
+                })
+            };
+            // `leases` is released before `events` is taken, the same order
+            // every other method here uses.
+            if let Some(resume_hint) = freed {
+                if let Some(tx) = registry.events.lock().get(&session) {
+                    drop(tx.send(SessionEvent::ControlReleased {
+                        by: client_id,
+                        resume_hint,
+                    }));
                 }
             }
         });
@@ -459,6 +485,71 @@ mod tests {
         assert!(!registry.is_controller("s", "alice", epoch));
         // Freed, not transferred: nobody holds it now.
         assert!(registry.controller_name("s").is_none());
+    }
+
+    /// The bug behind #105: a lease freed by an expiring grace window is in
+    /// exactly the same state as one handed back explicitly, and has to be
+    /// announced the same way. Without this the client the holder preempted
+    /// sits in observer mode forever, dropping every keystroke, while the
+    /// session list correctly reports no controller at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grace_expiry_announces_the_free_lease_and_hands_it_back() {
+        let registry = Arc::new(LeaseRegistry::new());
+        let mut events = registry.subscribe("s");
+        let _alice = registry
+            .attach_control("s", "alice", "Alice")
+            .expect("free");
+        let bob = registry.claim_control("s", "bob", "Bob");
+        drop(events.try_recv()); // the revoke
+
+        // Bob's socket drops and never comes back.
+        registry.begin_control_grace("s", "bob".to_owned(), bob, 50);
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty),
+            "opening the window changes nothing yet -- bob may still return"
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            events.try_recv(),
+            Ok(SessionEvent::ControlReleased {
+                by: "bob".to_owned(),
+                resume_hint: Some("alice".to_owned()),
+            }),
+            "expiry frees the lease, so it must say so -- and name who it goes back to"
+        );
+        assert!(registry.controller_name("s").is_none(), "freed, not moved");
+    }
+
+    /// The announcement is tied to *this* expiry doing the freeing, not to
+    /// the window merely elapsing. A claim already moved the lease on, and
+    /// telling everyone it came free would be a lie that lands after the
+    /// fact and unseats the new controller in every other client's UI.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_that_lapsed_after_a_claim_announces_nothing() {
+        let registry = Arc::new(LeaseRegistry::new());
+        let mut events = registry.subscribe("s");
+        let alice = registry
+            .attach_control("s", "alice", "Alice")
+            .expect("free");
+
+        registry.begin_control_grace("s", "alice".to_owned(), alice, 50);
+        let bob = registry.claim_control("s", "bob", "Bob");
+        drop(events.try_recv()); // the revoke
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty),
+            "alice's dead window must not announce bob's live lease as free"
+        );
+        assert!(
+            registry.is_controller("s", "bob", bob),
+            "and must not free it either"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -162,6 +162,14 @@ impl Session {
     /// [`attach_control`](Self::attach_control) (which bumps `epoch` and
     /// clears `grace`) -- the lease is **never** auto-granted to anyone else
     /// when the window expires (docs/04-api-protocol.md#disconnect-grace).
+    ///
+    /// An expiry that frees the lease broadcasts
+    /// [`SessionEvent::ControlReleased`], exactly as
+    /// [`release_control`](Self::release_control) does. A lease that comes
+    /// free because its holder closed a laptop lid is in the same state as
+    /// one its holder handed back deliberately, and no attached client can
+    /// tell the two apart -- so announcing only the deliberate one leaves
+    /// every observer believing the lease is still held.
     pub fn begin_control_grace(self: &Arc<Self>, client_id: String, epoch: u64, grace_ms: u64) {
         {
             let mut lease = self.control.lock();
@@ -173,24 +181,43 @@ impl Session {
         let session = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(grace_ms)).await;
-            let mut lease = session.control.lock();
-            // Only free it if grace is still what's protecting this same
-            // epoch -- a reconnect bumps `epoch` and clears `grace`, and a
-            // `claim_control` from someone else already replaced `holder`
-            // (and `epoch`) entirely.
-            if lease.grace
-                && lease.holder.as_deref() == Some(client_id.as_str())
-                && lease.epoch == epoch
-            {
-                lease.holder = None;
-                lease.holder_name = None;
-                lease.grace = false;
-                // The lease is empty; `preempted` describes a holder that
-                // no longer exists. Nothing reads it in this state (every
-                // path back to holding goes through `attach_control`, which
-                // clears it, or `claim_control`, which sets it), but a field
-                // that stops being true is a trap for the next reader.
-                lease.preempted = None;
+            // `Some(hint)` only when this expiry is what freed the lease --
+            // the broadcast below must not fire for a window that lapsed
+            // after someone else had already taken it.
+            let freed = {
+                let mut lease = session.control.lock();
+                // Only free it if grace is still what's protecting this same
+                // epoch -- a reconnect bumps `epoch` and clears `grace`, and a
+                // `claim_control` from someone else already replaced `holder`
+                // (and `epoch`) entirely.
+                if lease.grace
+                    && lease.holder.as_deref() == Some(client_id.as_str())
+                    && lease.epoch == epoch
+                {
+                    lease.holder = None;
+                    lease.holder_name = None;
+                    lease.grace = false;
+                    // Taken, not just cleared: the lease is empty and
+                    // `preempted` would describe a holder that no longer
+                    // exists (a field that stops being true is a trap for the
+                    // next reader), but who that holder displaced is exactly
+                    // the hand-back hint this expiry has to carry out with it.
+                    Some(lease.preempted.take())
+                } else {
+                    None
+                }
+            };
+            // Lock released first: `send` runs arbitrary receiver wakeups,
+            // and nothing below needs the lease.
+            if let Some(resume_hint) = freed {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "broadcast send; a failure here just means no one is currently listening for control-lease changes"
+                )]
+                let _ = session.events.send(SessionEvent::ControlReleased {
+                    by: client_id,
+                    resume_hint,
+                });
             }
         });
     }
