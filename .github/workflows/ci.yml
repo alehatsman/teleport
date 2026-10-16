@@ -10,13 +10,22 @@ on:
   push:
   pull_request:
 
-# A branch with an open PR fires both `push` and `pull_request` for the same
-# commit. `head_ref || ref_name` resolves to the same branch name on both, so
-# the pair lands in one group and the duplicate is cancelled. `main` is
-# exempt from cancellation: there the run is the record of whether that commit
-# is good, and a later push must not erase an earlier commit's verdict.
+# Keyed on the full `github.ref`, which differs between events
+# (`refs/heads/x` vs `refs/pull/N/merge`), so a `push` run and a
+# `pull_request` run for the same commit do NOT share a group.
+#
+# Collapsing them was the obvious move and it is wrong: a cancelled run stays
+# attached to the commit and reports as a *failed* check, so a green PR shows
+# red X's for the half that got cancelled. Legible signal is the entire point
+# of #113, and this repo's work mostly bypasses PRs anyway -- so the duplicate
+# is rare and costs less than a misleading red.
+#
+# What this does still collapse is the real waste: pushing twice to one branch
+# cancels the superseded run. `main` is exempt, because there a run is the
+# verdict on a specific commit and a later push must not erase an earlier
+# commit's verdict.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
