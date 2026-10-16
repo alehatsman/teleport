@@ -276,8 +276,7 @@ impl AnchorClient {
             "from": from,
             "control": control,
         });
-        write_request(&mut write_half, &request).await?;
-        let response = read_response(&mut reader).await?;
+        let response = exchange(&mut write_half, &mut reader, &request).await?;
         check_ok(&response)?;
 
         Ok(AnchorAttach {
@@ -320,8 +319,7 @@ impl AnchorClient {
         if let Value::Object(fields) = body {
             request.extend(fields);
         }
-        write_request(&mut write_half, &Value::Object(request)).await?;
-        let response = read_response(&mut reader).await?;
+        let response = exchange(&mut write_half, &mut reader, &Value::Object(request)).await?;
         check_ok(&response)?;
         Ok(response)
     }
@@ -582,6 +580,43 @@ impl AnchorAttach {
     }
 }
 
+/// How long a failed write waits for the reply that may already be on the
+/// wire.
+///
+/// Only the error path uses it. A write that failed is no promise a reply is
+/// coming, so an unbounded read there could hang a request forever on a peer
+/// that died without closing. Generous enough that a reply already written
+/// is never missed.
+const REPLY_AFTER_WRITE_ERROR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Sends one control line and reads its reply, preferring a reply that
+/// arrived to the write error that hid it.
+///
+/// Anchord answers a control line past its 1 MiB cap with `too_large` and
+/// *then* closes, so the client's own write usually fails with megabytes
+/// still in flight while the reply is already on the wire. Returning that
+/// write error unread turns the one failure anchor took care to name into a
+/// broken pipe, indistinguishable from the daemon dying. Anchor's
+/// `docs/04-protocol.md` is explicit: read it before acting on the write
+/// error.
+///
+/// No reply means the write error was the truth, and it is what comes back.
+async fn exchange(
+    out: &mut tokio::net::unix::OwnedWriteHalf,
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    body: &Value,
+) -> Result<Value> {
+    let Err(write_error) = write_request(out, body).await else {
+        return read_response(reader).await;
+    };
+    match tokio::time::timeout(REPLY_AFTER_WRITE_ERROR, read_response(reader)).await {
+        Ok(Ok(response)) => Ok(response),
+        // Nothing readable, or nothing in time: the write error is the only
+        // account of what happened, so it is the one reported.
+        Ok(Err(_)) | Err(_) => Err(write_error),
+    }
+}
+
 async fn write_request(out: &mut tokio::net::unix::OwnedWriteHalf, body: &Value) -> Result<()> {
     let mut line = serde_json::to_vec(body).context("encoding a request")?;
     line.push(b'\n');
@@ -619,4 +654,99 @@ fn check_ok(response: &Value) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("anchord refused the request");
     bail!("{code}: {message}")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use tokio::net::UnixListener;
+
+    use super::{AnchorClient, AnchorSpec, BTreeMap, PathBuf};
+
+    /// Anchord's cap on one control line, from its `docs/04-protocol.md`.
+    const MAX_CONTROL_LINE: usize = 1024 * 1024;
+
+    /// A stand-in for anchord doing the one thing this test is about: it
+    /// reads up to the cap, answers `too_large`, and closes **without
+    /// draining the rest of the line**. That last part is what makes the
+    /// client's own write fail with the reply already on the wire, which is
+    /// the situation anchor's protocol doc warns clients about.
+    async fn serve_too_large_then_close(listener: UnixListener) {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = super::BufReader::new(read_half);
+        let mut seen = 0_usize;
+        let mut buf = vec![0_u8; 64 * 1024];
+        while seen < MAX_CONTROL_LINE {
+            match super::AsyncReadExt::read(&mut reader, &mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen += n,
+            }
+        }
+        let reply = br#"{"id":1,"ok":false,"error":{"code":"too_large","message":"control line is longer than 1 MiB"}}
+"#;
+        if super::AsyncWriteExt::write_all(&mut write_half, reply)
+            .await
+            .is_ok()
+        {
+            drop(super::AsyncWriteExt::flush(&mut write_half).await);
+        }
+        // Both halves drop here: the connection closes with megabytes of
+        // the client's request still unread.
+    }
+
+    /// A control line past anchor's cap surfaces as the `too_large` anchord
+    /// answered with -- a 400 -- rather than as the broken pipe that answer
+    /// races.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversized_control_line_reports_the_reply_not_the_write_error() {
+        // Short path on purpose: a unix socket address holds ~104 bytes.
+        let dir = PathBuf::from(format!("/tmp/tp-anchor-toolarge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creating the socket dir");
+        let socket = dir.join("anchor.sock");
+        if socket.exists() {
+            std::fs::remove_file(&socket).expect("clearing a stale socket");
+        }
+        let listener = UnixListener::bind(&socket).expect("binding the fake anchord");
+        let server = tokio::spawn(serve_too_large_then_close(listener));
+
+        // `create` carries the spec, and the spec carries the environment:
+        // the one control line teleport can realistically make too big.
+        let mut env = BTreeMap::new();
+        env.insert("TELEPORT_BIG".to_owned(), "x".repeat(4 * MAX_CONTROL_LINE));
+        let spec = AnchorSpec {
+            command: "/bin/sh".to_owned(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp"),
+            env,
+            cols: 80,
+            rows: 24,
+            login_shell: false,
+        };
+
+        let client = AnchorClient::new(&socket);
+        let error = client
+            .create(&spec, &BTreeMap::new())
+            .await
+            .expect_err("an oversized control line must not succeed");
+
+        server.abort();
+        std::fs::remove_dir_all(&dir).expect("cleaning up the socket dir");
+
+        let text = error.to_string();
+        assert!(
+            text.starts_with("too_large:"),
+            "the write error hid anchord's reply: {text}"
+        );
+        assert_eq!(
+            crate::anchor_bridge::api_error(&error)
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "`too_large` must reach the client as a 400, not a 500"
+        );
+    }
 }

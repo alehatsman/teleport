@@ -998,3 +998,57 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     )]
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `create` whose control line is past anchor's 1 MiB cap comes back a
+/// 400 naming `too_large`, not a 500.
+///
+/// Anchord answers an oversized control line and *then* closes, so
+/// teleport's own write usually fails with the reply already on the wire.
+/// Acting on the write error instead of reading that reply turned the one
+/// failure anchor took care to name into a broken pipe -- `ApiError::
+/// Internal`, indistinguishable from anchord having died (#99).
+///
+/// `env` is the reachable way to get there: the spec carries the
+/// environment, so the control line grows with it. The body stays under
+/// axum's 2 MB default so the 400 comes from anchor rather than from the
+/// extractor.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_create_is_refused_as_too_large_not_as_an_internal_error() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("toolarge");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+
+    // Past 1 MiB once serialised, comfortably under the 2 MB body limit.
+    let (status, body) = post_json(
+        &daemon,
+        "/api/v1/sessions",
+        &json!({
+            "kind": "shell",
+            "command": "/bin/sh",
+            "args": ["-c", "sleep 30"],
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+            "env": { "TELEPORT_BIG": "x".repeat(1_400_000) },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an oversized control line must be a 400, not a 500: {body}"
+    );
+    let message = body
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        message.contains("too_large"),
+        "the 400 must carry anchor's code: {body}"
+    );
+}
