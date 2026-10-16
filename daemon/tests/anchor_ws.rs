@@ -557,6 +557,86 @@ async fn a_cursor_past_the_head_is_offset_ahead_and_nothing_else() {
     assert_eq!(next_close(&mut ws).await, 1008, "wrong close code");
 }
 
+/// A controller's lease survives its socket dying, on the anchor path too.
+///
+/// `ws_protocol.rs` proves this for the in-process path three ways
+/// (`disconnect_grace_resumes_for_the_same_client_but_never_wins_a_race`,
+/// `grace_expiry_frees_the_lease_with_no_auto_grant`,
+/// `grace_expiry_tells_the_client_it_was_taken_from`). Nothing proved it for
+/// the anchor path, so nothing proved `ws_anchor.rs:418` actually reaches
+/// `begin_control_grace` when a socket drops — which is the half that leaked
+/// in #101 and the reason `is_tracking` exists.
+///
+/// The load-bearing assertion is the *second* client, not the reconnect. A
+/// lease that was simply freed on disconnect would also let the original
+/// client take control again on reconnect, so resuming proves nothing on its
+/// own. Only a bystander being refused in the meantime distinguishes "held
+/// in grace for A" from "free, and A happened to ask first".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_controller_keeps_its_lease_through_the_grace_window() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("grace");
+    anchord.ready().await;
+    let config = Config {
+        // Long enough that the assertions below are not racing the clock on
+        // a loaded machine, short enough that the test is not itself a sleep.
+        control_grace_ms: 4_000,
+        ..Default::default()
+    };
+    let daemon = support::spawn_on_anchor(config, None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo grace-ready; cat").await;
+
+    let mut first = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=control&client_id=browser-a&client_name=A"
+    )))
+    .await;
+    assert_eq!(next_json(&mut first).await["control"], true);
+    read_until(&mut first, "grace-ready").await;
+
+    // An ordinary disconnect -- the socket dies, the human did not release.
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The discriminating assertion: a different client attaching for control
+    // inside A's grace window must be refused. Attach never preempts, and a
+    // lease held in grace is not free.
+    let mut bystander = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=control&client_id=browser-b&client_name=B"
+    )))
+    .await;
+    let ready = next_json(&mut bystander).await;
+    assert_eq!(
+        ready["control"], false,
+        "a lease inside its grace window is not free: {ready}"
+    );
+    assert_eq!(
+        ready["controller"], "A",
+        "the grace window still names the client it is being held for: {ready}"
+    );
+    drop(bystander);
+
+    // And the original client resumes it by reconnecting under the same id.
+    let mut again = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=control&client_id=browser-a&client_name=A"
+    )))
+    .await;
+    let resumed = next_json(&mut again).await;
+    assert_eq!(
+        resumed["control"], true,
+        "the same client_id must resume its lease inside the grace window: {resumed}"
+    );
+
+    // Resuming is not just a flag: input has to reach the PTY again.
+    again
+        .send(Message::Binary(b"echo resumed-types\n".to_vec().into()))
+        .await
+        .expect("send input");
+    read_until(&mut again, "resumed-types").await;
+}
+
 /// The HTTP status a `/stream` upgrade is refused with, or `None` if it
 /// succeeded.
 ///
