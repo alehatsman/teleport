@@ -87,6 +87,12 @@ async fn terminate_is_not_wedged_by_a_stuck_write() {
     // raced nothing at all. Anchor found it in their copy and measured it:
     // a non-reading child took 8.5 MB of blob writes without stalling, and
     // wedged permanently after 1,022 bytes of complete lines (anchor#9).
+    //
+    // Measured *here* at ~9,216 bytes, and the gap from anchor's 1,022 is
+    // not a discrepancy to reconcile: `Session::write` enqueues onto a
+    // bounded channel that absorbs its share before the tty's buffer takes
+    // over. Do not shrink what this writes to match anchor's number --
+    // that is exactly how the premise stops being reachable again.
     let writes = Arc::new(AtomicU64::new(0));
     let gave_up = Arc::new(AtomicBool::new(false));
     let writer_session = Arc::clone(&session);
