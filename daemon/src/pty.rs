@@ -683,8 +683,12 @@ fn control_thread_main(
                 #[cfg(windows)]
                 {
                     // ClosePseudoConsole via dropping the master handle.
-                    // Unverified on real Windows --
-                    // [S4](../../docs/15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole).
+                    // Verified on real Windows 2026-09-05 through this exact
+                    // path: an attached grandchild goes down with it in ~0.5s
+                    // (`pty_primitive_windows.rs`'s
+                    // `terminate_kills_the_grandchild_process_tree`) --
+                    // [S4](../../docs/15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole),
+                    // closed.
                     drop(master.take());
                 }
 
