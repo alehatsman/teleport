@@ -559,9 +559,10 @@ mod tests {
         assert_eq!(passkey_list(&conn, None).unwrap().len(), 2);
         assert_eq!(passkey_list(&conn, Some("localhost")).unwrap().len(), 1);
         assert_eq!(passkey_list(&conn, Some("host.ts.net")).unwrap().len(), 1);
-        assert!(passkey_list(&conn, Some("evil.example"))
-            .unwrap()
-            .is_empty());
+        // `assert_eq!` rather than `assert!(..is_empty())` so a failure prints
+        // which passkeys leaked across the rp-id boundary, not just that some
+        // did (`clippy::assert_is_empty`, new in Rust 1.99).
+        assert_eq!(passkey_list(&conn, Some("evil.example")).unwrap(), []);
     }
 
     #[test]

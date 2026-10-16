@@ -231,6 +231,7 @@ async fn main() -> Result<()> {
     // anchord when this is on. It still defaults off — the in-process layer
     // stays authoritative until teleport's own suite has run green against
     // the anchor path and a release has shipped on it (anchor ROADMAP M5).
+    #[cfg(unix)]
     let anchor = if config.use_anchor {
         let socket = match &config.anchor_socket {
             Some(socket) => socket.clone(),
@@ -242,9 +243,23 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Windows has no transport to anchord (`lib.rs`'s gate, #107). Refusing
+    // the flag outright rather than ignoring it: `use_anchor` is a promise
+    // that sessions outlive the daemon, and silently running them in-process
+    // would break that promise at the one moment -- an update restart -- the
+    // operator set the flag to survive.
+    #[cfg(not(unix))]
+    if config.use_anchor {
+        anyhow::bail!(
+            "--use-anchor is not supported on Windows: teleportd has no transport to anchord yet (see #107)"
+        );
+    }
+
     // Follows every session teleport owns, so the fields the UI shows stay
     // truthful for sessions nobody currently has open.
+    #[cfg(unix)]
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
+    #[cfg(unix)]
     if let Some(client) = &anchor {
         teleportd::anchor_watch::spawn_supervisor(
             client.clone(),
@@ -256,7 +271,9 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         sessions,
+        #[cfg(unix)]
         anchor,
+        #[cfg(unix)]
         watch,
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db: Some(db),
@@ -574,6 +591,11 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
 /// Anchor's own resolution, mirrored rather than imported: teleport does not
 /// depend on the anchor crate, so this follows its documented default of
 /// `$XDG_RUNTIME_DIR/anchor.sock`, falling back to the data dir.
+///
+/// Unix-only: its one caller is the anchor setup above, and the default it
+/// resolves is a filesystem socket path, which is the assumption a Windows
+/// transport would have to replace rather than reuse (docs/20, Constraint 3).
+#[cfg(unix)]
 fn anchor_socket_default() -> Result<PathBuf> {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(run).join("anchor.sock"));

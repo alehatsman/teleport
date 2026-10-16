@@ -221,7 +221,9 @@ mod tests {
         let assets = WebAssets::new(None, Some(root));
         assert_eq!(assets.resolve(), None);
         assert_eq!(assets.ui_version(), None);
-        assert!(assets.retained_versions().is_empty());
+        // `assert_eq!` so a failure names the versions that were retained
+        // (`clippy::assert_is_empty`, new in Rust 1.99).
+        assert_eq!(assets.retained_versions(), [] as [String; 0]);
     }
 
     /// A `current` left dangling by a prune is not servable, and saying so
@@ -278,6 +280,8 @@ mod tests {
         point_current_at(&root, "v1.0.0");
 
         let assets = WebAssets::new(Some(dist), Some(root));
-        assert!(assets.retained_versions().is_empty());
+        // `assert_eq!` so a failure names the versions that were retained
+        // (`clippy::assert_is_empty`, new in Rust 1.99).
+        assert_eq!(assets.retained_versions(), [] as [String; 0]);
     }
 }
