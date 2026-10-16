@@ -1003,8 +1003,9 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        // No staging litter survives a success.
-        assert!(slot.stray_staging().is_empty());
+        // No staging litter survives a success. `assert_eq!` so a failure
+        // names the files left behind, not just that some were.
+        assert_eq!(slot.stray_staging(), Vec::<PathBuf>::new());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
