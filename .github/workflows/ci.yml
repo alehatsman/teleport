@@ -47,7 +47,44 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: daemon -> target
+          workspaces: |
+            daemon -> target
+            anchor -> target
+
+      # The 25 anchor fixtures are gated on `ANCHORD_BIN`, and a gate with
+      # nothing behind it reports `ok` without running anything (#108). The
+      # suite now refuses that: `ci_must_supply_an_anchord_binary` fails under
+      # CI when the variable is unset, so this is the half that makes it pass
+      # honestly rather than by removing the check.
+      #
+      # Pinned, not floating. Building anchor's `main` would mean a break
+      # there turns this repo red for a reason that is not this repo's -- and
+      # a job red for someone else's reason is how the next real failure gets
+      # missed (#113). Bumping the SHA is a visible line in a diff, which is
+      # the same argument `scripts/allowed-target-os-gates.tsv` makes: the
+      # decision should be reviewable at the moment it is taken.
+      #
+      # The cost is real and worth naming: this pin goes stale silently, so
+      # anchor's fixes do not reach teleport's suite until someone moves it.
+      - name: Check out anchor (pinned)
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: alehatsman/anchor
+          ref: c755628bdf1515b2d10dab01a149e63a34eee33a
+          path: anchor
+      # Unix only: anchord speaks AF_UNIX and has no Windows transport
+      # (anchor#13, deferred not-planned), which is why teleport's own anchor
+      # modules are `#[cfg(unix)]` (#107). Every anchor fixture is
+      # `#![cfg(unix)]` too, so on Windows there is nothing here to satisfy.
+      - name: Build anchord
+        if: runner.os != 'Windows'
+        working-directory: anchor
+        run: cargo build --release --bin anchord
+      - name: Export ANCHORD_BIN
+        if: runner.os != 'Windows'
+        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord" >> "$GITHUB_ENV"
+
       - run: cargo build --all-targets
       # --no-fail-fast: one failing test binary used to hide every later one
       # (2026-09-05: cargo test stopping at the first failure hid three more

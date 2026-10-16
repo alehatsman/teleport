@@ -204,6 +204,7 @@ fn next_owner_id() -> String {
 ///
 /// Never dropped: a `static` lives for the process, so the daemon outlives
 /// every fixture in the binary and its directory is cleaned up by the OS.
+#[cfg(unix)]
 static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new();
 
 /// Wipes every session out of the shared daemon, once per run.
@@ -214,6 +215,7 @@ static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new()
 /// resource pressure the reuse was meant to end. The daemon belongs
 /// entirely to this test binary, so starting each run from empty is both
 /// safe and what isolation actually requires.
+#[cfg(unix)]
 async fn wipe_shared_daemon(socket: &Path) {
     static WIPED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     WIPED
@@ -235,6 +237,7 @@ async fn wipe_shared_daemon(socket: &Path) {
 }
 
 /// The shared daemon's socket, or `None` when not running on anchor.
+#[cfg(unix)]
 pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
     SHARED
         .get_or_init(|| {
@@ -248,12 +251,19 @@ pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
 
 /// An `anchord` the suite drives, so teleport's own tests can run against
 /// the anchor path rather than a suite written to agree with it.
+///
+/// Unix-only: it reaches `std::os::unix::net::UnixStream` directly to poll the
+/// socket (`:291`, `:328`). Those calls are not behind a cfg gate of their own
+/// and never were -- which is why inverting cfg gates on a Unix host did not
+/// reveal them, and a real cross-compile did (`scripts/ci-local.sh windows`).
+#[cfg(unix)]
 pub(crate) struct Anchord {
     /// `None` when this run reused a daemon an earlier run started.
     child: Option<std::process::Child>,
     dir: PathBuf,
 }
 
+#[cfg(unix)]
 impl Anchord {
     /// `None` unless `TELEPORT_TEST_ANCHOR` and `ANCHORD_BIN` are both set.
     fn start_if_requested() -> Option<Self> {
@@ -408,8 +418,21 @@ pub(crate) async fn spawn_with_web_assets(
     spawn_inner(config, web, db, None).await
 }
 
+/// What `spawn_inner` accepts as a backend.
+///
+/// Uninhabited off Unix, where there is no transport to anchord (`lib.rs`'s
+/// gate, #107): every caller still passes `None` and the signature does not
+/// fork, but no Windows build can construct the anchor path. Only
+/// `web_static.rs` compiles this module on Windows -- every other consumer
+/// is `#![cfg(unix)]`, and `pty_primitive_windows.rs` does not use it at all.
+#[cfg(unix)]
+type MaybeAnchor = Option<teleportd::anchor_client::AnchorClient>;
+#[cfg(not(unix))]
+type MaybeAnchor = Option<std::convert::Infallible>;
+
 /// A daemon whose sessions live in an external `anchord` on `socket` — the
 /// anchor path, exercised through teleport's own HTTP surface.
+#[cfg(unix)]
 pub(crate) async fn spawn_on_anchor(
     config: Config,
     db: Option<teleportd::persistence::Db>,
@@ -425,15 +448,19 @@ pub(crate) async fn spawn_on_anchor(
 }
 
 async fn spawn_inner(
+    // `mut` only on Unix, where the anchor arm below rewrites `anchor_owner`
+    // to isolate fixtures sharing one anchord.
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "no anchor arm to rewrite it"))]
     mut config: Config,
     web: WebAssets,
     db: Option<teleportd::persistence::Db>,
-    anchor: Option<teleportd::anchor_client::AnchorClient>,
+    anchor: MaybeAnchor,
 ) -> Daemon {
     // On the anchor path every fixture shares one daemon and is isolated by
     // owning its sessions: teleport lists and counts only its own, so a
     // unique owner per fixture is exactly the isolation the product already
     // gives two real tools sharing a daemon.
+    #[cfg(unix)]
     let anchor = match (anchor, shared_anchord_socket()) {
         (Some(client), _) => Some(client),
         (None, Some(socket)) => {
@@ -443,10 +470,16 @@ async fn spawn_inner(
         }
         (None, None) => None,
     };
+    // Always `None`, and uninhabited besides -- consumed so the parameter
+    // does not read as unused on a platform that cannot use it.
+    #[cfg(not(unix))]
+    let _ = anchor;
 
     // Fixtures get the supervisor too, so the anchor path they exercise is
     // the one that ships rather than a quieter variant of it.
+    #[cfg(unix)]
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
+    #[cfg(unix)]
     if let Some(client) = &anchor {
         teleportd::anchor_watch::spawn_supervisor(
             client.clone(),
@@ -475,7 +508,9 @@ async fn spawn_inner(
         sessions,
         // `None` for the in-process path, which is what most fixtures
         // drive; `Some` routes sessions to a real anchord.
+        #[cfg(unix)]
         anchor,
+        #[cfg(unix)]
         watch: Arc::clone(&watch),
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db,
@@ -530,6 +565,7 @@ pub(crate) fn default_config() -> Config {
 /// Reaching into `state.sessions` asserts the same thing but only on the
 /// in-process path; a test that does so is pinned to an implementation
 /// rather than to the protocol it means to check.
+#[cfg(unix)]
 pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::SessionId) -> u64 {
     match &daemon.state.anchor {
         Some(anchor) => {
@@ -554,6 +590,7 @@ pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::Sess
 /// daemon serves from anchord gives a session the API cannot see, and every
 /// test that then attaches gets `not_found` — which looks like a protocol
 /// bug and is really a fixture talking to the wrong store.
+#[cfg(unix)]
 pub(crate) async fn create_shell_session(
     daemon: &Daemon,
     args: &[String],
