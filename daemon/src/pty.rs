@@ -688,7 +688,7 @@ fn control_thread_main(
                     // (`pty_primitive_windows.rs`'s
                     // `terminate_kills_the_grandchild_process_tree`) --
                     // [S4](../../docs/15-open-questions.md#s4--does-dropping-the-master-close-the-pseudoconsole),
-                    // closed.
+                    // closed. (S4 is a spike ID in that file, not issue #4.)
                     drop(master.take());
                 }
 

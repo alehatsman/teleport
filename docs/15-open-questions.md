@@ -10,6 +10,14 @@ below is a known gap, with the milestone it blocks and the thing that closes it.
 belongs to and delete the entry here. An open-questions file that only grows is a
 backlog pretending to be a spec.
 
+> **`S4` is a spike ID in this file, not GitHub issue #4.** The `S`/`W`/`N`
+> prefixes index the M1 spike and are unrelated to issue numbers — GitHub's `#4`
+> is "daemon: split session.rs into a module", closed, in the same subsystem and
+> around the same date, so the misread lands somewhere plausible instead of
+> nowhere. Where a spike item *does* have an issue, this table names it
+> explicitly (W1 → #9, W2 → #10, W3 → #27). Cite these as `S4` or
+> `15-open-questions.md#s4`, never as `#4`.
+
 ## Status
 
 | # | Question | Blocks | Closed by |
