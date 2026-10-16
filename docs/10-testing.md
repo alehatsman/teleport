@@ -242,6 +242,26 @@ If you do generate load, collect the PIDs explicitly and verify they died.
 `kill $HOGS` kills nothing and leaks every spinner — which is how the 60
 above came to exist.
 
+**Where the progress counter lives is forced, not chosen.** The predicate
+above — any progress resets, only an unbroken stall fails — is portable. Its
+implementation is not, and a rule that fixed the implementation would break
+one of the two suites that learned it.
+
+`Session::write` enqueues onto a *bounded* channel, so once the writer thread
+is stuck in `write_all` the caller blocks instead of getting an error. A
+wedged writer therefore cannot report anything about itself, and the streak
+has to be sampled from outside — which is why
+`terminate_is_not_wedged_by_a_stuck_write` also needs the writer to publish
+"I returned": from outside, a writer that gave up and a writer that wedged
+look identical, and without that flag the fixed test walks straight back to
+vacuous. Anchor's equivalent returns an error on a full channel, so their
+writer thread is the only thing that *can* observe its own streak and an
+external watcher would be strictly worse — no flag needed, because "returned"
+and "observed a wedge" are the same event there.
+
+Same predicate, two correct implementations, decided by where the blocking
+lives. Carry the predicate; derive the rest locally.
+
 **A premise has to be reachable, and green is not evidence that it was.**
 `terminate_is_not_wedged_by_a_stuck_write` passed from the day it was written
 without ever wedging anything: a tty in canonical mode *discards* an
