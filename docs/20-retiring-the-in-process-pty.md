@@ -90,7 +90,9 @@ Collapsing them is the whole structural edit.
 
 ## What goes
 
-Whole modules: `pty.rs` (except `login_shell_path`), `session/manager.rs`,
+Whole modules: `pty.rs` (except `login_shell_path`, **and except
+`ConptyDsrProbe` at `:423-520`, which transfers to anchor — see Constraint 3**),
+`session/manager.rs`,
 `session/fanout.rs`, `session/replay.rs`, `session/control.rs`, the `Session`
 struct and impl in `session/mod.rs:119-566`, `log.rs` in full, and `ws.rs`
 except `upgrade` and `bound_attach`.
@@ -289,7 +291,7 @@ each is a blocker or a known, written-down regression. Ordered by severity.
 
 **Vanish with the code** (in-process only): `session_catchup.rs`,
 `session_backpressure.rs`, `session_replay.rs`, `output_log.rs`,
-`restart_recovery.rs`, `pty_primitive.rs`, `pty_primitive_windows.rs`,
+`restart_recovery.rs`, `pty_primitive.rs`,
 `pty_term_default.rs`. Their *subject* is the deleted layer, not a behaviour
 the product still has.
 
@@ -299,6 +301,12 @@ product behaviour that survives: `ws_protocol.rs`, `http_api.rs`,
 `pty_login_shell.rs`. Several have anchor counterparts already
 (`anchor_ws.rs`, `anchor_http.rs`) — the rewrite is mostly checking which
 assertions are missing there, not writing from scratch.
+
+**Transfers to anchor rather than vanishing or being rewritten:**
+`pty_primitive_windows.rs`. It is the proof of the ConPTY startup-handshake fix
+(Constraint 3), it is the only Windows PTY coverage either repo has, and anchor
+needs exactly it to port. Deleting it would throw away the answer to a question
+anchor is currently blocked on.
 
 **Pass on both paths for different reasons — check these individually.**
 Anchor's session flagged this class as the one that goes quietly wrong:
@@ -362,6 +370,43 @@ The transport seam is anchor's design to make; teleport's side is to carry both
 arms behind one `AnchorClient` type and to stop assuming the socket config is a
 filesystem path. **This work lives in the anchor repo and gates this one.**
 
+#### Constraint 3 is three things, and one of them is already solved — here
+
+Anchor's `src/pty.rs:19` defers Windows and cites teleport's **#W1** ("a
+gracefully-exiting ConPTY child was never observed as exited") as the reason.
+That citation is **stale, by six weeks.**
+
+**W1 was resolved 2026-09-05** ([#9](https://github.com/alehatsman/teleport/issues/9),
+closed). It was never a reaping bug. Root cause: conhost's ConPTY *startup
+handshake* writes a Device Status Report / cursor-position query (`ESC[6n`) to
+the pty and blocks its `ConsoleIoThread` on a reply nothing ever sent — the child
+had exited, conhost was still mid-handshake. The fix is `ConptyDsrProbe`
+(`daemon/src/pty.rs:423-520`), which answers that one startup query and then
+deliberately stops answering, so a later `ESC[6n` from an application still gets
+a real cursor position. Proven against the real `pty::spawn` path by
+`daemon/tests/pty_primitive_windows.rs`; spike evidence in
+`docs/15-open-questions.md`, W1.
+
+So the Windows cost is the pipe plus a DACL story for anchor's
+"filesystem-permissions-are-the-boundary" model — **not** ConPTY exit reporting.
+That last one would have been the real blocker, because exit reporting is
+something anchor is opinionated about by design; shipping a platform where it is
+unreliable would make a core invariant false. It is already fixed.
+
+**This creates a hazard for the delete, and it is the reason this subsection
+exists.** [What goes](#what-goes) schedules `pty.rs` for deletion except
+`login_shell_path`, and [Tests](#tests) lists `pty_primitive_windows.rs` as
+vanishing with the code. Executed literally, **step 9 would delete
+`ConptyDsrProbe` and its proof at precisely the moment anchor needs them** — the
+one piece of hard-won Windows knowledge in this repo, discarded as in-process
+residue on its way to becoming the thing that unblocks the port.
+
+**Therefore:** `ConptyDsrProbe`, its module documentation, and
+`pty_primitive_windows.rs` are **transferred to anchor, not deleted.** They are
+exempt from [What goes](#what-goes). The deletion may not proceed past them until
+that transfer has happened, and "transfer" means the behaviour is under test in
+anchor — not that the fix was described in a message.
+
 Note that #107 is not reproducible locally on macOS — `cargo check --target
 x86_64-pc-windows-msvc` dies in `libsqlite3-sys` for want of a Windows C
 toolchain. The error list in that issue is CI's. Nobody should read a local green
@@ -406,7 +451,11 @@ merge.**
 6. ~~**Run a release on the anchor path.**~~ Done at `4912d9c`; both exit
    criteria demonstrated. See [Status](#status--2026-10-16).
 7. **Resolve Constraint 3** — anchor ships a Windows transport arm and teleport
-   carries both arms behind one client type. Cross-repo; anchor leads.
+   carries both arms behind one client type. Cross-repo; anchor leads. Three
+   parts: the named pipe (mechanical), a DACL access-control story to replace
+   the `0600` boundary (a scope change for anchor, which has deliberately had no
+   auth), and ConPTY support — **the last of which is already solved and must be
+   transferred from this repo, not rebuilt.**
 8. **Satisfy Constraint 4** — anchord present on `mac`, `main_pc`, `mini_pc`,
    per-box go-ahead obtained. The dotfiles commit may be prepared ahead of this;
    it may not be applied ahead of it.

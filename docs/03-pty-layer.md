@@ -263,14 +263,27 @@ Resize handling:
 
 ## Termination
 
-> **Unresolved blocker (2026-09-04):** a ConPTY child that exits gracefully — not
-> killed — has not been observed to actually signal exited via `wait()`/`try_wait()`
-> in testing on Windows 11 build 26200, on real hardware, from a real interactive
-> session. Externally-killed children work correctly through the same code path.
-> This affects the reap/exit-status half of everything below on Windows; the Unix
-> side is unaffected. Do not implement the Windows exit-status path against this
-> doc until [15-open-questions.md#w1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
-> is resolved.
+> **~~Unresolved blocker (2026-09-04)~~ — RESOLVED 2026-09-05.** A ConPTY child
+> that exited gracefully was never observed as exited via `wait()`/`try_wait()`
+> on Windows 11 build 26200, while externally-killed children worked through the
+> same code path.
+>
+> **Root cause:** conhost's ConPTY *startup handshake* writes a Device Status
+> Report / cursor-position query (`ESC[6n`) to the pty and blocks its
+> `ConsoleIoThread` waiting for a reply that nothing ever sent. The child had
+> exited; conhost was still mid-handshake and so never tore down. Not a reaping
+> bug, not a `portable-pty` bug — an unanswered question.
+>
+> **Fix:** `ConptyDsrProbe` (`daemon/src/pty.rs:423`), which answers that one
+> startup query and then gets out of the way, deliberately not answering later
+> `ESC[6n` queries that an application sends expecting a real cursor position.
+> Proven against the real `pty::spawn` path by
+> `daemon/tests/pty_primitive_windows.rs`. Tracked in
+> [#9](https://github.com/alehatsman/teleport/issues/9), closed.
+>
+> The Windows exit-status path below is safe to implement. See
+> [15-open-questions.md#w1](15-open-questions.md#w1--conpty-children-are-never-observed-as-exited-on-windows)
+> for the spike evidence.
 
 `ClosePseudoConsole` sends `CTRL_CLOSE_EVENT` to connected clients, and applications
 may still emit output during shutdown. Microsoft advises either closing the output pipe
