@@ -369,6 +369,14 @@ protocol doc. Against an older anchord each is a live bug:
 Teleport's own half of that audit: input is split at 64 KiB (#97), so a paste
 cannot drop an attach.
 
+**Rebuild `ANCHORD_BIN` before reading a red fixture.** Every anchor test
+here runs whatever binary that variable points at, and nothing checks it
+against the table above. A stale one makes a bug anchor already fixed look
+like a bug teleport just introduced — hit first-hand, at the cost of an
+afternoon. `cargo build --bin anchord` in the anchor checkout, then run the
+suite. It is two minutes against a failure mode that reads as a regression
+in the wrong repository.
+
 ## Open questions
 
 - **Gap 11**: do `log_warn_bytes` / `log_max_bytes` get deleted, or
