@@ -1,9 +1,32 @@
 name: CI
 
+# issue #113: every branch push, not just `main`. Most of this repo's work
+# reaches `main` as direct merge commits rather than through PRs, so a
+# `branches: [main]` filter means the first time CI sees a change is after it
+# is already on `main` -- `780ff74` took the Windows daemon build down and
+# stayed red for a day on exactly that workflow. Running on the branch turns
+# the signal into something you get before the merge.
 on:
   push:
-    branches: [main]
   pull_request:
+
+# Keyed on the full `github.ref`, which differs between events
+# (`refs/heads/x` vs `refs/pull/N/merge`), so a `push` run and a
+# `pull_request` run for the same commit do NOT share a group.
+#
+# Collapsing them was the obvious move and it is wrong: a cancelled run stays
+# attached to the commit and reports as a *failed* check, so a green PR shows
+# red X's for the half that got cancelled. Legible signal is the entire point
+# of #113, and this repo's work mostly bypasses PRs anyway -- so the duplicate
+# is rare and costs less than a misleading red.
+#
+# What this does still collapse is the real waste: pushing twice to one branch
+# cancels the superseded run. `main` is exempt, because there a run is the
+# verdict on a specific commit and a later push must not erase an earlier
+# commit's verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   daemon-fmt:
