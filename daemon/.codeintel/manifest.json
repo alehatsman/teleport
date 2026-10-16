@@ -1,0 +1,613 @@
+{
+  "schema_version": 3,
+  "created_at": "2026-10-15T21:17:24Z",
+  "roots": [
+    "/Users/aatsman/projects/futurumlab/teleport/daemon"
+  ],
+  "writer_version": "codeintel 0.1.0",
+  "extractor_fingerprint": "blake3:0f6b26c015ae719ed9424d0466dc77959a6d5f6a9e37049cc5c75f301a20a33a",
+  "dict_bin_len": 634388,
+  "dict_idx_len": 97400,
+  "dict_generation": 0,
+  "indexed_at": 1792099044,
+  "scip": [
+    {
+      "path": "index.scip",
+      "tool": "rust-analyzer 1.98.1 (48a229ce 2026-09-01)",
+      "mtime": 1792099044,
+      "size": 3400728,
+      "documents": 48,
+      "ambiguous": 0
+    }
+  ],
+  "scip_collisions": 35,
+  "files": {
+    "src/anchor_bridge.rs": {
+      "seg": "55cf86bcb630c211419819098b5cb5fcafb3d56045515548d44109dcd1341912.bin",
+      "mtime": 1792085503,
+      "size": 6875,
+      "hash": "blake3:c0660ddd30709f19a16ea1466ca61a84756a6f4fddec62c2ca74f7a3d9aa2741",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:c0660ddd30709f19a16ea1466ca61a84756a6f4fddec62c2ca74f7a3d9aa2741"
+    },
+    "src/anchor_client.rs": {
+      "seg": "5d53f25b25a08c7e27ca5db42aed06c2c49255cebeb317b5cc22a59bfa92f9d8.bin",
+      "mtime": 1792092213,
+      "size": 20216,
+      "hash": "blake3:d8630ced6d0be091e9ca718d52ebe435052889d48a93e476ec5fd63334ff83cb",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:d8630ced6d0be091e9ca718d52ebe435052889d48a93e476ec5fd63334ff83cb"
+    },
+    "src/anchor_lease.rs": {
+      "seg": "da6ea5b054aac2e9f3438f8eff99b0c619fe0c6c15bf502ed1175abec82f7aab.bin",
+      "mtime": 1792089621,
+      "size": 18406,
+      "hash": "blake3:5484f752db13b7c639ac7c7f99c597e4af1118184d4efd817c7b955c500a50c4",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:5484f752db13b7c639ac7c7f99c597e4af1118184d4efd817c7b955c500a50c4"
+    },
+    "src/anchor_watch.rs": {
+      "seg": "302c5fee581ea3c3da3fd24cbd7b7f3abd7ae311e6ee0eb2de33e017bfb6b2bf.bin",
+      "mtime": 1792086031,
+      "size": 7734,
+      "hash": "blake3:8a629a960a098664c22f813d9e9b1d82b2022c8857828fc83fe8e9f03ecf61c1",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:8a629a960a098664c22f813d9e9b1d82b2022c8857828fc83fe8e9f03ecf61c1"
+    },
+    "src/api.rs": {
+      "seg": "9683c387c02c87a457d6a9b8a6df9f33b228d1a10b1177384a27cdf4e67b5bd1.bin",
+      "mtime": 1792094057,
+      "size": 71007,
+      "hash": "blake3:9aa8a3734e4f84efac58b0206d6ec658a3248db3c16a2f9c8b7bfb7bcb4f95ae",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:9aa8a3734e4f84efac58b0206d6ec658a3248db3c16a2f9c8b7bfb7bcb4f95ae"
+    },
+    "src/auth.rs": {
+      "seg": "33e4439cb83b01bbae9b42051c98e0138b290b7ad9b05d151c6622a6c5eb37ee.bin",
+      "mtime": 1789425618,
+      "size": 36039,
+      "hash": "blake3:1936c5ae49bfde368d7c7faed09323d99398922d02c88d5d202308623063e8a5",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:1936c5ae49bfde368d7c7faed09323d99398922d02c88d5d202308623063e8a5"
+    },
+    "src/auth_routes.rs": {
+      "seg": "e9d6df2c876ceaa44622fab0646bf2bd728eb7249d5ec80f821c1ebcdabb1d94.bin",
+      "mtime": 1789425618,
+      "size": 28028,
+      "hash": "blake3:83201cd67e4515516d929554c8eb9efef1a5c3a21ef677217bed77ffc5297113",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:83201cd67e4515516d929554c8eb9efef1a5c3a21ef677217bed77ffc5297113"
+    },
+    "src/auth_store.rs": {
+      "seg": "0a41b49be3b035ae04b173b84ae1d620a992a31ab42b79f391bbf1e50140c18d.bin",
+      "mtime": 1789425618,
+      "size": 27597,
+      "hash": "blake3:1b983ddf6c3d27697e870dff22cf506b2d6a36398c883064fa0df59d63dd4d10",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:1b983ddf6c3d27697e870dff22cf506b2d6a36398c883064fa0df59d63dd4d10"
+    },
+    "src/config.rs": {
+      "seg": "f85877fb46061d5ca0e960b8f4a5769e1083481022fbb7b7a45b6a95491629a1.bin",
+      "mtime": 1792085503,
+      "size": 10983,
+      "hash": "blake3:07a954c4ee303d7afbf76b32f2e1ff5d1f85a906784e6c0fff0ce37330781ff8",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:07a954c4ee303d7afbf76b32f2e1ff5d1f85a906784e6c0fff0ce37330781ff8"
+    },
+    "src/device.rs": {
+      "seg": "76a96817802cf94352001a27f2889b2cf096152a3ed5de1de015fd1f81fc5eaf.bin",
+      "mtime": 1789120512,
+      "size": 2958,
+      "hash": "blake3:01b8e75b8f9dfe89cf8c3ebdc7bf5baac341c7488432ab758032813d70bc5dc3",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:01b8e75b8f9dfe89cf8c3ebdc7bf5baac341c7488432ab758032813d70bc5dc3"
+    },
+    "src/embedded_web.rs": {
+      "seg": "aaee4b53c03f69afd2b2b166861dd4a3235fc5d149a5ceb2b0cd1c6a2089ecb3.bin",
+      "mtime": 1789419496,
+      "size": 1934,
+      "hash": "blake3:15821eaece9e44e51a8b79b4ef0dfcb01db071f6d465d0f1d7a051ffc4116b35",
+      "lang": "rust",
+      "tiers": [
+        "ts"
+      ],
+      "scip_hash": "blake3:15821eaece9e44e51a8b79b4ef0dfcb01db071f6d465d0f1d7a051ffc4116b35"
+    },
+    "src/lib.rs": {
+      "seg": "906b6b4b90ee64c8deee6835ad68aaa61ef6da84cc031fb770551096b7799574.bin",
+      "mtime": 1792086031,
+      "size": 1336,
+      "hash": "blake3:5837a2f3d3ebd6625bce8bc5bba3f75c12f886c7c565d836677e1c63e755a1ac",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:5837a2f3d3ebd6625bce8bc5bba3f75c12f886c7c565d836677e1c63e755a1ac"
+    },
+    "src/log.rs": {
+      "seg": "6310370d8f1a37d53cc421ce88c38ebb5db3be3c3251d246efac6efaf0301ca6.bin",
+      "mtime": 1789120512,
+      "size": 23153,
+      "hash": "blake3:7fadf644a790fa75e272c892817dc5ebd2bdd43c474c11c3c6e29870f923897f",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:7fadf644a790fa75e272c892817dc5ebd2bdd43c474c11c3c6e29870f923897f"
+    },
+    "src/main.rs": {
+      "seg": "a9a0d191da96647d47a4ab4d45426677e0b674f4ccd9507b15360ecae9f6fb1c.bin",
+      "mtime": 1792086031,
+      "size": 25349,
+      "hash": "blake3:93cd26f9c31d5bb0422b5793e985ca1dbd73e6371cb254662c553ccf5bbfbdf2",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:93cd26f9c31d5bb0422b5793e985ca1dbd73e6371cb254662c553ccf5bbfbdf2"
+    },
+    "src/persistence.rs": {
+      "seg": "4684d767b2c0cf0b68f369926ef4eecee78f11c4d0f30df012f9dfcf225964dd.bin",
+      "mtime": 1789458214,
+      "size": 65991,
+      "hash": "blake3:dc95f39dffca3400bae9709f61aac99c9a715747aedac379977a5148f1d54aa8",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:dc95f39dffca3400bae9709f61aac99c9a715747aedac379977a5148f1d54aa8"
+    },
+    "src/presets.rs": {
+      "seg": "82de74ef3a168d136192513be11285463a4bcccaf8f072a6f5233e9302af10d1.bin",
+      "mtime": 1789458214,
+      "size": 13011,
+      "hash": "blake3:6f126661b0b2039b49b89971365ed8d8ecccaa945cc33ebfcabe81529f04519a",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:6f126661b0b2039b49b89971365ed8d8ecccaa945cc33ebfcabe81529f04519a"
+    },
+    "src/pty.rs": {
+      "seg": "aad168ed3fe3680bcc6386ee8e60dc55a297377a2d37f26d7f5674c29d30b182.bin",
+      "mtime": 1789412499,
+      "size": 35610,
+      "hash": "blake3:d18c09fa451df55c9e915ace11d901185031d81935a98670823cbe680f6f936a",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:d18c09fa451df55c9e915ace11d901185031d81935a98670823cbe680f6f936a"
+    },
+    "src/service.rs": {
+      "seg": "e6ee361a99e8a26acdc1ab14a61d9112b17989153b180be2b25b5a45b3831f36.bin",
+      "mtime": 1789120512,
+      "size": 10842,
+      "hash": "blake3:aa2705befb1e360411fb67bddb4cb5c4d2948aa4a8e5652ace17df850d1e2c0b",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:aa2705befb1e360411fb67bddb4cb5c4d2948aa4a8e5652ace17df850d1e2c0b"
+    },
+    "src/session/control.rs": {
+      "seg": "985f21a214de171ac6a6978e6cf1320354b2991693ebb4c51125d59c604453e1.bin",
+      "mtime": 1792089621,
+      "size": 9563,
+      "hash": "blake3:41294618d805fdb1e013da12b796cb8a5b427a6fe017651d735d73823600f671",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:41294618d805fdb1e013da12b796cb8a5b427a6fe017651d735d73823600f671"
+    },
+    "src/session/fanout.rs": {
+      "seg": "44f773d1c55816a7d4fac05f01a6b12bf84cf3b629d2ba236f38e8a05fa632cd.bin",
+      "mtime": 1789120512,
+      "size": 13797,
+      "hash": "blake3:33eb13de373d665ccbc04eaff8b602ff15fd4236a17fb9a7b43f7eefb442216b",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:33eb13de373d665ccbc04eaff8b602ff15fd4236a17fb9a7b43f7eefb442216b"
+    },
+    "src/session/manager.rs": {
+      "seg": "e951ab92d22ea2b0bc8a91af79eeafdbf7e163d862d19f114cb6ed38147360a2.bin",
+      "mtime": 1789419496,
+      "size": 36081,
+      "hash": "blake3:9041bcc131cf28483bcf13bef13610fc5a358cc0256a9fef1a141e01f23e3000",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:9041bcc131cf28483bcf13bef13610fc5a358cc0256a9fef1a141e01f23e3000"
+    },
+    "src/session/mod.rs": {
+      "seg": "13c26934b0e4df04779a00eab66eba271a865660e5608a4920bec193b6392ac6.bin",
+      "mtime": 1792086031,
+      "size": 27314,
+      "hash": "blake3:3b961bfe8c737d05866a9fc8634814ef82d9d946e625262fb523a6d0a9c35f29",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:3b961bfe8c737d05866a9fc8634814ef82d9d946e625262fb523a6d0a9c35f29"
+    },
+    "src/session/osc.rs": {
+      "seg": "e91c667e52a5c4255d9481f56c164a8bc07f881cefb8ad4dd057065a51ea4b9e.bin",
+      "mtime": 1792086031,
+      "size": 9553,
+      "hash": "blake3:90581f9d91cbdd6f0c6d98a15de36b06230a1128517ee760da09e4030fad7f26",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:90581f9d91cbdd6f0c6d98a15de36b06230a1128517ee760da09e4030fad7f26"
+    },
+    "src/session/replay.rs": {
+      "seg": "d2c2840dcf9cc203902e44798bd07c0bf5943041b539300b8a826897be45d239.bin",
+      "mtime": 1789120512,
+      "size": 27668,
+      "hash": "blake3:20cfe4843dbbd347742e35a7eb4366127ca4ddbac07d2d005a44f2695cce2925",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:20cfe4843dbbd347742e35a7eb4366127ca4ddbac07d2d005a44f2695cce2925"
+    },
+    "src/session/types.rs": {
+      "seg": "4a6a1d33112dda7585508f8242a75b2c73182c86eaa947312c3463c0d61c536d.bin",
+      "mtime": 1792089621,
+      "size": 11423,
+      "hash": "blake3:c6796e76b90a662f7a94270eab7ff092e4b4b42720ca995f82c2c1a051d185e6",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:c6796e76b90a662f7a94270eab7ff092e4b4b42720ca995f82c2c1a051d185e6"
+    },
+    "src/web_assets.rs": {
+      "seg": "7234c0f4b25da11aeca85fb691dc04aa084530174555fd5631b2b6a200bad647.bin",
+      "mtime": 1789419496,
+      "size": 10885,
+      "hash": "blake3:9fabbc8a416c2f820f97bc4582203d4aa168069da7772f508bd5990eb7c5c6e2",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:9fabbc8a416c2f820f97bc4582203d4aa168069da7772f508bd5990eb7c5c6e2"
+    },
+    "src/ws.rs": {
+      "seg": "7ea3472b75a6c6f0f9f3f284dcef19e56c4cbeac46914bc8f468d99160a338c4.bin",
+      "mtime": 1792089621,
+      "size": 29646,
+      "hash": "blake3:b1c05bbe320d97a52c77734a9b895aa16ce0b638861508055b2d390806dcae7a",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:b1c05bbe320d97a52c77734a9b895aa16ce0b638861508055b2d390806dcae7a"
+    },
+    "src/ws_anchor.rs": {
+      "seg": "37aaf3d595f9016cd7ddb3c94b23a1bc64d1c3efd87291d01bca60559adee3aa.bin",
+      "mtime": 1792092213,
+      "size": 16303,
+      "hash": "blake3:497f464eef8e119d8d620a02a822b1d2081a61044e22a128a343a1bc3eeccf42",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:497f464eef8e119d8d620a02a822b1d2081a61044e22a128a343a1bc3eeccf42"
+    },
+    "tests/anchor_client.rs": {
+      "seg": "faca322f776e5f0973c3e32423fce9f61385b0f995c5451d2e447e083c64fb3b.bin",
+      "mtime": 1792085503,
+      "size": 9755,
+      "hash": "blake3:8cd40b38b27d41f97acdf6e1d8fd47d82f7b2a0a378f5c3969125ba17dbb2f59",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:8cd40b38b27d41f97acdf6e1d8fd47d82f7b2a0a378f5c3969125ba17dbb2f59"
+    },
+    "tests/anchor_http.rs": {
+      "seg": "750f2a3fcbc927b5de390254273a019f1ade982fff1ddf761696e71fb21fa183.bin",
+      "mtime": 1792094862,
+      "size": 25831,
+      "hash": "blake3:540762c35168c424b64ac0ecf675e16e2d2b075aa0087c5e44bc04814cef913d",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:540762c35168c424b64ac0ecf675e16e2d2b075aa0087c5e44bc04814cef913d"
+    },
+    "tests/anchor_ws.rs": {
+      "seg": "ae4d8db5a381fe928e273ccbd9445a078c27b57e1aef3660f1b32494426c9915.bin",
+      "mtime": 1792085503,
+      "size": 10794,
+      "hash": "blake3:e1b5f98a4003720f933442a2bc2be0f922526f407b9ae53d0766cb5cd3ebbeb5",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:e1b5f98a4003720f933442a2bc2be0f922526f407b9ae53d0766cb5cd3ebbeb5"
+    },
+    "tests/attention_signals.rs": {
+      "seg": "420f743ebefd90480bbae52fde1857c229a1802d58fbbdbc8bdea5812af49f31.bin",
+      "mtime": 1789412499,
+      "size": 5234,
+      "hash": "blake3:685aa13e34b7a0dc5de5a0abc1bdb1d2bcf347433d2bbca2fbff868b0ea79892",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:685aa13e34b7a0dc5de5a0abc1bdb1d2bcf347433d2bbca2fbff868b0ea79892"
+    },
+    "tests/http_api.rs": {
+      "seg": "9b3b8ca35f302797f2f8501e610aaeb5e4039cb3fc48f111bef2db2bec31d585.bin",
+      "mtime": 1792093546,
+      "size": 21983,
+      "hash": "blake3:bee4a424183609c74593c9fb6a2d9f45633476c9bc3bdfd2f9c811b25f1bd049",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:bee4a424183609c74593c9fb6a2d9f45633476c9bc3bdfd2f9c811b25f1bd049"
+    },
+    "tests/osc_title_and_resume.rs": {
+      "seg": "3a9f4da55a54066328ea98c3dec5c9fc83d1da4d3ea7fe4707091c76e4fc7050.bin",
+      "mtime": 1789412499,
+      "size": 4885,
+      "hash": "blake3:2032d33b463f29eb1d3e1953ba0e70166b75c50e4b4fff7ff9d7c2209c050c90",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:2032d33b463f29eb1d3e1953ba0e70166b75c50e4b4fff7ff9d7c2209c050c90"
+    },
+    "tests/output_log.rs": {
+      "seg": "4b363782e03f7e167035244a38157b3d54f985217d0d65c537b23defac8d0efc.bin",
+      "mtime": 1789120512,
+      "size": 9958,
+      "hash": "blake3:560a9b12b04eccbc1615328bd49d740124f76e4823c91c74b42257e3565d9f14",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:560a9b12b04eccbc1615328bd49d740124f76e4823c91c74b42257e3565d9f14"
+    },
+    "tests/pty_login_shell.rs": {
+      "seg": "d6b468a69efa88962f0a4fc0c29e1d428c6704c219abc22ceff045eed68cb26d.bin",
+      "mtime": 1789412499,
+      "size": 8248,
+      "hash": "blake3:f907ef710107486e3080d4d5fd3a9bee67b8a943a46ce537f4a1513f16753a40",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:f907ef710107486e3080d4d5fd3a9bee67b8a943a46ce537f4a1513f16753a40"
+    },
+    "tests/pty_primitive.rs": {
+      "seg": "9f594c2323566d260852e071ca9526463e28f4bda8cc67a4daf128b7e7c391a8.bin",
+      "mtime": 1789412499,
+      "size": 22864,
+      "hash": "blake3:361ddb960a39359cd7f8ea83c5709b2bc3f3350a3e77539802603db4ca6bbdd5",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:361ddb960a39359cd7f8ea83c5709b2bc3f3350a3e77539802603db4ca6bbdd5"
+    },
+    "tests/pty_primitive_windows.rs": {
+      "seg": "ee5cc5ae9658efab5eed330aef9cd815f86f2e0d0f211b8a69be71dafe096b36.bin",
+      "mtime": 1789412499,
+      "size": 23671,
+      "hash": "blake3:efff9be11fb2805bd4255a2ae6bca91bf54e41bde30c78290ae44a2efae5143f",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:efff9be11fb2805bd4255a2ae6bca91bf54e41bde30c78290ae44a2efae5143f"
+    },
+    "tests/pty_term_default.rs": {
+      "seg": "b16b310b6fee0c3ff9efcacec35216b0eeca97c42567fa3702dd8c0617b056ec.bin",
+      "mtime": 1789412499,
+      "size": 7472,
+      "hash": "blake3:8b0ecef981ffbe2935d957582de74a14d848314db6b9544623dbfd149ddcf9fa",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:8b0ecef981ffbe2935d957582de74a14d848314db6b9544623dbfd149ddcf9fa"
+    },
+    "tests/reconnect_storm.rs": {
+      "seg": "0cbb51209def11f396c052d4c433cd5a8924fecbc308c3ec38e4a0153bd59ca9.bin",
+      "mtime": 1789412499,
+      "size": 14740,
+      "hash": "blake3:97783027b36d23f9b5b4cc3d771f8ae011144bfedb29c1fa51288abeef609990",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:97783027b36d23f9b5b4cc3d771f8ae011144bfedb29c1fa51288abeef609990"
+    },
+    "tests/restart_recovery.rs": {
+      "seg": "f3349e5ca194315f85a4c0cd7aae86a0a34ea71b5e4a0bb3a6f6f01e13cc6d5f.bin",
+      "mtime": 1789410982,
+      "size": 16075,
+      "hash": "blake3:c5987acd954505a8043b6520b6d1eb952f0cbf74f364295bb256f61ac2767ecc",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:c5987acd954505a8043b6520b6d1eb952f0cbf74f364295bb256f61ac2767ecc"
+    },
+    "tests/session_backpressure.rs": {
+      "seg": "755741dbb8f1dad6d91a18fb0e2a9b54c5f1e146fb434f8e99128a2bc69f6841.bin",
+      "mtime": 1789412499,
+      "size": 12995,
+      "hash": "blake3:cf065c204c7ab58d832c394d13902a5d20382bd20596fce96472cbe079fc0726",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:cf065c204c7ab58d832c394d13902a5d20382bd20596fce96472cbe079fc0726"
+    },
+    "tests/session_catchup.rs": {
+      "seg": "e63e392f35cb5afdea123cf3da74126bab236b1ca91726f3bbc2dfdc200c03aa.bin",
+      "mtime": 1789412499,
+      "size": 10904,
+      "hash": "blake3:df5d6f79d15e8ea05da19e21cd7812b2ca2d7fdd7ffe3de233f1e4245269d756",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:df5d6f79d15e8ea05da19e21cd7812b2ca2d7fdd7ffe3de233f1e4245269d756"
+    },
+    "tests/session_replay.rs": {
+      "seg": "59ba35622a85b26b136a422baa2840017362b921dc80ead2f525f9f2d5b72e25.bin",
+      "mtime": 1789412499,
+      "size": 15788,
+      "hash": "blake3:a0856c0919c74ed2e542d49c691beab0228cf238e99151473fb9bd806d773542",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:a0856c0919c74ed2e542d49c691beab0228cf238e99151473fb9bd806d773542"
+    },
+    "tests/shutdown_endpoint.rs": {
+      "seg": "af6131e010bad91c109f99334e6f88a22f21d7699ebfb28f06bc1a15765eb7da.bin",
+      "mtime": 1789120512,
+      "size": 9029,
+      "hash": "blake3:3ce3771d9d08c7170d51c363cea8cb74e0c7ab845250e41346c93e864dd0e45b",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:3ce3771d9d08c7170d51c363cea8cb74e0c7ab845250e41346c93e864dd0e45b"
+    },
+    "tests/skeleton.rs": {
+      "seg": "54f0313298d36f32f05b0f9b1be1bd2304b5501fbc23ee9b8e95ffaa7a2496de.bin",
+      "mtime": 1789425618,
+      "size": 9195,
+      "hash": "blake3:b917c709158d76953dbab1f9bb8135f8a1a223a13a76762393be044bd1c8eb2d",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:b917c709158d76953dbab1f9bb8135f8a1a223a13a76762393be044bd1c8eb2d"
+    },
+    "tests/support/mod.rs": {
+      "seg": "896c8edee243e56e81c986f7534e4f9a1f23db9dfbd115764a44bb08dee9cc7a.bin",
+      "mtime": 1792086031,
+      "size": 22395,
+      "hash": "blake3:25086843148124f1503ca53895f58da2f7dd609cc73d40ee3307755d1658df42",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:25086843148124f1503ca53895f58da2f7dd609cc73d40ee3307755d1658df42"
+    },
+    "tests/web_static.rs": {
+      "seg": "beaf0cc2c2867b27f16f83ca6a08ae64da46b1848ac51dc923dba10086b7b8ef.bin",
+      "mtime": 1789458214,
+      "size": 15070,
+      "hash": "blake3:47c37cfe6c01e83c9513740cab3619fc399a608d2a5e9c6d2793d03637595710",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:47c37cfe6c01e83c9513740cab3619fc399a608d2a5e9c6d2793d03637595710"
+    },
+    "tests/ws_protocol.rs": {
+      "seg": "89f1036a10f2fccf3a53dae01df9e08e64b784848e66620dafdcd612ff3a81d6.bin",
+      "mtime": 1792089621,
+      "size": 31926,
+      "hash": "blake3:9529a200abe07684555c50a86062f27bfac644fdb119bf7ac1612a5ce97e4407",
+      "lang": "rust",
+      "tiers": [
+        "ts",
+        "scip"
+      ],
+      "scip_hash": "blake3:9529a200abe07684555c50a86062f27bfac644fdb119bf7ac1612a5ce97e4407"
+    }
+  }
+}

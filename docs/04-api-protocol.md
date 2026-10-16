@@ -228,13 +228,22 @@ usual way a session closes is the daemon restarting under it. So both survive a 
 and appear on a recovered `lost` row; only a GC'd session (row deleted outright) loses
 them.
 
-Observed 2026-09-14, and the reason "not a versioned contract" is not a hypothetical:
-**Claude Code 2.1.236 emits the title but no longer emits the resume link at all**, so
-`claude_resume_id` reads `null` on every real session against that build. It degrades
-exactly as designed — no parse error, no broken session — and the UI's restore path does
-not depend on it (docs/09-frontend.md: a bare `claude --resume` opens the CLI's own
-picker for the folder). If a later build brings the link back, the persisted id makes
-the restore exact again with no further change.
+Observed 2026-09-14 and **re-verified 2026-10-16, still Claude Code 2.1.236**, which is
+why "not a versioned contract" is not a hypothetical: **Claude Code emits the title but
+no longer emits the resume link at all**, so `claude_resume_id` reads `null` on every
+real session against that build — zero OSC 8 sequences across twenty session logs. It
+degrades exactly as designed — no parse error, no broken session — and the UI's restore
+path does not depend on it (docs/09-frontend.md: a bare `claude --resume` opens the
+CLI's own picker for the folder).
+
+Do not read the OSC 8 half as a working feature waiting on an upstream fix. It has no
+live producer, and waiting for a later build to bring the link back is not the plan. The
+plan is to stop scraping the id and have teleport *choose* it at spawn instead, via the
+CLI's own `--session-id`
+([22-claude-resume-id-by-injection.md](22-claude-resume-id-by-injection.md),
+[#69](https://github.com/alehatsman/teleport/issues/69)) — specified, not yet
+implemented. Until that lands, `claude_resume_id` is null in practice and a client must
+behave as the reference UI already does: offer the restore, never gate it on the id.
 
 **`last_bell_ms` / `idle_since_ms`** (formerly docs/15-open-questions.md's D3;
 docs/13-native-clients.md#detection-heuristics): attention signals, both `null` unless

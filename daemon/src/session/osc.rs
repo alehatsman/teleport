@@ -13,6 +13,22 @@
 //! is not a documented or versioned contract. A future CLI release changing
 //! or dropping either sequence degrades silently back to "no title" / "no
 //! resume id" -- never a parse error, never a broken session.
+//!
+//! **That future arrived for the OSC 8 half, and it is not coming back.**
+//! Claude Code stopped emitting the resume link; re-verified 2026-10-16
+//! against v2.1.236 -- zero OSC 8 sequences across twenty real session
+//! logs, while the OSC 0 title still arrives in the first bytes as always.
+//! So [`OscUpdate::ClaudeResumeId`] below has **no live producer**: the unit
+//! tests in this file feed it synthetic bytes and pass, and every real
+//! session reports `claude_resume_id: null`. Nothing is broken and there is
+//! nothing here to debug -- the input is simply gone.
+//!
+//! The replacement is to stop *reading* the id and start *choosing* it: pass
+//! `claude --session-id <uuid>` at spawn, and the conversation is
+//! addressable by an id teleport picked, with no upstream output format in
+//! the loop at all. Specified in docs/22-claude-resume-id-by-injection.md
+//! (issue #69), not yet implemented; that work deletes the OSC 8 arm below
+//! and keeps the title half, which works.
 
 use std::mem;
 

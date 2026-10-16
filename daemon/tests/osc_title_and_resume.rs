@@ -4,6 +4,14 @@
 //! the scanner's parsing edge cases directly; this file is the "does it
 //! actually reach `Session` from real PTY output" gate, same division of
 //! labor as `attention_signals.rs`'s BEL test vs. the byte-scan itself.
+//!
+//! Note what the resume-id cases below do **not** prove. The OSC 8 bytes are
+//! printed by `/bin/sh` here, and no Claude Code build still emits them
+//! (re-verified 2026-10-16 against v2.1.236, issue #69) -- so these pass
+//! while `claude_resume_id` is null on every real session. They are a
+//! scanner gate, not evidence the feature works end to end. The real fix is
+//! to choose the id at spawn rather than read it: see
+//! docs/22-claude-resume-id-by-injection.md, which retires this half.
 
 #![cfg(unix)]
 
