@@ -668,6 +668,74 @@ async fn grace_expiry_frees_the_lease_with_no_auto_grant() {
     );
 }
 
+/// #105, end to end: the grace window expiring must tell the client that was
+/// preempted, exactly as an explicit `release_control` does
+/// (docs/04-api-protocol.md#disconnect-grace).
+///
+/// The scenario is the one the product exists for -- a desktop pane, a phone
+/// that grabs control, and a phone that then simply goes away instead of
+/// tapping "release". Found live 2026-10-16 as four `teleport attach` panes
+/// that had silently stopped accepting keystrokes while the session list
+/// reported no controller at all. The test the old behaviour passed
+/// (`grace_expiry_frees_the_lease_with_no_auto_grant`, above) only ever
+/// connects a client *after* expiry, so nobody was attached to be told --
+/// which is precisely how a lease that came free in silence went unnoticed.
+#[tokio::test]
+async fn grace_expiry_tells_the_client_it_was_taken_from() {
+    let mut config = support::default_config();
+    config.control_grace_ms = 300;
+    let daemon = support::spawn(config).await;
+    let id = support::create_shell_session(&daemon, &[]).await;
+
+    // The desktop pane, holding control.
+    let mut cli = connect(
+        &daemon.ws_url(&format!(
+            "/api/v1/sessions/{id}/stream?client_id=cli&mode=control"
+        )),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect cli");
+    assert_eq!(next_json(&mut cli).await["control"], true);
+
+    // The phone takes it.
+    let mut phone = connect(
+        &daemon.ws_url(&format!("/api/v1/sessions/{id}/stream?client_id=phone")),
+        Some(support::TOKEN),
+        None,
+    )
+    .await
+    .expect("connect phone");
+    let _ = next_json(&mut phone).await;
+    send_text(&mut phone, json!({ "type": "claim_control" })).await;
+    assert_eq!(next_json(&mut phone).await["type"], "control_granted");
+
+    let revoked = next_json(&mut cli).await;
+    assert_eq!(revoked["type"], "control_revoked");
+
+    // ...and then vanishes, rather than tapping "release".
+    drop(phone);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let released = next_json(&mut cli).await;
+    assert_eq!(
+        released["type"], "control_released",
+        "a lease freed by expiry is as free as one handed back, and says so"
+    );
+    assert_eq!(released["by"], "phone");
+    assert_eq!(
+        released["resume_hint"], "cli",
+        "the hand-back names the client the departed holder preempted"
+    );
+
+    // The hint is not a grant: the pane still has to ask. This is what the
+    // CLI's `should_reclaim` does on receiving the frame, and it is the step
+    // that makes the pane usable again.
+    send_text(&mut cli, json!({ "type": "claim_control" })).await;
+    assert_eq!(next_json(&mut cli).await["type"], "control_granted");
+}
+
 /// Binary server frames carry the correct 8-byte BE offset, and consecutive
 /// frames are contiguous (docs/04-api-protocol.md#framing).
 #[tokio::test]

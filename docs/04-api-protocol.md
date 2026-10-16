@@ -903,6 +903,34 @@ client takes it instantly, and the grace holder loses its claim permanently. Gra
 protects against nobody else wanting it. When the window expires with no reconnect, the
 lease goes free; it is **never** auto-granted to a waiting observer.
 
+**Expiry is announced, exactly like an explicit release.** The window closing broadcasts
+the same **`control_released`** frame that
+[`release_control` does](#releasing-and-handing-the-lease-back) — `by` is the `client_id`
+whose grace expired, and `resume_hint` is whoever that holder preempted on its way in.
+Everything the hand-back section says then applies unchanged: the lease is genuinely
+free, the hint is not a grant, and the hinted client still has to send `claim_control`.
+
+The two ways a lease comes free are indistinguishable to every other attached client, so
+they must not be announced differently. A controller that taps "release" and one that
+closes its laptop lid leave the lease in the identical state; if only the first is
+announced, the second leaves every observer believing someone still holds it:
+
+```text
+desktop CLI holds control
+phone taps "Take control"  → phone controls, lease remembers the CLI
+phone's tab is closed      → grace window opens, lease still the phone's
+grace expires              → lease free, resume_hint = the CLI's client_id
+CLI claims                 → the desktop pane types again
+```
+
+Without the announcement that pane stays in observer mode forever, dropping every
+keystroke in silence, while `GET /sessions` correctly reports no controller at all —
+found live 2026-10-16, with four `teleport attach` panes stuck exactly this way
+([#105](https://github.com/alehatsman/teleport/issues/105)). It is the same defect the
+hand-back section describes, reached through the other door, and it takes the same frame
+to fix. Announcing costs nothing the explicit path doesn't already pay: a client that
+cannot tell the two doors apart needs no new frame type, no new field, and no new rule.
+
 ## Full lifecycle
 
 ```mermaid
