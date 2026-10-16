@@ -305,16 +305,22 @@ fn eof_and_exit_are_independent_signals() {
         80,
     );
 
+    // No wall-clock bound on this latency. "wait() should not wait on the
+    // grandchild" used to be asserted as "under 500ms", which is a spawn, a
+    // shell startup and an exit measured against a budget -- 996ms under 60
+    // spinners on a 10-core box, i.e. red for the machine, not for wait()
+    // (docs/10-testing.md#deadlines-preconditions-and-premises). The
+    // load-immune instrument for the same claim is already below and is the
+    // one the name makes: the grandchild is still mid-`sleep 2` when this
+    // fires, so wait() cannot have waited on it. `recv_timeout` bounds the
+    // hang. `t0` stays where it was -- the EOF *floor* further down is still
+    // measured from before the exit, and a lower bound only gets safer on a
+    // slow box.
     let t0 = Instant::now();
     let exit = spawned
         .exit_rx
         .recv_timeout(DEFAULT_TIMEOUT)
         .expect("exit_rx should fire promptly");
-    let exit_latency = t0.elapsed();
-    assert!(
-        exit_latency < Duration::from_millis(500),
-        "wait() should not wait on the grandchild: took {exit_latency:?}"
-    );
     assert_eq!(exit.status.unwrap().exit_code(), 0);
 
     let acc = recv_until(&out_rx, DEFAULT_TIMEOUT, |acc| {
@@ -362,22 +368,28 @@ fn eof_and_exit_are_independent_signals() {
 #[test]
 #[cfg(target_os = "macos")]
 fn eof_follows_the_session_leaders_exit_even_with_a_live_grandchild() {
+    // `sleep 30`, not `sleep 5`. Nothing here ever waits for it -- the revoke
+    // is what ends the stream, so the test finishes in well under a second --
+    // and its only job is to be a span the two latencies below must land
+    // *inside*. Five seconds made that span the same order as the noise: a
+    // loaded box spends ~1s just spawning and exiting (measured: 996ms under
+    // 60 spinners), so "EOF inside 2s" was separating 1s from 5s with 1s of
+    // jitter. Thirty makes the separation an order of magnitude instead of a
+    // factor of two, and costs the suite nothing.
     let (spawned, out_rx) = spawn_sh(
-        "trap '' HUP; sleep 5 & pid=$!; echo GRANDCHILD_PID:$pid; exit 0",
+        "trap '' HUP; sleep 30 & pid=$!; echo GRANDCHILD_PID:$pid; exit 0",
         24,
         80,
     );
 
-    let t0 = Instant::now();
+    // No wall-clock bound on the exit latency -- see the Linux twin above for
+    // why 500ms was measuring the machine (#103's family). The claim
+    // "wait() did not wait on the grandchild" is carried by the liveness
+    // probe at the end of this test, which is immune to load.
     let exit = spawned
         .exit_rx
         .recv_timeout(DEFAULT_TIMEOUT)
         .expect("exit_rx should fire promptly");
-    let exit_latency = t0.elapsed();
-    assert!(
-        exit_latency < Duration::from_millis(500),
-        "wait() should not wait on the grandchild: took {exit_latency:?}"
-    );
     assert_eq!(exit.status.unwrap().exit_code(), 0);
 
     // The pid still reaches us despite the revoke: XNU drains the tty before
@@ -393,17 +405,19 @@ fn eof_follows_the_session_leaders_exit_even_with_a_live_grandchild() {
         .and_then(|s| s.parse().ok())
         .expect("should have parsed the detached grandchild's pid from output");
 
-    // EOF promptly, *not* at the end of the grandchild's `sleep 5`: the revoke
-    // is what ends the stream here, not the last slave fd being closed.
+    // EOF promptly, *not* at the end of the grandchild's `sleep 30`: the
+    // revoke is what ends the stream here, not the last slave fd being
+    // closed. The `recv_timeout` *is* that assertion -- measured from after
+    // the leader's exit, so it asks only about the lag, not about how long
+    // the spawn took -- and `DEFAULT_TIMEOUT` is the separator: 10s is a
+    // third of the grandchild's remaining life and ten times the worst
+    // spawn-and-exit this has been measured at, so it tells the two
+    // mechanisms apart without being a throughput budget. A second
+    // `eof_latency < ...` underneath would only restate it.
     spawned
         .eof_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(DEFAULT_TIMEOUT)
         .expect("EOF should follow the session leader's exit, well inside the grandchild's sleep");
-    let eof_latency = t0.elapsed();
-    assert!(
-        eof_latency < Duration::from_secs(2),
-        "EOF should coincide with the session leader's exit on macOS, not lag it: {eof_latency:?}"
-    );
 
     #[expect(
         unsafe_code,
