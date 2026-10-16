@@ -172,20 +172,42 @@ each is a blocker or a known, written-down regression. Ordered by severity.
    CLI attached straight to anchord is deliberately not counted, which
    matches what the field has always meant.
 
-4. **Replay truncation is less accurate.** In-process folds in truncation
-   discovered during catch-up (`ws.rs:305`) and clamps `replay_from` past a
-   capped region (`session/mod.rs:265-269`). Anchor reports only
-   `bound_attach`'s pre-attach verdict and echoes `from` verbatim
-   (`ws_anchor.rs:103-109,149`), so a client attaching below anchord's log cap
-   is told `truncated: false`.
+4. ~~**Replay truncation is less accurate.**~~ **Fixed, in the half that is
+   observable.** Anchor echoed `from` verbatim, so a client whose cursor
+   landed in a capped region was told replay started there and then handed
+   nothing. `clamp_past_cap` now moves it to the head, which is the same
+   answer `Session::attach` gives in-process — `log_capped_at` standing in
+   for the readable end, since that is where anchord's file stopped (anchor
+   `docs/02-model.md#the-size-cap`).
 
-5. **WS close and error codes diverge.** A slow consumer closes `1013
-   slow_consumer` in-process (`ws.rs:375`) but `1001 "stream ended"` on anchor
-   (`ws_anchor.rs:203`). `offset_ahead` is raised for a genuine offset error
-   in-process (`ws.rs:253`) but for *every* attach failure on anchor
-   (`ws_anchor.rs:127`). `session_closing` has no anchor counterpart
-   (`ws.rs:481` vs `ws_anchor.rs:276`). Cheap to fix, expensive to discover
-   later.
+   **What is *not* mirrored, deliberately.** In-process also folds
+   `!attach.caught_up` into `truncated` — a client too slow to be caught up
+   is served the freshest `LIVE_GAP_BYTES` and told a hole was left behind.
+   Anchord has no such half-measure: it catches a subscriber up internally
+   and drops it if it cannot, which teleport sees as the stream ending and
+   now reports as `1013 slow_consumer` (gap 5). Same condition, different
+   remedy, both observable. There is nothing to echo across.
+
+   Note the clamp does **not** set `truncated` on either path — in-process
+   returns `caught_up: true` for a fully-capped replay
+   (`session/replay.rs:256-262`). `replay_from` moving is the signal, and
+   `log_capped_at` rides along in `ready` for a client that wants to know why.
+
+5. ~~**WS close and error codes diverge.**~~ **Fixed.** A slow consumer now
+   closes `1013 slow_consumer` on both paths. `offset_ahead` is raised only
+   for a cursor past the head — teleport checks `from > output_bytes` itself
+   rather than reporting every attach failure under that code, which mattered
+   because the client *acts* on it by dropping its cursor
+   (`web/src/api/stream.ts#onErrorFrame`); the rest close `1011 internal
+   error` with no frame, as in-process does. `session_closing` is raised when
+   a write fails on a connection whose lease said yes. The unknown-session
+   frame says `session_gone`, the code the protocol defines
+   (docs/04-api-protocol.md#error-codes), rather than `not_found`.
+
+   **One ambiguity is accepted and written down:** an anchord that dies
+   mid-stream ends the stream exactly as a dropped slow subscriber does, so
+   both report `1013`. The client action is identical — reconnect from the
+   last offset — so the ambiguity costs a log line, not a behaviour.
 
 6. **The lease write check is no longer atomic.** `write_if_controller`
    checks and writes under one lock (`session/control.rs:137`), closing a
@@ -277,13 +299,22 @@ Anchor's session flagged this class as the one that goes quietly wrong:
   passes either way while the persistence gap (2) is real.
 - Anything asserting `idle_since_ms` or `title`: two implementations, two
   thresholds, divergent edge cases (gaps 9, 10).
-- Anything asserting a *close* on a dropped connection: `1013` and `1001` are
+- Anything asserting a *close* on a dropped connection: `1013` and `1001` were
   both "the socket closed" to a test that does not check the code (gap 5).
+  The codes now agree; a test that still ignores them would hide the next
+  divergence the same way.
 
 **New tests the delete needs.** Done: ws-ticket on both paths (gap 1), lease
 freed on purge (#101), title and resume id surviving a restart of an exited
 session (gap 2), the list agreeing with the stream about the controller
-(gap 3). Still missing: close codes asserted by value (gap 5).
+(gap 3), `offset_ahead` and its `1008` asserted by value (gap 5), the
+past-a-cap clamp as unit tests on `clamp_past_cap` (gap 4).
+
+**What is tested by argument rather than by fixture, and why.** A real cap
+needs a 1 GiB log, so the clamp is unit-tested against the three cases
+(`below`, `at`, `past`) instead of provoked end to end. `1013` has no cheap
+fixture either: it needs a subscriber anchord actually decides to drop.
+Both are recorded here rather than left looking covered.
 
 ## Ordering
 
@@ -307,8 +338,9 @@ by then is simply the new behaviour, discovered later by a user.
 2. ~~**Fix the remaining blockers.**~~ Done — gaps 1, 2 and 3, and #101. All
    were defects on the anchor path *today*, independent of any deletion.
    `session_events` (half of gap 2) is left open as non-blocking.
-3. **Close the cheap divergences**, gaps 4 and 5, while both paths still exist
-   and can be compared.
+3. ~~**Close the cheap divergences**, gaps 4 and 5, while both paths still
+   exist and can be compared.~~ Done. What could not be mirrored is written
+   down under each gap rather than left for a user to find after step 7.
 4. **Package `anchord`** as its own launchd/systemd unit with its own
    lifecycle (anchor M5). Until something starts anchord, flipping the default
    makes teleport depend on a process nothing launches.

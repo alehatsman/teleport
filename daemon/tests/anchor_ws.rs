@@ -489,3 +489,58 @@ async fn a_resize_by_another_client_reaches_an_attached_browser() {
     assert_eq!(resized["cols"], 120, "wrong width: {resized}");
     assert_eq!(resized["rows"], 40, "wrong height: {resized}");
 }
+
+/// The next close frame's code, skipping anything still queued ahead of it.
+#[expect(
+    clippy::panic,
+    reason = "test helper asserting an unexpected value; panic! is the idiomatic way to fail with it attached"
+)]
+async fn next_close(ws: &mut WsStream) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the socket never closed");
+        match ws.next().await {
+            Some(Ok(Message::Close(frame))) => return frame.map_or(0, |frame| frame.code.into()),
+            Some(Ok(_)) => {}
+            // A close frame the peer sent and then dropped the TCP
+            // connection behind reaches tungstenite as this, not as a
+            // frame; the assertion below is about the frame, so treat
+            // losing it as the failure it is.
+            Some(Err(e)) => panic!("ws error before the close frame: {e}"),
+            None => panic!("the socket ended without a close frame"),
+        }
+    }
+}
+
+/// A cursor past the head is the one attach failure teleport names itself,
+/// and the client acts on the name: `offset_ahead` is what makes it drop a
+/// stale cursor and restart at the default tail. Asserted by value, close
+/// code included, because that is the whole content of the contract
+/// (docs/04-api-protocol.md#error-codes).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cursor_past_the_head_is_offset_ahead_and_nothing_else() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("offsetahead");
+    anchord.ready().await;
+    let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
+    let id = create(&daemon, "stty raw -echo; echo ahead-ready; cat").await;
+
+    // Far past anything this session could have produced, so the verdict
+    // does not depend on how much of the banner has landed yet.
+    let mut ws = connect(&daemon.ws_url(&format!(
+        "/api/v1/sessions/{id}/stream?mode=observe&after=999999999&client_id=browser-a"
+    )))
+    .await;
+
+    let error = next_json(&mut ws).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["code"], "offset_ahead", "wrong code: {error}");
+    assert!(
+        error["next_offset"].is_u64(),
+        "the client is told where the daemon actually is: {error}"
+    );
+    assert_eq!(next_close(&mut ws).await, 1008, "wrong close code");
+}
