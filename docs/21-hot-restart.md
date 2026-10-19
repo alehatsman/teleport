@@ -221,6 +221,14 @@ semantics" implies a Windows build exists. **It should be filed as its own
 issue** before `use_anchor` flips, since flipping a default that cannot compile
 on a first-class platform is a decision, not an accident.
 
+> **Superseded, 2026-10-19.** It was filed (#107) and fixed by gating the
+> anchor modules on `unix` (`ca58e54`); on `feat/windows-anchor` the gate is
+> gone again because the client gained a named-pipe transport arm, and the
+> anchor path *compiles* on Windows. E12 is still true at runtime:
+> `use_anchor` is refused on Windows until anchord can host a session there
+> (anchor M6). See
+> [20, Constraint 3](20-retiring-the-in-process-pty.md#status-of-constraint-3--2026-10-19).
+
 ## Validation
 
 Each check names what would fail if the behaviour regressed.

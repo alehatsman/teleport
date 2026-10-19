@@ -133,10 +133,13 @@ jobs:
           repository: alehatsman/anchor
           ref: c755628bdf1515b2d10dab01a149e63a34eee33a
           path: anchor
-      # Unix only: anchord speaks AF_UNIX and has no Windows transport
-      # (anchor#13, deferred not-planned), which is why teleport's own anchor
-      # modules are `#[cfg(unix)]` (#107). Every anchor fixture is
-      # `#![cfg(unix)]` too, so on Windows there is nothing here to satisfy.
+      # Unix only, for now. teleport's anchor modules compile on Windows
+      # (the client has a named-pipe arm), but anchord hosts no sessions there
+      # until anchor's M6 transport lands, so every anchor fixture is still
+      # `#![cfg(unix)]` and on Windows there is nothing here to satisfy. When
+      # M6 lands this pin moves to a commit with a Windows anchord and the
+      # `if:` lines go -- not before, or `ci_must_supply_an_anchord_binary`
+      # would be satisfied by a binary that cannot serve the fixtures.
       - name: Build anchord
         if: runner.os != 'Windows'
         working-directory: anchor
