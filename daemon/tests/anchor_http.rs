@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use serde_json::{json, Value};
+use support::{anchord_endpoint, fixture_shell};
 use teleportd::config::Config;
 use tower::ServiceExt;
 
@@ -104,28 +105,40 @@ fn ci_must_supply_an_anchord_binary() {
     }
 }
 
-/// Short path: a unix socket path is capped near 104 bytes.
+/// One anchord per test, in its own directory and on its own endpoint.
 struct Anchord {
     child: Child,
     dir: PathBuf,
+    endpoint: PathBuf,
 }
 
 impl Anchord {
     fn start(tag: &str) -> Self {
-        let dir = PathBuf::from(format!("/tmp/tp-http-{}-{tag}", std::process::id()));
+        let tag = format!("{}-{tag}", std::process::id());
+        let dir = anchord_endpoint::scratch_root().join(format!("tp-http-{tag}"));
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort cleanup of a previous run"
         )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
-        let child = Command::new(anchord_bin().expect("checked by the caller"))
-            .env("XDG_DATA_HOME", &dir)
-            .env("XDG_RUNTIME_DIR", dir.join("run"))
+        let endpoint = anchord_endpoint::endpoint_in(&dir, &tag);
+        let child = Self::spawn(&dir, &endpoint);
+        Self {
+            child,
+            dir,
+            endpoint,
+        }
+    }
+
+    fn spawn(dir: &std::path::Path, endpoint: &std::path::Path) -> Child {
+        let mut command = Command::new(anchord_bin().expect("checked by the caller"));
+        anchord_endpoint::point_at(&mut command, dir, endpoint)
+            .expect("pointing anchord at its test directory");
+        command
             .env("ANCHOR_LOG", "warn")
             .spawn()
-            .expect("spawning anchord");
-        Self { child, dir }
+            .expect("spawning anchord")
     }
 
     /// Stops and starts anchord **keeping its data directory**, which is
@@ -143,25 +156,17 @@ impl Anchord {
             reason = "best-effort stop of a process about to be replaced"
         )]
         let _ = self.child.wait();
-        self.child = Command::new(anchord_bin().expect("checked by the caller"))
-            .env("XDG_DATA_HOME", &self.dir)
-            .env("XDG_RUNTIME_DIR", self.dir.join("run"))
-            .env("ANCHOR_LOG", "warn")
-            .spawn()
-            .expect("respawning anchord");
+        self.child = Self::spawn(&self.dir, &self.endpoint);
     }
 
     fn socket(&self) -> PathBuf {
-        self.dir.join("run/anchor.sock")
+        self.endpoint.clone()
     }
 
-    /// Waits for the socket to accept, so a test never races startup.
+    /// Waits for the endpoint to accept, so a test never races startup.
     async fn ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while tokio::net::UnixStream::connect(self.socket())
-            .await
-            .is_err()
-        {
+        while !anchord_endpoint::answers(&self.endpoint) {
             assert!(Instant::now() < deadline, "anchord never came up");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -196,9 +201,12 @@ async fn post_sessions_spawns_in_anchord_not_in_process() {
         "/api/v1/sessions",
         &json!({
                 "kind": "agent",
-                "command": "/bin/sh",
-                "args": ["-c", "stty raw -echo; echo from-anchor; sleep 30"],
-                "cwd": "/tmp",
+                "command": fixture_shell::PROGRAM,
+                "args": fixture_shell::args(fixture_shell::pick(
+                    "stty raw -echo; echo from-anchor; sleep 30",
+                    "Write-Output from-anchor; Start-Sleep 30",
+                )),
+                "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
         }),
@@ -248,7 +256,7 @@ async fn a_refused_spawn_keeps_its_status_code_across_the_boundary() {
         &json!({
             "kind": "shell",
             "command": "definitely-not-on-path-xyz",
-            "cwd": "/tmp",
+            "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
         }),
@@ -265,7 +273,7 @@ async fn a_refused_spawn_keeps_its_status_code_across_the_boundary() {
         "/api/v1/sessions",
         &json!({
             "kind": "shell",
-            "command": "/bin/sh",
+            "command": fixture_shell::PROGRAM,
             "cwd": "/nope/not/a/directory",
             "cols": 80,
             "rows": 24,
@@ -286,9 +294,9 @@ async fn create(daemon: &support::Daemon, script: &str, kind: &str) -> String {
         "/api/v1/sessions",
         &json!({
             "kind": kind,
-            "command": "/bin/sh",
-            "args": ["-c", script],
-            "cwd": "/tmp",
+            "command": fixture_shell::PROGRAM,
+            "args": fixture_shell::args(script),
+            "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
         }),
@@ -311,8 +319,24 @@ async fn get_and_list_serve_anchords_sessions() {
     anchord.ready().await;
     let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
 
-    let a = create(&daemon, "stty raw -echo; echo one; sleep 30", "agent").await;
-    let b = create(&daemon, "stty raw -echo; echo two; sleep 30", "shell").await;
+    let a = create(
+        &daemon,
+        fixture_shell::pick(
+            "stty raw -echo; echo one; sleep 30",
+            "Write-Output one; Start-Sleep 30",
+        ),
+        "agent",
+    )
+    .await;
+    let b = create(
+        &daemon,
+        fixture_shell::pick(
+            "stty raw -echo; echo two; sleep 30",
+            "Write-Output two; Start-Sleep 30",
+        ),
+        "shell",
+    )
+    .await;
 
     let (status, body) = get_json(&daemon, &format!("/api/v1/sessions/{a}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -320,7 +344,7 @@ async fn get_and_list_serve_anchords_sessions() {
     assert_eq!(body["state"], "running");
     // teleport's own metadata survives the round trip as an anchor label.
     assert_eq!(body["kind"], "agent");
-    assert_eq!(body["command"], "/bin/sh");
+    assert_eq!(body["command"], fixture_shell::PROGRAM);
 
     let (status, body) = get_json(&daemon, "/api/v1/sessions").await;
     assert_eq!(status, StatusCode::OK);
@@ -359,7 +383,10 @@ async fn the_log_route_serves_bytes_from_anchord() {
     let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
     let id = create(
         &daemon,
-        "stty raw -echo; echo log-me-please; sleep 30",
+        fixture_shell::pick(
+            "stty raw -echo; echo log-me-please; sleep 30",
+            "Write-Output log-me-please; Start-Sleep 30",
+        ),
         "shell",
     )
     .await;
@@ -415,7 +442,15 @@ async fn delete_terminates_and_purge_forgets() {
 
     // Without purge: the session ends but stays listed, which is the
     // contract teleport's clients already rely on.
-    let id = create(&daemon, "stty raw -echo; echo bye; sleep 30", "shell").await;
+    let id = create(
+        &daemon,
+        fixture_shell::pick(
+            "stty raw -echo; echo bye; sleep 30",
+            "Write-Output bye; Start-Sleep 30",
+        ),
+        "shell",
+    )
+    .await;
     let (status, _) = request(&daemon, authed("DELETE", &format!("/api/v1/sessions/{id}"))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let session = client.get(&id).await.expect("still known to anchord");
@@ -457,7 +492,13 @@ async fn a_session_title_is_derived_from_its_output() {
     // whole reason the watcher exists.
     let id = create(
         &daemon,
-        "stty raw -echo; printf '\\033]2;deriving-this\\007'; sleep 30",
+        fixture_shell::pick(
+            "stty raw -echo; printf '\\033]2;deriving-this\\007'; sleep 30",
+            // conhost re-emits OSC 2 as OSC 0, after an OSC 0 of its own
+            // naming the program; the watcher reads both as titles and the
+            // last one wins, so the wait below still ends on this one.
+            "[Console]::Write([char]27 + ']2;deriving-this' + [char]7); Start-Sleep 30",
+        ),
         "agent",
     )
     .await;
@@ -493,7 +534,12 @@ async fn a_bell_is_noticed_without_anyone_attached() {
 
     let id = create(
         &daemon,
-        "stty raw -echo; sleep 1; printf 'needs you\\007'; sleep 30",
+        fixture_shell::pick(
+            "stty raw -echo; sleep 1; printf 'needs you\\007'; sleep 30",
+            // conhost passes BEL straight through, ahead of the text it was
+            // written after -- order is not preserved, presence is.
+            "Start-Sleep 1; [Console]::Write('needs you' + [char]7); Start-Sleep 30",
+        ),
         "agent",
     )
     .await;
@@ -549,7 +595,10 @@ async fn an_unreachable_anchord_is_an_error_not_an_empty_list() {
     let daemon = support::spawn_on_anchor(
         Config::default(),
         None,
-        PathBuf::from("/tmp/anchor-does-not-exist-for-this-test.sock"),
+        anchord_endpoint::endpoint_in(
+            &anchord_endpoint::scratch_root().join("anchor-does-not-exist-for-this-test"),
+            "does-not-exist-for-this-test",
+        ),
     )
     .await;
 
@@ -572,7 +621,10 @@ async fn health_reports_an_unreachable_anchord_as_unknown() {
     let daemon = support::spawn_on_anchor(
         Config::default(),
         None,
-        PathBuf::from("/tmp/anchor-does-not-exist-for-this-test.sock"),
+        anchord_endpoint::endpoint_in(
+            &anchord_endpoint::scratch_root().join("anchor-does-not-exist-for-this-test"),
+            "does-not-exist-for-this-test",
+        ),
     )
     .await;
 
@@ -619,9 +671,12 @@ async fn an_agent_survives_teleport_restarting_under_it() {
         "/api/v1/sessions",
         &json!({
             "kind": "agent",
-            "command": "/bin/sh",
-            "args": ["-c", "stty raw -echo; echo agent-is-up; sleep 300"],
-            "cwd": "/tmp",
+            "command": fixture_shell::PROGRAM,
+            "args": fixture_shell::args(fixture_shell::pick(
+                "stty raw -echo; echo agent-is-up; sleep 300",
+                "Write-Output agent-is-up; Start-Sleep 300",
+            )),
+            "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
         }),
@@ -706,7 +761,15 @@ async fn anchord_restarting_leaves_teleport_serving() {
     anchord.ready().await;
 
     let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
-    let id = create(&daemon, "stty raw -echo; echo up; sleep 300", "agent").await;
+    let id = create(
+        &daemon,
+        fixture_shell::pick(
+            "stty raw -echo; echo up; sleep 300",
+            "Write-Output up; Start-Sleep 300",
+        ),
+        "agent",
+    )
+    .await;
 
     // anchord goes away and comes back, keeping its store.
     anchord.restart();
@@ -761,7 +824,13 @@ async fn a_log_past_one_response_cap_is_assembled_from_several() {
     // `yes` is the cheapest way to make a PTY produce megabytes quickly.
     let id = create(
         &daemon,
-        "stty raw -echo; yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -c 6000000; echo big-log-done; sleep 30",
+        fixture_shell::pick(
+            "stty raw -echo; yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -c 6000000; echo big-log-done; sleep 30",
+            // 95 blocks of 2000 33-byte lines. Through ConPTY this came to
+            // 6.46 MB on build 26200, still past the cap: conhost re-renders
+            // rather than relays, and adds bytes rather than dropping lines.
+            "$l = 'a' * 32; $b = [Text.StringBuilder]::new(); for ($i = 0; $i -lt 2000; $i++) { [void]$b.AppendLine($l) }; $s = $b.ToString(); for ($j = 0; $j -lt 95; $j++) { [Console]::Out.Write($s) }; [Console]::Out.WriteLine('big-log-done'); Start-Sleep 30",
+        ),
         "shell",
     )
     .await;
@@ -827,7 +896,12 @@ async fn a_ws_ticket_is_issued_for_a_session_in_anchord() {
     let anchord = Anchord::start("wsticket");
     anchord.ready().await;
     let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
-    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+    let id = create(
+        &daemon,
+        fixture_shell::pick("stty raw -echo; sleep 30", "Start-Sleep 30"),
+        "shell",
+    )
+    .await;
 
     let (status, body) =
         post_json(&daemon, "/api/v1/ws-ticket", &json!({ "session_id": id })).await;
@@ -880,7 +954,12 @@ async fn purging_a_session_releases_its_lease() {
     let anchord = Anchord::start("leasepurge");
     anchord.ready().await;
     let daemon = support::spawn_on_anchor(Config::default(), None, anchord.socket()).await;
-    let id = create(&daemon, "stty raw -echo; sleep 30", "shell").await;
+    let id = create(
+        &daemon,
+        fixture_shell::pick("stty raw -echo; sleep 30", "Start-Sleep 30"),
+        "shell",
+    )
+    .await;
 
     // Claiming is what puts the session in the registry; a session nobody
     // ever controlled would pass this test without the fix.
@@ -929,7 +1008,7 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     }
     let anchord = Anchord::start("metasurvive");
     anchord.ready().await;
-    let dir = PathBuf::from(format!("/tmp/tp-meta-{}", std::process::id()));
+    let dir = anchord_endpoint::scratch_root().join(format!("tp-meta-{}", std::process::id()));
     #[expect(
         clippy::let_underscore_must_use,
         reason = "best-effort cleanup of a previous run"
@@ -940,6 +1019,14 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
         teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
             .expect("open test db");
 
+    // Whether the resume link can reach the log at all. Not on Windows:
+    // conhost swallows OSC 8 rather than relaying it -- written, and absent
+    // from what ConPTY emitted, on Windows 11 build 26200 (2026-10-19). The
+    // title half still runs there. The link has no live producer on any
+    // platform anyway (`session/osc.rs`'s module doc); this keeps the Unix
+    // half of the check honest rather than pretending Windows has it.
+    let resume_reaches_the_log = cfg!(unix);
+
     // An agent that sets a terminal title and prints a resume link, the way
     // a real one does in its opening banner.
     let before =
@@ -949,15 +1036,17 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
         "/api/v1/sessions",
         &json!({
             "kind": "agent",
-            "command": "/bin/sh",
-            "args": [
-                "-c",
+            "command": fixture_shell::PROGRAM,
+            "args": fixture_shell::args(fixture_shell::pick(
                 "stty raw -echo; \
                  printf '\\033]0;Fixing the parser\\007'; \
                  printf '\\033]8;id=gq2qz2;https://claude.ai/code/session_013YMNvvZ2U1fUjQsxAbqRjj?from=cli\\007'; \
                  sleep 2",
-            ],
-            "cwd": "/tmp",
+                "[Console]::Write([char]27 + ']0;Fixing the parser' + [char]7); \
+                 [Console]::Write([char]27 + ']8;id=gq2qz2;https://claude.ai/code/session_013YMNvvZ2U1fUjQsxAbqRjj?from=cli' + [char]7); \
+                 Start-Sleep 2",
+            )),
+            "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
         }),
@@ -971,7 +1060,9 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
-        if view["title"] == "Fixing the parser" && !view["claude_resume_id"].is_null() {
+        if view["title"] == "Fixing the parser"
+            && (!resume_reaches_the_log || !view["claude_resume_id"].is_null())
+        {
             break;
         }
         assert!(
@@ -1003,7 +1094,9 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let view = loop {
         let (_, view) = get_json(&after, &format!("/api/v1/sessions/{id}")).await;
-        if !view["title"].is_null() && !view["claude_resume_id"].is_null() {
+        if !view["title"].is_null()
+            && (!resume_reaches_the_log || !view["claude_resume_id"].is_null())
+        {
             break view;
         }
         assert!(
@@ -1016,10 +1109,12 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
         view["title"], "Fixing the parser",
         "the title did not survive: {view}"
     );
-    assert_eq!(
-        view["claude_resume_id"], "session_013YMNvvZ2U1fUjQsxAbqRjj",
-        "the resume id did not survive: {view}"
-    );
+    if resume_reaches_the_log {
+        assert_eq!(
+            view["claude_resume_id"], "session_013YMNvvZ2U1fUjQsxAbqRjj",
+            "the resume id did not survive: {view}"
+        );
+    }
 
     #[expect(
         clippy::let_underscore_must_use,
@@ -1057,9 +1152,9 @@ async fn an_oversized_create_is_refused_as_too_large_not_as_an_internal_error() 
         "/api/v1/sessions",
         &json!({
             "kind": "shell",
-            "command": "/bin/sh",
-            "args": ["-c", "sleep 30"],
-            "cwd": "/tmp",
+            "command": fixture_shell::PROGRAM,
+            "args": fixture_shell::args(fixture_shell::pick("sleep 30", "Start-Sleep 30")),
+            "cwd": fixture_shell::cwd(),
             "cols": 80,
             "rows": 24,
             "env": { "TELEPORT_BIG": "x".repeat(1_400_000) },

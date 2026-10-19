@@ -691,3 +691,65 @@ pub(crate) async fn create_shell_session(
         .expect("create session");
     session.id
 }
+
+/// The shell an anchor fixture spawns its scripts in, per platform.
+///
+/// `/bin/sh -c` on Unix. `PowerShell` on Windows rather than `cmd.exe`,
+/// because the fixtures need to write raw control bytes (OSC titles, BEL)
+/// and `[Console]::Write([char]27 ...)` says so legibly where `cmd`'s
+/// `echo` cannot carry them at all. Every Windows script here was run
+/// through teleport's own `ConPTY` path (`pty::spawn`) on Windows 11 build
+/// 26200 before being written down, 2026-10-19 -- see the `pick` call sites
+/// for what that showed.
+pub(crate) mod fixture_shell {
+    /// The program a fixture session runs.
+    #[cfg(unix)]
+    pub(crate) const PROGRAM: &str = "/bin/sh";
+    /// The program a fixture session runs.
+    #[cfg(windows)]
+    pub(crate) const PROGRAM: &str = "powershell.exe";
+
+    /// `PROGRAM`'s argv for one script.
+    pub(crate) fn args(script: &str) -> Vec<String> {
+        #[cfg(unix)]
+        let prefix: &[&str] = &["-c"];
+        #[cfg(windows)]
+        let prefix: &[&str] = &["-NoProfile", "-NonInteractive", "-Command"];
+        prefix
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(std::iter::once(script.to_owned()))
+            .collect()
+    }
+
+    /// A directory every fixture may spawn in.
+    pub(crate) fn cwd() -> String {
+        #[cfg(unix)]
+        {
+            "/tmp".to_owned()
+        }
+        #[cfg(windows)]
+        {
+            std::env::temp_dir().display().to_string()
+        }
+    }
+
+    /// The script for this platform: one written for `/bin/sh`, one for
+    /// PowerShell, chosen at compile time so each file states both side by
+    /// side.
+    #[cfg_attr(unix, expect(unused_variables, reason = "the other platform's script"))]
+    #[cfg_attr(
+        windows,
+        expect(unused_variables, reason = "the other platform's script")
+    )]
+    pub(crate) fn pick<'a>(unix: &'a str, windows: &'a str) -> &'a str {
+        #[cfg(unix)]
+        {
+            unix
+        }
+        #[cfg(windows)]
+        {
+            windows
+        }
+    }
+}
