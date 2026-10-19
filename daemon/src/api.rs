@@ -28,7 +28,6 @@ use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-#[cfg(unix)]
 use crate::anchor_bridge;
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
@@ -54,16 +53,10 @@ pub struct AppState {
     /// `None` is the authoritative path today. Both exist on purpose during
     /// the extraction — see anchor's `ROADMAP.md` M4, which flips the
     /// default only once this suite passes against the anchor path.
-    ///
-    /// Absent on Windows, which has no transport to anchord (`lib.rs`'s
-    /// gate, #107). Gated rather than left as a permanent `None` so a
-    /// Windows build cannot grow a branch that compiles and can never run.
-    #[cfg(unix)]
     pub anchor: Option<crate::anchor_client::AnchorClient>,
     /// What teleport has derived from anchor-hosted sessions' output —
     /// title, resume id, bell, idleness. Empty on the in-process path,
     /// where the PTY reader derives them as it goes.
-    #[cfg(unix)]
     pub watch: Arc<crate::anchor_watch::WatchRegistry>,
     /// Control leases for anchor-hosted sessions. Unused on the in-process
     /// path, where the lease lives on each `Session`.
@@ -574,9 +567,6 @@ const CAPABILITIES: &[&str] = &[
 /// is the question the caller is actually asking -- a client keying off
 /// "is it anchor" would have to be taught again the next time the answer
 /// comes from somewhere else.
-/// Unix-only, like the capability itself: Windows has no anchor path, so it
-/// never advertises this and nothing reads the constant there (#107).
-#[cfg(unix)]
 const SESSIONS_SURVIVE_RESTART: &str = "sessions_survive_restart";
 
 /// This daemon's capabilities.
@@ -586,22 +576,11 @@ const SESSIONS_SURVIVE_RESTART: &str = "sessions_survive_restart";
 /// sessions are right now, and a promise read from intent rather than from
 /// fact is the kind that gets broken.
 fn capabilities(state: &AppState) -> Vec<&'static str> {
-    // On Windows there is no anchor client to ask, and the answer is the one
-    // the check would have produced anyway: sessions live in this process and
-    // do not survive a restart.
-    #[cfg(not(unix))]
-    {
-        let _ = state;
-        CAPABILITIES.to_vec()
+    let mut caps = CAPABILITIES.to_vec();
+    if state.anchor.is_some() {
+        caps.push(SESSIONS_SURVIVE_RESTART);
     }
-    #[cfg(unix)]
-    {
-        let mut caps = CAPABILITIES.to_vec();
-        if state.anchor.is_some() {
-            caps.push(SESSIONS_SURVIVE_RESTART);
-        }
-        caps
-    }
+    caps
 }
 
 /// `GET /api/v1/health` -- the one route reachable without a credential
@@ -657,51 +636,36 @@ async fn health(
         // in-process manager's count on the anchor path would report zero
         // while sessions run, which is worse than not reporting it:
         // health is what a supervisor decides to restart on.
-        // Named once because both paths below end at it: on Windows it is
-        // the only answer, and on Unix it is still the answer whenever
-        // `use_anchor` is off.
-        let in_process_running = || -> serde_json::Value {
-            state
+        body["sessions_running"] = match &state.anchor {
+            // An unreachable anchord is reported as unknown, never as
+            // zero. The updater reads this field together with
+            // `sessions_survive_restart` to decide whether it may restart
+            // under load; a zero here would be a confident claim that
+            // there is nothing to lose, made at the exact moment the
+            // daemon holding it cannot be asked.
+            Some(anchor) => match anchor
+                .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
+                .await
+            {
+                Ok(sessions) => sessions
+                    .iter()
+                    .filter(|s| s.state == "running")
+                    .count()
+                    .into(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "counting anchord's sessions for health failed");
+                    body["anchor_reachable"] = false.into();
+                    serde_json::Value::Null
+                }
+            },
+            None => state
                 .sessions
                 .list()
                 .iter()
                 .filter(|s| s.state() == SessionState::Running)
                 .count()
-                .into()
+                .into(),
         };
-        #[cfg(unix)]
-        {
-            body["sessions_running"] = match &state.anchor {
-                // An unreachable anchord is reported as unknown, never as
-                // zero. The updater reads this field together with
-                // `sessions_survive_restart` to decide whether it may restart
-                // under load; a zero here would be a confident claim that
-                // there is nothing to lose, made at the exact moment the
-                // daemon holding it cannot be asked.
-                Some(anchor) => match anchor
-                    .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
-                    .await
-                {
-                    Ok(sessions) => sessions
-                        .iter()
-                        .filter(|s| s.state == "running")
-                        .count()
-                        .into(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "counting anchord's sessions for health failed");
-                        body["anchor_reachable"] = false.into();
-                        serde_json::Value::Null
-                    }
-                },
-                None => in_process_running(),
-            };
-        }
-        // No anchord to ask, so no `anchor_reachable` to report and no
-        // unknown to represent: the count is always this process's own.
-        #[cfg(not(unix))]
-        {
-            body["sessions_running"] = in_process_running();
-        }
     }
     Json(body)
 }
@@ -772,7 +736,6 @@ async fn create_session(
     // request rather than a fork/exec here. Teleport's own `kind`/`preset`
     // travel as labels -- anchor has no column for them and should not grow
     // one (`anchor_bridge`).
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         // max_sessions is teleport's policy, so teleport enforces it.
         // anchord has a cap of its own but it is a different daemon's
@@ -856,10 +819,6 @@ async fn create_session(
 /// `&'static str`. An unknown value means a newer daemon grew a state this
 /// build does not know -- reporting it as `lost` is the honest fallback,
 /// since what teleport can say for certain is that it cannot drive it.
-///
-/// Unix-only: anchor is the only thing that reports state as a string, and
-/// the in-process path already has `SessionState::as_str` (#107).
-#[cfg(unix)]
 fn state_str(state: &str) -> &'static str {
     match state {
         "running" => "running",
@@ -924,7 +883,6 @@ impl SessionView {
     /// session's output the way the in-process reader does. `None` when no
     /// watcher has seen it yet — a session created moments ago, or one
     /// anchord is holding for a teleport that is not running.
-    #[cfg(unix)]
     fn from_anchor(
         bridged: &anchor_bridge::BridgedSession,
         derived: Option<&crate::anchor_watch::Derived>,
@@ -1055,7 +1013,6 @@ async fn list_sessions(
     // are deliberately not merged in: they describe sessions from the
     // in-process era that no longer exist anywhere, and showing entries a
     // client cannot open is worse than not showing them.
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         // Never an empty list on failure. A client cannot tell that from
         // "you have no sessions", and on this path that difference is the
@@ -1112,7 +1069,6 @@ async fn get_session(
     _principal: Principal,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         let session = anchor
             .get(&id)
@@ -1192,7 +1148,6 @@ async fn delete_session(
     // control requests. Terminate is idempotent there, and purge refuses a
     // session that is still running — so purge terminates first and waits,
     // which is what the in-process path below does too.
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         anchor
             .terminate(&id)
@@ -1310,7 +1265,6 @@ async fn get_log(
     // anchord owns the log, so the range is read over the socket. Its `log`
     // op caps one response at 4 MiB whatever is asked for, so a wider range
     // is assembled from several — the same bytes, just not in one reply.
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         let session = anchor
             .get(&id)
@@ -1729,26 +1683,11 @@ async fn create_ws_ticket(
 /// the `/stream` upgrade, and an exited session that is only a SQLite row
 /// cannot be attached to. That is why this does not fall back to
 /// `historical_row` the way `get_session` does.
-// Both attributes describe the anchor branch below, which is the only part of
-// this function that ignores a parse error or awaits anything. On Windows that
-// branch is gone, so the expectations would go unfulfilled and the `async`
-// would be genuinely unused -- hence conditional rather than unconditional.
-#[cfg_attr(
-    unix,
-    expect(
-        clippy::map_err_ignore,
-        reason = "same as historical_row: a malformed id and an unknown id share the same 404"
-    )
-)]
-#[cfg_attr(
-    not(unix),
-    expect(
-        clippy::unused_async,
-        reason = "the only await is in the anchor branch, absent on Windows (#107); the signature stays stable across platforms"
-    )
+#[expect(
+    clippy::map_err_ignore,
+    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
 )]
 async fn resolve_ticket_session(state: &AppState, id: &str) -> Result<SessionId, ApiError> {
-    #[cfg(unix)]
     if let Some(anchor) = &state.anchor {
         // The id still has to parse: the ticket store is keyed by
         // `SessionId`, and both id spaces are ULIDs.

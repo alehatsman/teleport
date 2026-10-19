@@ -204,7 +204,6 @@ fn next_owner_id() -> String {
 ///
 /// Never dropped: a `static` lives for the process, so the daemon outlives
 /// every fixture in the binary and its directory is cleaned up by the OS.
-#[cfg(unix)]
 static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new();
 
 /// Wipes every session out of the shared daemon, once per run.
@@ -215,7 +214,6 @@ static SHARED: std::sync::OnceLock<Option<Anchord>> = std::sync::OnceLock::new()
 /// resource pressure the reuse was meant to end. The daemon belongs
 /// entirely to this test binary, so starting each run from empty is both
 /// safe and what isolation actually requires.
-#[cfg(unix)]
 async fn wipe_shared_daemon(socket: &Path) {
     static WIPED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     WIPED
@@ -237,7 +235,6 @@ async fn wipe_shared_daemon(socket: &Path) {
 }
 
 /// The shared daemon's socket, or `None` when not running on anchor.
-#[cfg(unix)]
 pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
     SHARED
         .get_or_init(|| {
@@ -251,19 +248,13 @@ pub(crate) fn shared_anchord_socket() -> Option<PathBuf> {
 
 /// An `anchord` the suite drives, so teleport's own tests can run against
 /// the anchor path rather than a suite written to agree with it.
-///
-/// Unix-only: it reaches `std::os::unix::net::UnixStream` directly to poll the
-/// socket (`:291`, `:328`). Those calls are not behind a cfg gate of their own
-/// and never were -- which is why inverting cfg gates on a Unix host did not
-/// reveal them, and a real cross-compile did (`scripts/ci-local.sh windows`).
-#[cfg(unix)]
 pub(crate) struct Anchord {
     /// `None` when this run reused a daemon an earlier run started.
     child: Option<std::process::Child>,
     dir: PathBuf,
+    endpoint: PathBuf,
 }
 
-#[cfg(unix)]
 impl Anchord {
     /// `None` unless `TELEPORT_TEST_ANCHOR` and `ANCHORD_BIN` are both set.
     fn start_if_requested() -> Option<Self> {
@@ -293,12 +284,16 @@ impl Anchord {
             .unwrap_or_else(|| "suite".to_owned());
         // Trimmed: the socket path underneath this is capped near 104 bytes.
         let stem: String = stem.chars().take(24).collect();
-        let dir = PathBuf::from(format!("/tmp/tp-anchor-{stem}"));
+        let dir = anchord_endpoint::scratch_root().join(format!("tp-anchor-{stem}"));
+        let endpoint = anchord_endpoint::endpoint_in(&dir, &stem);
 
         // A daemon already listening here is reused as-is.
-        let socket = dir.join("run/anchor.sock");
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            return Some(Self { child: None, dir });
+        if anchord_endpoint::answers(&endpoint) {
+            return Some(Self {
+                child: None,
+                dir,
+                endpoint,
+            });
         }
 
         // Otherwise start fresh: whatever is there is a dead daemon's
@@ -309,9 +304,10 @@ impl Anchord {
         // Captured, so a daemon that dies on startup says why instead of
         // being diagnosed as "slow" by a timeout.
         let log = std::fs::File::create(dir.join("anchord.log")).expect("creating the log");
-        let child = std::process::Command::new(&bin)
-            .env("XDG_DATA_HOME", &dir)
-            .env("XDG_RUNTIME_DIR", dir.join("run"))
+        let mut command = std::process::Command::new(&bin);
+        anchord_endpoint::point_at(&mut command, &dir, &endpoint)
+            .expect("pointing anchord at its fixture directory");
+        let child = command
             .env("ANCHOR_LOG", "info")
             .stderr(std::process::Stdio::from(log))
             .spawn()
@@ -319,22 +315,23 @@ impl Anchord {
         Some(Self {
             child: Some(child),
             dir,
+            endpoint,
         })
     }
 
     fn socket(&self) -> PathBuf {
-        self.dir.join("run/anchor.sock")
+        self.endpoint.clone()
     }
 
-    /// Blocks until the socket accepts, so a fixture never races startup.
+    /// Blocks until the endpoint accepts, so a fixture never races startup.
     ///
     /// Generous, because every fixture starts its own anchord and a full
     /// parallel run starts dozens at once. The wait is for a process to
-    /// bind a unix socket, so a slow one here means a loaded machine, not a
-    /// broken daemon.
+    /// bind a socket or create a pipe, so a slow one here means a loaded
+    /// machine, not a broken daemon.
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(60);
-        while std::os::unix::net::UnixStream::connect(self.socket()).is_err() {
+        while !anchord_endpoint::answers(&self.endpoint) {
             assert!(
                 Instant::now() < deadline,
                 "anchord never came up; its log said: {}",
@@ -342,6 +339,96 @@ impl Anchord {
                     .unwrap_or_else(|e| format!("<unreadable: {e}>"))
             );
             std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+/// Where a test anchord lives, and how to tell whether it is up -- the
+/// platform half of [`Anchord`], kept apart so the fixture logic above is
+/// written once.
+///
+/// Two traps this exists to avoid, both from #107. Reaching for
+/// `std::os::unix::net` directly made the whole module Unix-only without a
+/// gate saying so; and a check that flips cfg flags on a Unix host cannot
+/// see that, because the Unix API is real there whatever the flags say.
+pub(crate) mod anchord_endpoint {
+    use std::path::{Path, PathBuf};
+
+    /// Where fixture directories go. `/tmp` on Unix rather than
+    /// `temp_dir()`, because macOS's `$TMPDIR` is long enough to push a
+    /// socket path past `sun_path`'s ~104 bytes.
+    pub(crate) fn scratch_root() -> PathBuf {
+        #[cfg(unix)]
+        {
+            PathBuf::from("/tmp")
+        }
+        #[cfg(windows)]
+        {
+            std::env::temp_dir()
+        }
+    }
+
+    /// The endpoint a test anchord rooted at `dir` listens on.
+    #[cfg_attr(
+        unix,
+        expect(unused_variables, reason = "a pipe is named, a socket is placed")
+    )]
+    pub(crate) fn endpoint_in(dir: &Path, tag: &str) -> PathBuf {
+        #[cfg(unix)]
+        {
+            dir.join("run/anchor.sock")
+        }
+        // A pipe name, not a path under `dir`: the pipe namespace is flat
+        // and machine-global, which is why it carries a tag and this
+        // process's user is the only one that can open it (anchor's
+        // `docs/09-windows.md` §3.2).
+        #[cfg(windows)]
+        {
+            let _ = dir;
+            PathBuf::from(format!(r"\\.\pipe\tp-anchor-{tag}"))
+        }
+    }
+
+    /// Whether something accepts a connection on `endpoint` right now.
+    pub(crate) fn answers(endpoint: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::connect(endpoint).is_ok()
+        }
+        // Opening the pipe is connecting to it. `ERROR_PIPE_BUSY` (231)
+        // means every instance is taken, which is a server that exists.
+        #[cfg(windows)]
+        {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(endpoint)
+            {
+                Ok(_) => true,
+                Err(e) => e.raw_os_error() == Some(231),
+            }
+        }
+    }
+
+    /// Points a to-be-spawned anchord at `dir` for its data and `endpoint`
+    /// for its listener.
+    pub(crate) fn point_at(
+        command: &mut std::process::Command,
+        dir: &Path,
+        endpoint: &Path,
+    ) -> Result<(), &'static str> {
+        #[cfg(unix)]
+        {
+            let _ = endpoint;
+            command
+                .env("XDG_DATA_HOME", dir)
+                .env("XDG_RUNTIME_DIR", dir.join("run"));
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            let _ = (command, dir, endpoint);
+            Err("a test anchord on Windows needs anchord's pipe override, which anchor M6 has not defined yet")
         }
     }
 }
@@ -418,21 +505,8 @@ pub(crate) async fn spawn_with_web_assets(
     spawn_inner(config, web, db, None).await
 }
 
-/// What `spawn_inner` accepts as a backend.
-///
-/// Uninhabited off Unix, where there is no transport to anchord (`lib.rs`'s
-/// gate, #107): every caller still passes `None` and the signature does not
-/// fork, but no Windows build can construct the anchor path. Only
-/// `web_static.rs` compiles this module on Windows -- every other consumer
-/// is `#![cfg(unix)]`, and `pty_primitive_windows.rs` does not use it at all.
-#[cfg(unix)]
-type MaybeAnchor = Option<teleportd::anchor_client::AnchorClient>;
-#[cfg(not(unix))]
-type MaybeAnchor = Option<std::convert::Infallible>;
-
 /// A daemon whose sessions live in an external `anchord` on `socket` — the
 /// anchor path, exercised through teleport's own HTTP surface.
-#[cfg(unix)]
 pub(crate) async fn spawn_on_anchor(
     config: Config,
     db: Option<teleportd::persistence::Db>,
@@ -448,19 +522,15 @@ pub(crate) async fn spawn_on_anchor(
 }
 
 async fn spawn_inner(
-    // `mut` only on Unix, where the anchor arm below rewrites `anchor_owner`
-    // to isolate fixtures sharing one anchord.
-    #[cfg_attr(not(unix), expect(unused_mut, reason = "no anchor arm to rewrite it"))]
     mut config: Config,
     web: WebAssets,
     db: Option<teleportd::persistence::Db>,
-    anchor: MaybeAnchor,
+    anchor: Option<teleportd::anchor_client::AnchorClient>,
 ) -> Daemon {
     // On the anchor path every fixture shares one daemon and is isolated by
     // owning its sessions: teleport lists and counts only its own, so a
     // unique owner per fixture is exactly the isolation the product already
     // gives two real tools sharing a daemon.
-    #[cfg(unix)]
     let anchor = match (anchor, shared_anchord_socket()) {
         (Some(client), _) => Some(client),
         (None, Some(socket)) => {
@@ -470,16 +540,10 @@ async fn spawn_inner(
         }
         (None, None) => None,
     };
-    // Always `None`, and uninhabited besides -- consumed so the parameter
-    // does not read as unused on a platform that cannot use it.
-    #[cfg(not(unix))]
-    let _ = anchor;
 
     // Fixtures get the supervisor too, so the anchor path they exercise is
     // the one that ships rather than a quieter variant of it.
-    #[cfg(unix)]
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
-    #[cfg(unix)]
     if let Some(client) = &anchor {
         teleportd::anchor_watch::spawn_supervisor(
             client.clone(),
@@ -508,9 +572,7 @@ async fn spawn_inner(
         sessions,
         // `None` for the in-process path, which is what most fixtures
         // drive; `Some` routes sessions to a real anchord.
-        #[cfg(unix)]
         anchor,
-        #[cfg(unix)]
         watch: Arc::clone(&watch),
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db,
@@ -565,7 +627,6 @@ pub(crate) fn default_config() -> Config {
 /// Reaching into `state.sessions` asserts the same thing but only on the
 /// in-process path; a test that does so is pinned to an implementation
 /// rather than to the protocol it means to check.
-#[cfg(unix)]
 pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::SessionId) -> u64 {
     match &daemon.state.anchor {
         Some(anchor) => {
@@ -590,7 +651,6 @@ pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::Sess
 /// daemon serves from anchord gives a session the API cannot see, and every
 /// test that then attaches gets `not_found` — which looks like a protocol
 /// bug and is really a fixture talking to the wrong store.
-#[cfg(unix)]
 pub(crate) async fn create_shell_session(
     daemon: &Daemon,
     args: &[String],

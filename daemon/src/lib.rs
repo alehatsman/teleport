@@ -4,32 +4,9 @@
 //! compiled binary (docs/11-mvp-plan.md#m1--pty-primitive: "drive it from
 //! integration tests").
 
-// The anchor path speaks to `anchord` over a Unix socket, and nothing else
-// yet: `anchor_client` spells `tokio::net::unix::Owned{Read,Write}Half` into
-// its own public surface, so the modules built on it are Unix-only too.
-// Windows therefore compiles the in-process PTY layer and only that, which
-// is already what it runs -- `use_anchor` defaults off (`main.rs`), so no
-// Windows deployment has ever reached anchord.
-//
-// This is a missing implementation, not a missing attribute. What Windows
-// needs is a transport that is not an `AF_UNIX` socket, and the shape of
-// that seam is anchor's to decide, not teleport's: docs/20's Constraint 3
-// asks whether `anchor_socket` becomes transport-agnostic or each platform
-// gets its own, and whether anchor's framing survives a named pipe
-// unchanged. Until that answer exists there is nothing honest to gate *in*.
-//
-// The gate's immediate purpose is narrower than anchor: with the daemon
-// failing to build on Windows at all, `tests/pty_primitive_windows.rs` --
-// the sole proof of the ConPTY terminate path, and an artifact docs/20
-// requires before the in-process layer may be deleted -- could not be
-// compiled, let alone run. A retirement gate nothing can execute is not a
-// gate. See #107.
-#[cfg(unix)]
 pub mod anchor_bridge;
-#[cfg(unix)]
 pub mod anchor_client;
 pub mod anchor_lease;
-#[cfg(unix)]
 pub mod anchor_watch;
 pub mod api;
 pub mod auth;
@@ -46,7 +23,6 @@ pub mod pty;
 pub mod session;
 pub mod web_assets;
 pub mod ws;
-#[cfg(unix)]
 pub mod ws_anchor;
 
 /// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field

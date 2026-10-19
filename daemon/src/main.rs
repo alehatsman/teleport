@@ -231,35 +231,18 @@ async fn main() -> Result<()> {
     // anchord when this is on. It still defaults off — the in-process layer
     // stays authoritative until teleport's own suite has run green against
     // the anchor path and a release has shipped on it (anchor ROADMAP M5).
-    #[cfg(unix)]
     let anchor = if config.use_anchor {
-        let socket = match &config.anchor_socket {
-            Some(socket) => socket.clone(),
-            None => anchor_socket_default()?,
-        };
+        refuse_anchor_where_it_cannot_host()?;
+        let socket = config.anchor_endpoint()?;
         tracing::info!(socket = %socket.display(), "sessions will run in anchord");
         Some(teleportd::anchor_client::AnchorClient::new(socket))
     } else {
         None
     };
 
-    // Windows has no transport to anchord (`lib.rs`'s gate, #107). Refusing
-    // the flag outright rather than ignoring it: `use_anchor` is a promise
-    // that sessions outlive the daemon, and silently running them in-process
-    // would break that promise at the one moment -- an update restart -- the
-    // operator set the flag to survive.
-    #[cfg(not(unix))]
-    if config.use_anchor {
-        anyhow::bail!(
-            "--use-anchor is not supported on Windows: teleportd has no transport to anchord yet (see #107)"
-        );
-    }
-
     // Follows every session teleport owns, so the fields the UI shows stay
     // truthful for sessions nobody currently has open.
-    #[cfg(unix)]
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
-    #[cfg(unix)]
     if let Some(client) = &anchor {
         teleportd::anchor_watch::spawn_supervisor(
             client.clone(),
@@ -271,9 +254,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         sessions,
-        #[cfg(unix)]
         anchor,
-        #[cfg(unix)]
         watch,
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
         db: Some(db),
@@ -586,30 +567,31 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
     info!("shutdown signal received");
 }
 
-/// Where `anchord` listens when `config.toml` does not say.
+/// Refuses `use_anchor` on a platform where anchord cannot host a session.
 ///
-/// Anchor's own resolution, mirrored rather than imported: teleport does not
-/// depend on the anchor crate, so this follows its documented default of
-/// `$XDG_RUNTIME_DIR/anchor.sock`, falling back to the data dir.
-///
-/// Unix-only: its one caller is the anchor setup above, and the default it
-/// resolves is a filesystem socket path, which is the assumption a Windows
-/// transport would have to replace rather than reuse (docs/20, Constraint 3).
-#[cfg(unix)]
-fn anchor_socket_default() -> Result<PathBuf> {
-    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(run).join("anchor.sock"));
-    }
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|home| PathBuf::from(home).join(".local/share"))
-        })
-        .context("cannot resolve anchord's socket: set anchor_socket in config.toml")?;
-    Ok(data.join("anchor/anchor.sock"))
+/// Windows, until anchor's M6 lands. The client half compiles and connects
+/// there (`anchor_client`'s transport seam), but an anchord that answers is
+/// not yet an anchord that hosts sessions with the guarantees teleport
+/// relies on -- above all an exit observed exactly once (anchor's
+/// `docs/09-windows.md`, Goal). Refusing rather than ignoring the flag:
+/// `use_anchor` is a promise that sessions outlive the daemon, and silently
+/// running them in-process would break it at the one moment -- an update
+/// restart -- the operator set the flag to survive.
+#[cfg(windows)]
+fn refuse_anchor_where_it_cannot_host() -> Result<()> {
+    anyhow::bail!(
+        "use_anchor is not supported on Windows yet: anchord does not host sessions there until anchor M6 lands (docs/20, Constraint 3)"
+    )
+}
+
+/// Every other platform anchord supports hosts sessions today.
+#[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one signature on every platform, so the caller does not fork"
+)]
+fn refuse_anchor_where_it_cannot_host() -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

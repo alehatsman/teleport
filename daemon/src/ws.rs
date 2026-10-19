@@ -119,15 +119,7 @@ pub async fn upgrade(
     // proxy in `ws_anchor` speaks the same client protocol over an anchor
     // attach; keeping it a separate path leaves the authoritative
     // in-process loop below untouched.
-    #[cfg(unix)]
     let anchor_path = state.anchor.clone();
-    // Windows has no transport to anchord (`lib.rs`'s gate, #107), so the
-    // in-process lookup below is not one of two paths, it is the only one.
-    // Typed as an uninhabited `None` rather than deleted so the branch
-    // structure stays identical on both platforms -- the day a Windows
-    // transport exists, this line is what changes, not the control flow.
-    #[cfg(not(unix))]
-    let anchor_path: Option<std::convert::Infallible> = None;
     let session = if anchor_path.is_some() {
         None
     } else {
@@ -156,7 +148,6 @@ pub async fn upgrade(
     let max_replay_bytes = state.config.max_replay_bytes;
     let control_grace_ms = state.config.control_grace_ms;
 
-    #[cfg(unix)]
     if let Some(anchor) = anchor_path {
         let id = session_id.to_string();
         // Checked before the upgrade, so an unknown session is a 404 on the
