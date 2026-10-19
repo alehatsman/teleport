@@ -3,36 +3,22 @@
 //! terminal: mixed framing (text = control JSON, binary = raw PTY bytes
 //! prefixed with an 8-byte big-endian offset), the attach/catch-up sequence
 //! from `session.rs`, and the control lease.
+//!
+//! Only the upgrade lives here: the connection itself is `ws_anchor`'s
+//! proxy over an anchor attach, since every session lives in anchord
+//! (docs/20). `bound_attach` stays because that proxy uses it.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::api::AppState;
 use crate::auth;
-use crate::session::{AttachError, ReplayStep, Session, SessionEvent, SessionId, Subscription};
-
-/// Server sends a `Ping` on this cadence (docs/04-api-protocol.md#keepalive-and-reconnection).
-const PING_INTERVAL: Duration = Duration::from_secs(20);
-/// Closes the connection if no `Pong` arrives within this long.
-const PONG_TIMEOUT: Duration = Duration::from_mins(1);
-/// Once `exited` fires, how long to wait for the reader thread to also
-/// reach EOF before finalizing the `exit` frame anyway. The reaper thread's
-/// `wait()` can return before the reader's next `read()` does (S1/S3 spike:
-/// normally a 0ms gap, but not guaranteed under load) -- without this, a
-/// fast process's last chunk can still be sitting unread when `final_offset`
-/// is captured and the socket closes right behind it. Bounded, not
-/// unbounded: a child that exits while a grandchild still holds the pty
-/// open can leave EOF arbitrarily far off
-/// (docs/15-open-questions.md#s2--eof-is-not-exit), and this connection must
-/// not hang on that.
-const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
+use crate::session::SessionId;
 
 /// Query params on `GET /api/v1/sessions/{id}/stream`
 /// (docs/04-api-protocol.md#websocket-protocol).
@@ -64,7 +50,7 @@ enum StreamMode {
 
 /// The route handler: validates the upgrade (Origin/Host, credential,
 /// session existence, mutually-exclusive `after`/`tail`) and, only once all
-/// of that holds, upgrades and hands off to `run`. Everything before the
+/// of that holds, upgrades and hands off to `ws_anchor::run_anchor`. Everything before the
 /// upgrade can still return an ordinary HTTP error response; nothing after
 /// it can, which is exactly why these checks come first.
 ///
@@ -114,22 +100,7 @@ pub async fn upgrade(
         )
             .into_response();
     }
-    // On the anchor path the session lives in anchord, so there is no
-    // in-process `Session` to look up and `run` has nothing to take. The
-    // proxy in `ws_anchor` speaks the same client protocol over an anchor
-    // attach; keeping it a separate path leaves the authoritative
-    // in-process loop below untouched.
-    let anchor_path = state.anchor.clone();
-    let session = if anchor_path.is_some() {
-        None
-    } else {
-        match state.sessions.get(session_id) {
-            Some(session) => Some(session),
-            None => {
-                return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response()
-            }
-        }
-    };
+    let anchor = state.anchor.clone();
 
     // A stable per-install id names the controller in the UI and lets a
     // reconnecting client resume its own lease; a client that omits it gets
@@ -148,13 +119,11 @@ pub async fn upgrade(
     let max_replay_bytes = state.config.max_replay_bytes;
     let control_grace_ms = state.config.control_grace_ms;
 
-    if let Some(anchor) = anchor_path {
+    {
         let id = session_id.to_string();
         // Checked before the upgrade, so an unknown session is a 404 on the
-        // HTTP response exactly as it is on the in-process path. Letting
-        // the upgrade succeed and reporting the error as a frame would be a
-        // difference a client can see — and the whole premise of the flag
-        // is that it cannot tell which backend it is talking to.
+        // HTTP response rather than an error frame after a successful
+        // upgrade -- the shape clients have always been given.
         //
         // Only `not_found` is a 404. An unreachable anchord is an outage, and
         // reporting it as "session not found" tells a browser its work is
@@ -177,7 +146,7 @@ pub async fn upgrade(
             };
         }
         let leases = Arc::clone(&state.leases);
-        return ws.on_upgrade(move |socket| {
+        ws.on_upgrade(move |socket| {
             crate::ws_anchor::run_anchor(crate::ws_anchor::Proxy {
                 socket,
                 anchor,
@@ -192,29 +161,11 @@ pub async fn upgrade(
                 max_replay_bytes,
                 control_grace_ms,
             })
-        });
+        })
     }
-
-    let Some(session) = session else {
-        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
-    };
-    ws.on_upgrade(move |socket| {
-        run(
-            socket,
-            session,
-            client_id,
-            client_name,
-            requested_control,
-            q.after,
-            q.tail,
-            default_tail,
-            max_replay_bytes,
-            control_grace_ms,
-        )
-    })
 }
 
-/// Bounds the requested cursor before it ever reaches [`Session::attach`]
+/// Bounds the requested cursor before it reaches anchord's attach
 /// (docs/04-api-protocol.md#bounded-attach). Returns the clamped `from` and
 /// whether it moved -- `tail`/default-tail clamping is normal tail semantics
 /// and never counts as truncation; only an `after` moved forward by
@@ -234,426 +185,6 @@ pub(crate) fn bound_attach(
     } else {
         let tail = tail.unwrap_or(default_tail).min(max_replay_bytes);
         (next_offset.saturating_sub(tail), false)
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one per attach-query param plus server-side replay/grace config; a params struct would just move the list, not shrink it"
-)]
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "this is the connection's tokio::select! event loop -- every branch is one frame/timer/channel it reacts to; splitting the match arms out would trade one big function for several that only make sense read together"
-)]
-async fn run(
-    mut socket: WebSocket,
-    session: Arc<Session>,
-    client_id: String,
-    client_name: String,
-    requested_control: bool,
-    after: Option<u64>,
-    tail: Option<u64>,
-    default_tail: u64,
-    max_replay_bytes: u64,
-    control_grace_ms: u64,
-) {
-    let next_offset_hint = session.next_offset();
-    let (from, mut truncated) = bound_attach(
-        after,
-        tail,
-        default_tail,
-        max_replay_bytes,
-        next_offset_hint,
-    );
-
-    let replay = match session.attach(from) {
-        Ok(replay) => replay,
-        Err(AttachError::OffsetAhead { next_offset, .. }) => {
-            send_json(
-                &mut socket,
-                &json!({ "type": "error", "code": "offset_ahead", "next_offset": next_offset }),
-            )
-            .await;
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
-            )]
-            let _ = socket.send(close(1008, "offset_ahead")).await;
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(session_id = %session.id, error = %e, "opening replay");
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
-            )]
-            let _ = socket.send(close(1011, "internal error")).await;
-            return;
-        }
-    };
-
-    // Drive the catch-up loop, writing each round before asking for the
-    // next -- `HistoryReplay::written` takes this round's own bytes back to
-    // advance, so there is no path to the next round that skips writing them
-    // out first (docs/04-api-protocol.md#catch-up--register-late-not-early).
-    let Some(mut step) = replay_round_or_close(&mut socket, session.id, replay.next_round()).await
-    else {
-        return;
-    };
-    let attach = loop {
-        match step {
-            ReplayStep::History {
-                offset,
-                bytes,
-                replay: rest,
-            } => {
-                if send_binary(&mut socket, offset, &bytes).await.is_err() {
-                    return;
-                }
-                let Some(next) =
-                    replay_round_or_close(&mut socket, session.id, rest.written(bytes)).await
-                else {
-                    return;
-                };
-                step = next;
-            }
-            ReplayStep::Live(attach) => break attach,
-        }
-    };
-    truncated = truncated || !attach.caught_up;
-
-    let control_epoch = if requested_control {
-        session.attach_control(&client_id, &client_name)
-    } else {
-        None
-    };
-    let (cols, rows) = session.size();
-
-    let ready = json!({
-        "type": "ready",
-        "session_id": session.id.to_string(),
-        "replay_from": attach.replay_from,
-        "next_offset": attach.next_offset,
-        "truncated": truncated,
-        "log_capped_at": attach.log_capped_at,
-        "cols": cols,
-        "rows": rows,
-        "control": control_epoch.is_some(),
-        "controller": session.controller_name(),
-    });
-    send_json(&mut socket, &ready).await;
-    if !attach.replay.is_empty()
-        && send_binary(&mut socket, attach.replay_from, &attach.replay)
-            .await
-            .is_err()
-    {
-        return;
-    }
-
-    let mut subscription = attach.subscription;
-    let mut exited_rx = session.watch_exited();
-    let mut eof_rx = session.watch_eof();
-    let mut events_rx = session.subscribe_events();
-    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
-    ping_interval.tick().await; // the first tick fires immediately; consume it.
-    let mut last_pong = Instant::now();
-    // `Some(epoch)` while this connection holds the control lease -- the
-    // epoch it was granted, re-checked against the authoritative lease on
-    // every write/resize so a lease moved out from under it (another
-    // connection's `claim_control`, including one sharing this `client_id`)
-    // is never missed (docs/04-api-protocol.md#control-lease).
-    let mut is_controlling: Option<u64> = control_epoch;
-    // `Some(deadline)` from the moment `exited_rx` fires until this
-    // connection finalizes -- see `EXIT_DRAIN_GRACE`. `None` beforehand, and
-    // stays `None` for the entire connection in the overwhelmingly common
-    // case where `eof_rx` is already true the instant `exited_rx` fires.
-    let mut exit_deadline: Option<tokio::time::Instant> = None;
-
-    loop {
-        let grace = async {
-            match exit_deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        tokio::select! {
-            chunk = subscription.recv() => {
-                if let Some(chunk) = chunk {
-                    if send_binary(&mut socket, chunk.offset, &chunk.bytes).await.is_err() {
-                        break;
-                    }
-                } else {
-                    // The only way a subscriber slot disappears while this
-                    // task still holds its own `Arc<Session>` (keeping the
-                    // fan-out alive) is `Fanout::publish`'s backpressure
-                    // eviction -- this is the slow-consumer signal
-                    // (docs/04-api-protocol.md#error-codes).
-                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
-                    let _ = socket.send(close(1013, "slow_consumer")).await;
-                    break;
-                }
-            }
-
-            // `exited` is not sufficient by itself to finalize -- the reader
-            // thread may not have caught up yet (session.rs's module doc,
-            // `EXIT_DRAIN_GRACE` above). If it already has (`eof_rx` already
-            // true), finalize immediately with zero added latency; otherwise
-            // start the bounded wait.
-            _ = exited_rx.changed(), if exit_deadline.is_none() => {
-                if *exited_rx.borrow() {
-                    if *eof_rx.borrow() {
-                        finalize_exit(&session, &mut subscription, &mut socket).await;
-                        break;
-                    }
-                    exit_deadline = Some(tokio::time::Instant::now() + EXIT_DRAIN_GRACE);
-                }
-            }
-
-            // Only relevant once `exited` has fired -- see the guard.
-            _ = eof_rx.changed(), if exit_deadline.is_some() => {
-                if *eof_rx.borrow() {
-                    finalize_exit(&session, &mut subscription, &mut socket).await;
-                    break;
-                }
-            }
-
-            // The reader never caught up within the grace window (e.g. a
-            // grandchild still holds the pty open, S2) -- finalize with
-            // whatever has actually been drained rather than hang.
-            () = grace, if exit_deadline.is_some() => {
-                finalize_exit(&session, &mut subscription, &mut socket).await;
-                break;
-            }
-
-            event = events_rx.recv() => {
-                match event {
-                    Ok(SessionEvent::Resized { cols, rows }) => {
-                        send_json(&mut socket, &json!({ "type": "resized", "cols": cols, "rows": rows })).await;
-                    }
-                    Ok(SessionEvent::ControlRevoked { new_controller_id, new_controller_name, .. }) => {
-                        // Every connection except the new controller itself
-                        // -- the previous holder (this used to be the only
-                        // recipient) and any other observer alike, so an
-                        // idle bystander's "Take control (from X)" label
-                        // stays live instead of only updating on next
-                        // reconnect (docs/09-frontend.md: client_id "names
-                        // the controller in everyone else's UI"). Resetting
-                        // is_controlling is a no-op for a connection that
-                        // was never the controller to begin with.
-                        if new_controller_id != client_id {
-                            is_controlling = None;
-                            send_json(&mut socket, &json!({ "type": "control_revoked", "to": new_controller_name, "client_id": new_controller_id })).await;
-                        }
-                    }
-                    Ok(SessionEvent::ControlReleased { by, resume_hint }) => {
-                        // Everyone except the releaser, which already knows.
-                        // `resume_hint` is forwarded verbatim: the daemon
-                        // never hands a free lease to a client that didn't
-                        // ask for it, so acting on it is the hinted client's
-                        // own `claim_control`
-                        // (docs/04-api-protocol.md#releasing-and-handing-the-lease-back).
-                        if by != client_id {
-                            send_json(&mut socket, &json!({ "type": "control_released", "by": by, "resume_hint": resume_hint })).await;
-                        }
-                    }
-                    // A lagged receiver only means a missed notification --
-                    // every subsequent control/resize check re-reads
-                    // authoritative state (`is_controller`, `size`), so
-                    // there is nothing to resync here. A closed sender is
-                    // the session tearing down; the next loop iteration's
-                    // other branches notice and exit.
-                    Err(
-                        tokio::sync::broadcast::error::RecvError::Lagged(_)
-                        | tokio::sync::broadcast::error::RecvError::Closed,
-                    ) => {}
-                }
-            }
-
-            _ = ping_interval.tick() => {
-                if last_pong.elapsed() > PONG_TIMEOUT {
-                    #[expect(clippy::let_underscore_must_use, reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent")]
-                    let _ = socket.send(close(1001, "ping timeout")).await;
-                    break;
-                }
-                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
-                    break;
-                }
-            }
-
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Binary(bytes))) => {
-                        // `write_if_controller` checks the lease and writes under
-                        // one lock, so a `claim_control` racing this check (M4
-                        // review) can never land in between (Err(None) covers both
-                        // "never had control" and "lost it just now").
-                        let result = match is_controlling {
-                            Some(epoch) => session.write_if_controller(&client_id, epoch, &bytes),
-                            None => Err(None),
-                        };
-                        match result {
-                            Ok(()) => {}
-                            Err(Some(e)) => {
-                                tracing::debug!(session_id = %session.id, error = %e, "write rejected");
-                                send_json(&mut socket, &json!({ "type": "error", "code": "session_closing", "message": "input rejected: session is closing" })).await;
-                            }
-                            Err(None) => {
-                                send_json(&mut socket, &json!({ "type": "error", "code": "not_controller", "message": "input rejected: observer mode" })).await;
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        handle_control_message(&text, &session, &client_id, &client_name, &mut is_controlling, &mut socket).await;
-                    }
-                    Some(Ok(Message::Pong(_))) => {
-                        last_pong = Instant::now();
-                    }
-                    Some(Ok(Message::Ping(_) | Message::Close(_))) => {}
-                    Some(Err(_)) | None => break,
-                }
-            }
-        }
-    }
-
-    if let Some(epoch) = is_controlling {
-        session.begin_control_grace(client_id, epoch, control_grace_ms);
-    } else {
-        // An observer that never held control has nothing to release; an
-        // explicit `release_control` already cleared it if it applied.
-    }
-}
-
-async fn handle_control_message(
-    text: &str,
-    session: &Arc<Session>,
-    client_id: &str,
-    client_name: &str,
-    is_controlling: &mut Option<u64>,
-    socket: &mut WebSocket,
-) {
-    #[derive(Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
-    enum ClientMessage {
-        Resize { cols: u16, rows: u16 },
-        ClaimControl,
-        ReleaseControl,
-    }
-
-    let message: ClientMessage = match serde_json::from_str(text) {
-        Ok(m) => m,
-        Err(e) => {
-            send_json(
-                socket,
-                &json!({ "type": "error", "code": "bad_request", "message": e.to_string() }),
-            )
-            .await;
-            return;
-        }
-    };
-
-    match message {
-        ClientMessage::Resize { cols, rows } => {
-            let controller =
-                is_controlling.is_some_and(|epoch| session.is_controller(client_id, epoch));
-            if controller {
-                if let Err(e) = session.resize(cols, rows) {
-                    tracing::debug!(session_id = %session.id, error = %e, "resize rejected");
-                }
-            } else {
-                send_json(socket, &json!({ "type": "error", "code": "not_controller", "message": "resize rejected: observer mode" })).await;
-            }
-        }
-        ClientMessage::ClaimControl => {
-            let epoch = session.claim_control(client_id, client_name);
-            *is_controlling = Some(epoch);
-            send_json(socket, &json!({ "type": "control_granted" })).await;
-        }
-        ClientMessage::ReleaseControl => {
-            if let Some(epoch) = is_controlling.take() {
-                session.release_control(client_id, epoch);
-            }
-        }
-    }
-}
-
-async fn send_json(socket: &mut WebSocket, value: &serde_json::Value) {
-    if socket
-        .send(Message::Text(value.to_string().into()))
-        .await
-        .is_err()
-    {
-        tracing::debug!("send failed; connection is going away");
-    }
-}
-
-/// Every server->client binary frame: an 8-byte big-endian offset of the
-/// first payload byte, then the raw bytes -- never JSON-encoded
-/// (docs/04-api-protocol.md#framing).
-async fn send_binary(socket: &mut WebSocket, offset: u64, bytes: &[u8]) -> Result<(), axum::Error> {
-    let mut frame = Vec::with_capacity(8 + bytes.len());
-    frame.extend_from_slice(&offset.to_be_bytes());
-    frame.extend_from_slice(bytes);
-    socket.send(Message::Binary(frame.into())).await
-}
-
-fn close(code: u16, reason: &'static str) -> Message {
-    Message::Close(Some(CloseFrame {
-        code,
-        reason: reason.into(),
-    }))
-}
-
-/// Sends the `exit` frame and closes the socket. Drains anything already
-/// queued on `subscription` first -- even with the bounded eof/grace wait
-/// this is called from, a chunk can become ready in the same poll that
-/// decides to finalize (`EXIT_DRAIN_GRACE`) -- so `final_offset` always
-/// reflects everything this connection actually delivered.
-async fn finalize_exit(session: &Session, subscription: &mut Subscription, socket: &mut WebSocket) {
-    while let Some(chunk) = subscription.try_recv() {
-        if send_binary(socket, chunk.offset, &chunk.bytes)
-            .await
-            .is_err()
-        {
-            return;
-        }
-    }
-    let exit = json!({
-        "type": "exit",
-        "code": session.exit_code(),
-        "final_offset": session.next_offset(),
-    });
-    send_json(socket, &exit).await;
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
-    )]
-    let _ = socket.send(close(1000, "session exited")).await;
-}
-
-/// Unwraps one `next_round`/`written` step, or closes the socket and reports
-/// `None` on failure -- shared so `run`'s catch-up loop does not repeat this
-/// handling once for the first round and once per round after.
-/// `AttachError::Open`/`Read` both close the same way here: the client sees
-/// a plain `internal error` and reconnects, which for `Read` resumes at
-/// exactly the offset the failed round carries
-/// (docs/04-api-protocol.md#catch-up--register-late-not-early).
-async fn replay_round_or_close(
-    socket: &mut WebSocket,
-    session_id: SessionId,
-    result: Result<ReplayStep, AttachError>,
-) -> Option<ReplayStep> {
-    match result {
-        Ok(step) => Some(step),
-        Err(e) => {
-            tracing::warn!(session_id = %session_id, error = %e, "replay round failed");
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "closing an already-failing/closing socket; nothing to do if the close frame itself can't be sent"
-            )]
-            let _ = socket.send(close(1011, "internal error")).await;
-            None
-        }
     }
 }
 

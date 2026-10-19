@@ -216,14 +216,7 @@ async fn post_sessions_spawns_in_anchord_not_in_process() {
     assert_eq!(body["state"], "running");
     assert!(body["pid"].as_u64().is_some());
 
-    // The session is in anchord, not in this process: teleport's own
-    // in-process manager never saw it.
-    assert!(
-        daemon.state.sessions.list().is_empty(),
-        "the in-process manager must hold nothing on the anchor path"
-    );
-
-    // And anchord really has it, carrying teleport's metadata as labels.
+    // anchord really has it, carrying teleport's metadata as labels.
     let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
     let session = client.get(&id).await.expect("anchord knows the session");
     assert_eq!(session.state, "running");

@@ -161,9 +161,7 @@ async fn read_until(ws: &mut WsStream, needle: &str) -> Vec<u8> {
 }
 
 async fn create(daemon: &support::Daemon, script: &str) -> String {
-    let client = teleportd::anchor_client::AnchorClient::new(
-        daemon.state.anchor.as_ref().expect("anchor").socket(),
-    );
+    let client = teleportd::anchor_client::AnchorClient::new(daemon.state.anchor.socket());
     client
         .create(
             &teleportd::anchor_client::AnchorSpec {

@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::log::{DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_WARN_BYTES};
-
 /// `after=0` on a huge log clamps to this many bytes
 /// (docs/04-api-protocol.md#bounded-attach).
 pub const DEFAULT_MAX_REPLAY_BYTES: u64 = 8 * 1024 * 1024;
@@ -31,9 +29,6 @@ pub const DEFAULT_CONTROL_GRACE_MS: u64 = 15_000;
 /// Refuse further spawns past this many concurrent sessions
 /// (docs/06-security.md#process-spawning).
 pub const DEFAULT_MAX_SESSIONS: usize = 50;
-/// GC deletes an `exited`/`lost` session's directory + row once its
-/// `exited_at_ms` is this many days old (docs/05-persistence.md#garbage-collection).
-pub const DEFAULT_RETAIN_DAYS: u64 = 14;
 
 /// The on-disk shape. Every field optional so a partial file is valid;
 /// [`Config::load`] layers it onto [`Config::default`].
@@ -47,10 +42,6 @@ struct ConfigFile {
     control_grace_ms: Option<u64>,
     default_tail: Option<u64>,
     max_replay_bytes: Option<u64>,
-    log_warn_bytes: Option<u64>,
-    log_max_bytes: Option<u64>,
-    retain_days: Option<u64>,
-    use_anchor: Option<bool>,
     anchor_owner: Option<String>,
     anchor_socket: Option<PathBuf>,
 }
@@ -91,20 +82,6 @@ pub struct Config {
     /// Hard cap on how much history a single attach may replay
     /// (docs/04-api-protocol.md#bounded-attach).
     pub max_replay_bytes: u64,
-    /// See [`crate::log::LogLimits::warn_bytes`].
-    pub log_warn_bytes: u64,
-    /// See [`crate::log::LogLimits::max_bytes`].
-    pub log_max_bytes: u64,
-    /// GC threshold, in days since `exited_at_ms` (docs/05-persistence.md#garbage-collection).
-    pub retain_days: u64,
-    /// Run sessions in an external `anchord` instead of this process.
-    ///
-    /// **Default `false`, deliberately.** The in-process PTY layer stays
-    /// authoritative until the anchor path has passed this suite and shipped
-    /// once; see anchor's `ROADMAP.md` M4/M5. Flipping this is the whole
-    /// point of the extraction — it is what lets teleport ship a release
-    /// while agents keep running — but it is not flipped by being written.
-    pub use_anchor: bool,
     /// Which sessions in `anchord` are this teleport's.
     ///
     /// anchord is shared by design — teleport and workmanager both drive it
@@ -134,10 +111,6 @@ impl Default for Config {
             control_grace_ms: DEFAULT_CONTROL_GRACE_MS,
             default_tail: DEFAULT_TAIL,
             max_replay_bytes: DEFAULT_MAX_REPLAY_BYTES,
-            log_warn_bytes: DEFAULT_LOG_WARN_BYTES,
-            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
-            retain_days: DEFAULT_RETAIN_DAYS,
-            use_anchor: false,
             anchor_owner: "teleport".to_string(),
             anchor_socket: None,
         }
@@ -167,10 +140,6 @@ impl Config {
             control_grace_ms: file.control_grace_ms.unwrap_or(defaults.control_grace_ms),
             default_tail: file.default_tail.unwrap_or(defaults.default_tail),
             max_replay_bytes: file.max_replay_bytes.unwrap_or(defaults.max_replay_bytes),
-            log_warn_bytes: file.log_warn_bytes.unwrap_or(defaults.log_warn_bytes),
-            log_max_bytes: file.log_max_bytes.unwrap_or(defaults.log_max_bytes),
-            retain_days: file.retain_days.unwrap_or(defaults.retain_days),
-            use_anchor: file.use_anchor.unwrap_or(defaults.use_anchor),
             anchor_owner: file.anchor_owner.unwrap_or(defaults.anchor_owner),
             anchor_socket: file.anchor_socket.or(defaults.anchor_socket),
         })
@@ -296,21 +265,18 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_path_is_off_unless_asked_for() {
-        // The extraction's whole safety property: writing the anchor path
-        // does not enable it. Only a deliberate config.toml does.
-        let dir = scratch_dir("anchor-default");
-        let cfg = Config::load(&dir).expect("load");
-        assert!(!cfg.use_anchor);
-        assert!(cfg.anchor_socket.is_none());
-
+    fn keys_the_in_process_layer_read_still_parse_and_do_nothing() {
+        // `use_anchor`, `retain_days` and the two log caps belonged to the
+        // in-process layer (docs/20). A config.toml written for it -- every
+        // host that flipped the flag has one -- must still load, or deleting
+        // the layer would turn into refusing to start.
+        let dir = scratch_dir("retired-keys");
         fs::write(
             dir.join("config.toml"),
-            "use_anchor = true\nanchor_socket = \"/run/anchor.sock\"\n",
+            "use_anchor = true\nretain_days = 3\nlog_warn_bytes = 1\nlog_max_bytes = 2\nanchor_socket = \"/run/anchor.sock\"\n",
         )
         .expect("writing config.toml");
         let cfg = Config::load(&dir).expect("load");
-        assert!(cfg.use_anchor);
         assert_eq!(
             cfg.anchor_socket.as_deref(),
             Some(Path::new("/run/anchor.sock"))
