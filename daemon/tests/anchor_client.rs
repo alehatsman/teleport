@@ -15,7 +15,7 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use support::{anchord_endpoint, fixture_shell};
@@ -67,10 +67,7 @@ impl Daemon {
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
         let endpoint = anchord_endpoint::endpoint_in(&dir, &tag);
         let bin = anchord_bin().expect("checked by the caller");
-        let mut command = Command::new(bin);
-        anchord_endpoint::point_at(&mut command, &dir, &endpoint)
-            .expect("pointing anchord at its test directory");
-        let child = command
+        let child = anchord_endpoint::command(&bin, &dir, &endpoint)
             .env("ANCHOR_LOG", "warn")
             .spawn()
             .expect("spawning anchord");

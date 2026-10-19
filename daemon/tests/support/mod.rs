@@ -304,10 +304,7 @@ impl Anchord {
         // Captured, so a daemon that dies on startup says why instead of
         // being diagnosed as "slow" by a timeout.
         let log = std::fs::File::create(dir.join("anchord.log")).expect("creating the log");
-        let mut command = std::process::Command::new(&bin);
-        anchord_endpoint::point_at(&mut command, &dir, &endpoint)
-            .expect("pointing anchord at its fixture directory");
-        let child = command
+        let child = anchord_endpoint::command(&bin, &dir, &endpoint)
             .env("ANCHOR_LOG", "info")
             .stderr(std::process::Stdio::from(log))
             .spawn()
@@ -410,32 +407,45 @@ pub(crate) mod anchord_endpoint {
         }
     }
 
-    /// Points a to-be-spawned anchord at `dir` for its data and `endpoint`
-    /// for its listener.
-    #[cfg_attr(
-        unix,
-        expect(
-            clippy::unnecessary_wraps,
-            reason = "only the Windows arm can fail, until anchord has a pipe override"
-        )
-    )]
-    pub(crate) fn point_at(
-        command: &mut std::process::Command,
-        dir: &Path,
-        endpoint: &Path,
-    ) -> Result<(), &'static str> {
+    /// A command that starts an anchord with `dir` for its data and
+    /// `endpoint` for its listener. `anchord` is `ANCHORD_BIN`.
+    ///
+    /// Unix moves both with the XDG variables, as anchor resolves them.
+    ///
+    /// Windows cannot: anchor's pipe name is fixed per user and no
+    /// environment variable moves it (its `docs/04-protocol.md`), and
+    /// `anchord` takes no arguments. The one endpoint override is
+    /// `anchor daemon --socket <pipe>`, which runs anchord's own startup, so
+    /// that is what a Windows fixture starts -- the `anchor` CLI found next
+    /// to `ANCHORD_BIN` (one `cargo build` produces both), or `ANCHOR_BIN`
+    /// when set. Data goes where anchor's Windows resolution puts it,
+    /// `%LOCALAPPDATA%\anchor`, so `LOCALAPPDATA` is pointed at `dir`.
+    pub(crate) fn command(anchord: &Path, dir: &Path, endpoint: &Path) -> std::process::Command {
         #[cfg(unix)]
         {
             let _ = endpoint;
+            let mut command = std::process::Command::new(anchord);
             command
                 .env("XDG_DATA_HOME", dir)
                 .env("XDG_RUNTIME_DIR", dir.join("run"));
-            Ok(())
+            command
         }
         #[cfg(windows)]
         {
-            let _ = (command, dir, endpoint);
-            Err("a test anchord on Windows needs anchord's pipe override, which anchor M6 has not defined yet")
+            let cli = std::env::var_os("ANCHOR_BIN")
+                .map_or_else(|| anchord.with_file_name("anchor.exe"), PathBuf::from);
+            assert!(
+                cli.is_file(),
+                "a Windows fixture starts anchord as `anchor daemon --socket`, and there is no anchor CLI at {} (set ANCHOR_BIN)",
+                cli.display()
+            );
+            let mut command = std::process::Command::new(cli);
+            command
+                .arg("--socket")
+                .arg(endpoint)
+                .arg("daemon")
+                .env("LOCALAPPDATA", dir);
+            command
         }
     }
 }

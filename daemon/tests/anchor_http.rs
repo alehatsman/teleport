@@ -10,7 +10,7 @@
 mod support;
 
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -132,10 +132,8 @@ impl Anchord {
     }
 
     fn spawn(dir: &std::path::Path, endpoint: &std::path::Path) -> Child {
-        let mut command = Command::new(anchord_bin().expect("checked by the caller"));
-        anchord_endpoint::point_at(&mut command, dir, endpoint)
-            .expect("pointing anchord at its test directory");
-        command
+        let bin = anchord_bin().expect("checked by the caller");
+        anchord_endpoint::command(&bin, dir, endpoint)
             .env("ANCHOR_LOG", "warn")
             .spawn()
             .expect("spawning anchord")
