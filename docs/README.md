@@ -33,6 +33,7 @@ phone are interchangeable clients that attach and detach freely.
 | 20 | [Retiring the in-process PTY](20-retiring-the-in-process-pty.md) | You are deleting teleport's own PTY layer, collapsing the `use_anchor` seam, or need to know what the anchor path does not cover yet. The release gate is met; the delete is blocked on a Windows transport arm and on anchord reaching every host. |
 | 21 | [Surviving a daemon restart](21-hot-restart.md) | You are asked to make an upgrade stop killing sessions. Read it before writing any `exec(2)`: the mechanism issues #65/#81 propose is superseded by the anchor path, and what is left is state reconstruction, not file descriptors. |
 | 22 | [The resume id, by injection](22-claude-resume-id-by-injection.md) | You are wondering why `claude_resume_id` is always null, or you are about to touch `session/osc.rs`'s OSC 8 half. Spec, not yet implemented. |
+| 23 | [Sessions teleport did not create](23-sessions-teleport-did-not-create.md) | You are wondering why the phone lists fewer sessions than `anchord` holds, or you are about to touch `anchor_bridge::owned_by`. Spec, not yet implemented. |
 
 Docs 01–14 describe the design. [15](15-open-questions.md) is the list of places where
 that design is asserted rather than proven — read it before writing `pty.rs`.
