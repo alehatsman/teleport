@@ -2,7 +2,7 @@
 //! (docs/04-api-protocol.md#websocket-protocol). One connection per attached
 //! terminal: mixed framing (text = control JSON, binary = raw PTY bytes
 //! prefixed with an 8-byte big-endian offset), the attach/catch-up sequence
-//! from `session.rs`, and the control lease.
+//! sequence, and the control lease.
 //!
 //! Only the upgrade lives here: the connection itself is `ws_anchor`'s
 //! proxy over an anchor attach, since every session lives in anchord

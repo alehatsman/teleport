@@ -134,19 +134,9 @@ async fn main() -> Result<()> {
     let config = config::Config::load(&data_dir)?;
     let presets = presets::load_or_create(&data_dir)?;
 
-    let sessions_root = data_dir.join("sessions");
-    // docs/01-architecture.md#startup-sequence: open SQLite, run migrations,
-    // mark stale sessions lost, reconcile output_bytes -- all before binding,
-    // so nothing can attach to a session the daemon hasn't finished
-    // recovering yet.
-    let (db, recovery) =
-        teleportd::persistence::Db::open(&data_dir.join("state.db"), &sessions_root)?;
-    if recovery.recovered_lost > 0 {
-        warn!(
-            count = recovery.recovered_lost,
-            "sessions recovered as lost after a restart"
-        );
-    }
+    // Opened before binding, so a migration failure stops startup before
+    // anything can be served from a half-upgraded store.
+    let db = teleportd::persistence::Db::open(&data_dir.join("state.db"))?;
 
     let listener = bind_with_fallback(cli.listen).await?;
     let bound_addr = listener

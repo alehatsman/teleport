@@ -1,9 +1,9 @@
 //! The control lease for anchor-hosted sessions.
 //!
-//! Teleport's lease normally lives on an in-process [`crate::session::Session`]
-//! (`session/control.rs`). On the anchor path there is no such object — the
-//! session is in another process — so the same semantics live here, keyed by
-//! session id.
+//! The session is in another process, so teleport's lease semantics live
+//! here, keyed by session id. They were first written on the in-process
+//! `Session` (`session/control.rs`, since deleted, docs/20) and this kept
+//! them.
 //!
 //! **Why here and not in anchor.** Anchor's own lease identifies a holder by
 //! the connection, which cannot express teleport's disconnect grace: a
@@ -31,9 +31,9 @@ const EVENT_CAPACITY: usize = 16;
 
 /// Something every connection attached to a session should hear about.
 ///
-/// Teleport's in-process path gets these from `Session`'s own event
-/// broadcast. On the anchor path there is no `Session`, so this registry —
-/// which already has a per-session channel for the lease — carries them.
+/// There is no session object in this process to broadcast them, so this
+/// registry -- which already has a per-session channel for the lease --
+/// carries them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     /// The lease moved.

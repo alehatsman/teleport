@@ -296,7 +296,7 @@ const CSP_DIRECTIVES: &[&str] = &[
 ];
 
 /// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
-/// router `main.rs` serves and `tests/support` boots for in-process tests.
+/// router `main.rs` serves and `tests/support` boots for its fixtures.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/api/v1/health", get(health))
@@ -608,10 +608,8 @@ async fn health(
         body["ui_version"] = state.web.ui_version().into();
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
-        // Counted wherever the sessions actually live. Reporting the
-        // in-process manager's count on the anchor path would report zero
-        // while sessions run, which is worse than not reporting it:
-        // health is what a supervisor decides to restart on.
+        // Counted in anchord, where the sessions live; health is what a
+        // supervisor decides to restart on.
         body["sessions_running"] = match state
             .anchor
             .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
@@ -666,8 +664,8 @@ struct CreateSessionResponse {
 /// `POST /api/v1/sessions` (docs/04-api-protocol.md#post-apiv1sessions).
 /// Merges preset defaults under explicit fields, validates `cols`/`rows`
 /// (`400` if out of range -- request-shape validation, distinct from the
-/// `422`s [`SessionManager::create`] itself raises for an unresolvable
-/// executable or `cwd`), then spawns.
+/// `422`s anchord raises for an unresolvable executable or `cwd`), then
+/// spawns in anchord.
 async fn create_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -710,10 +708,9 @@ async fn create_session(
     // setting, and leaving this unchecked would silently drop a limit
     // docs/06-security.md#process-spawning treats as load-bearing.
     //
-    // Counted, not reserved: two creates racing can both pass. The
-    // in-process path reserves a slot because it can; across a socket
-    // that would need a reservation protocol for a cap whose job is
-    // stopping runaway loops, not arbitrating a photo finish.
+    // Counted, not reserved: two creates racing can both pass. Reserving
+    // across a socket would need a reservation protocol for a cap whose
+    // job is stopping runaway loops, not arbitrating a photo finish.
     let live = anchor
         .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
         .await
@@ -881,25 +878,16 @@ impl SessionView {
 }
 
 /// `GET /api/v1/sessions` (docs/04-api-protocol.md#get-apiv1sessions).
-/// Sorted newest-first; `env` never appears (it is never stored on
-/// [`crate::session::Session`] in the first place --
-/// docs/06-security.md#secrets-and-environment).
-///
-/// Merges live sessions (this process, from `SessionManager`) with rows
-/// SQLite knows about that this process never spawned -- a `lost`/`exited`
-/// session from before the last restart. A live entry always wins on a
-/// duplicate id: it's fresher (`controller`/`subscribers` a DB row can't
-/// have), and a live session's own row can itself be stale for up to a
-/// second (docs/05-persistence.md#when-output_bytes-is-written).
+/// Sorted newest-first; `env` never appears (anchord does not echo a spec's
+/// environment back -- docs/06-security.md#secrets-and-environment).
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // On the anchor path anchord is the source of truth, and its own list
-    // already folds live sessions over stored rows. Teleport's SQLite rows
-    // are deliberately not merged in: they describe sessions from the
-    // in-process era that no longer exist anywhere, and showing entries a
-    // client cannot open is worse than not showing them.
+    // anchord is the source of truth, and its own list already folds live
+    // sessions over stored rows. Teleport's old `sessions` rows are not
+    // merged in: they describe sessions from the in-process era that no
+    // longer exist anywhere.
     // Never an empty list on failure. A client cannot tell that from
     // "you have no sessions", and on this path that difference is the
     // difference between a visible outage and silently vanished work.

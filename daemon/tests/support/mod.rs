@@ -343,8 +343,7 @@ pub(crate) async fn spawn(config: Config) -> Daemon {
 /// docs/19-locations.md#pins). Its files land under `dir`, which the caller
 /// owns and cleans up.
 pub(crate) async fn spawn_with_db(config: Config, dir: &Path) -> Daemon {
-    let (db, _) = teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
-        .expect("open test db");
+    let db = teleportd::persistence::Db::open(&dir.join("state.db")).expect("open test db");
     spawn_with_web_dist(config, None, Some(db)).await
 }
 

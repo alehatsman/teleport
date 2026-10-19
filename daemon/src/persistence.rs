@@ -1,5 +1,5 @@
-//! SQLite metadata store: schema, migrations, single writer actor, startup
-//! recovery (docs/05-persistence.md, docs/11-mvp-plan.md#m7--sqlite-metadata-and-recovery).
+//! SQLite metadata store: schema, migrations, and a single writer actor
+//! (docs/05-persistence.md).
 //!
 //! **One writer, no pool** (docs/05-persistence.md#one-writer-no-pool): a
 //! dedicated OS thread owns the one [`rusqlite::Connection`] for the life of
@@ -7,65 +7,22 @@
 //! Every other module talks to it through [`Db`], a cheap `Clone` wrapper
 //! around the sender half. Reads go through the same actor -- the query
 //! volume is trivial, and a single path is simpler than a pool plus a
-//! writer.
+//! writer. `note_*` methods are fire-and-forget (`try_send`, no reply).
 //!
-//! [`Db`] exposes two flavors of the same calls: `_blocking` methods
-//! (`blocking_send` + `blocking_recv`) for `session.rs`, which is entirely
-//! synchronous (`Mutex`es and OS threads, no `async`); plain `async fn`s for
-//! `api.rs`'s handlers, which already run on the Tokio executor and must
-//! never block a worker thread. `note_*` methods are fire-and-forget
-//! (`try_send`, no reply) -- the one path reachable from the PTY reader
-//! thread, which must never wait on SQLite
-//! (docs/05-persistence.md#output-log: "an `fsync` held there stalls the
-//! PTY... put the reader thread at risk of falling behind").
-//!
-//! **Scope cut, recorded here rather than made silently:** `session_events`'
-//! schema is the full set from docs/05-persistence.md#schema, but M7 only
-//! ever inserts `created`, `exited` and `lost` -- the lifecycle events that
-//! already have a natural chokepoint in `session.rs` (there is no separate
-//! `started` moment to record: `started_at_ms == created_at_ms` always in
-//! this codebase, so a `started` event would be a pure duplicate of
-//! `created`). `resized`, `control_granted`, `control_revoked`,
-//! `subscriber_attached`, `subscriber_detached` and `slow_consumer` would
-//! each need new plumbing through `ws.rs` / the control lease -- out of
-//! proportion to M7's gate (a SIGKILL-and-restart test,
-//! docs/11-mvp-plan.md#m7). The table already has the room; wiring the rest
-//! is future work, not a design dead end.
-//!
-//! **`bell` and `idle` are the exception -- wired in M8**
-//! (formerly docs/15-open-questions.md's D3, resolved and folded into
-//! docs/04-api-protocol.md#get-apiv1sessions): `session.rs::create`'s
-//! `on_output` closure scans every chunk for a BEL byte, and a periodic
-//! sweep task in `main.rs` (`Session::tick_idle`) detects output going
-//! quiet while the process is alive. Both write through this same
-//! `note_event`; no `persistence.rs` change was needed to add them.
-//!
-//! **A second scope cut in the same spirit:** `sessions.log_capped_at` is
-//! never written by this module -- it stays `NULL` forever, even once a live
-//! log actually caps (`log.rs`'s `LogEvent::Capped`/`IoError` reach
-//! `session.rs`'s `trace_log_events` today exactly as before M7, a `warn!`
-//! and nothing else). This does not corrupt anything: `LogReader::read_range`
-//! self-clamps to the real file length regardless of what a caller asks for,
-//! so a historical/recovered row's `/log` response is always exactly the
-//! bytes on disk, cap or no cap. What's missing is purely informational --
-//! `GET`'s `log_capped_at` field reads `null` for a session that actually
-//! capped before a restart, instead of the offset. Closing this needs the
-//! same `note_*` fire-and-forget wiring as `output_bytes`/`cols`/`rows`
-//! above; left for whoever touches capping next; not needed for this
-//! milestone's gate.
-//!
-//! **Recovered sessions are not [`crate::session::Session`]s.** A `Session`
-//! always owns a live `PtySession` -- there is no such thing as a `Session`
-//! with no PTY (docs/01-architecture.md#the-crash-boundary: "SQLite can
-//! remember that a process used to exist; it cannot recreate an OS PTY
-//! handle"). So a row surviving a restart with no matching in-process
-//! `Session` is served straight from this module: `api.rs` falls back to
-//! [`Db::get_session`] / [`Db::list_sessions`] for metadata, and to
-//! `log.rs`'s standalone `LogReader::open` for its log, rather than this
-//! module reconstructing a fake live session.
+//! **What it holds now:** auth (owner, passkeys, login sessions --
+//! `auth_store.rs`), pinned locations, and the titles teleport derives for
+//! sessions anchord hosts (`anchor_session_meta`). **What it no longer
+//! holds:** session rows. Every session lives in anchord, which persists
+//! and recovers its own; the in-process layer that wrote `sessions` and
+//! `session_events`, and the restart recovery that read them back, are gone
+//! (docs/20-retiring-the-in-process-pty.md). The tables stay in the schema,
+//! because a migration never drops what an older database holds, and
+//! nothing writes them.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,130 +33,6 @@ use tracing::warn;
 
 use crate::auth_store::{AuthCommand, AuthSessionRow, OwnerRow, PasskeyRow};
 use crate::now_ms;
-
-/// A `sessions` row, read back. `args` is `argv_json` already parsed --
-/// nothing downstream should touch the JSON encoding directly.
-#[derive(Debug, Clone)]
-pub struct SessionRow {
-    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
-    pub id: String,
-    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
-    /// not interpreted here.
-    pub kind: String,
-    /// Preset this session was created from, if any.
-    pub preset: Option<String>,
-    /// The program that was spawned.
-    pub command: String,
-    /// `command`'s argv, not including `command` itself.
-    pub args: Vec<String>,
-    /// Working directory the program was spawned in.
-    pub cwd: String,
-    /// `"running"`, `"closing"`, `"exited"`, or `"lost"`
-    /// (docs/05-persistence.md#schema).
-    pub state: String,
-    /// OS pid, when the platform reported one.
-    pub pid: Option<u32>,
-    /// PTY size at last resize, or at creation if never resized.
-    pub cols: u16,
-    /// PTY size at last resize, or at creation if never resized.
-    pub rows: u16,
-    /// Bytes written to `output.vt` so far.
-    pub output_bytes: u64,
-    /// Byte offset the log was capped at, if it hit its size cap.
-    pub log_capped_at: Option<u64>,
-    /// Row-insert time, ms since epoch.
-    pub created_at_ms: i64,
-    /// `== created_at_ms` (docs/05-persistence.md: no separate `started` write).
-    pub started_at_ms: Option<i64>,
-    /// When the session reached `exited`/`lost`, ms since epoch.
-    pub exited_at_ms: Option<i64>,
-    /// Process exit code, if it exited cleanly.
-    pub exit_code: Option<i32>,
-    /// Why this row is `lost` rather than a clean `exited`, if it is.
-    pub lost_reason: Option<String>,
-    /// The agent's own most recent terminal title, if its output ever
-    /// carried one (docs/05-persistence.md#agent-reported-metadata).
-    pub title: Option<String>,
-    /// A Claude Code resumable-conversation id, if its output ever carried
-    /// one (docs/05-persistence.md#agent-reported-metadata).
-    pub claude_resume_id: Option<String>,
-}
-
-fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
-    let argv_json: String = row.get("argv_json")?;
-    let args: Vec<String> = serde_json::from_str(&argv_json).unwrap_or_default();
-    Ok(SessionRow {
-        id: row.get("id")?,
-        kind: row.get("kind")?,
-        preset: row.get("preset")?,
-        command: row.get("command")?,
-        args,
-        cwd: row.get("cwd")?,
-        state: row.get("state")?,
-        // A cols/rows/pid column out of its type's range only happens to a
-        // hand-edited or corrupted database -- SQLite has no native u16/u32,
-        // so every write here goes through `i64` regardless. `pid` degrades
-        // to "we don't actually know" (`None`, same as a platform that never
-        // reported one); `cols`/`rows` saturate, since a display value has
-        // no "unknown" to fall back to.
-        pid: row
-            .get::<_, Option<i64>>("pid")?
-            .and_then(|v| u32::try_from(v).ok()),
-        cols: u16::try_from(row.get::<_, i64>("cols")?).unwrap_or(u16::MAX),
-        rows: u16::try_from(row.get::<_, i64>("rows")?).unwrap_or(u16::MAX),
-        // Negative here means a corrupted row (byte counts are never
-        // written negative); 0 is the honest "nothing recorded" fallback.
-        output_bytes: u64::try_from(row.get::<_, i64>("output_bytes")?).unwrap_or(0),
-        log_capped_at: row
-            .get::<_, Option<i64>>("log_capped_at")?
-            .map(|v| u64::try_from(v).unwrap_or(0)),
-        created_at_ms: row.get("created_at_ms")?,
-        started_at_ms: row.get("started_at_ms")?,
-        exited_at_ms: row.get("exited_at_ms")?,
-        exit_code: row.get("exit_code")?,
-        lost_reason: row.get("lost_reason")?,
-        title: row.get("title")?,
-        claude_resume_id: row.get("claude_resume_id")?,
-    })
-}
-
-/// What `SessionManager::create` has in hand at the point
-/// docs/01-architecture.md#session-creation-sequence inserts the row --
-/// after `output.vt` is open, before `openpty`/`spawn_command`. Always
-/// inserts as `state='running'`, `started_at_ms == created_at_ms` (see the
-/// module doc on why there is no separate `started` write).
-#[derive(Debug, Clone)]
-pub struct NewSessionRow {
-    /// ULID, same value as [`SessionId`](crate::session::SessionId)'s string form.
-    pub id: String,
-    /// Caller-supplied kind (`"shell"`, a preset name, ...) -- free-form,
-    /// not interpreted here.
-    pub kind: String,
-    /// Preset this session was created from, if any.
-    pub preset: Option<String>,
-    /// The program being spawned.
-    pub command: String,
-    /// `command`'s argv, not including `command` itself.
-    pub args: Vec<String>,
-    /// Working directory the program is spawned in.
-    pub cwd: String,
-    /// OS pid, when the platform reports one.
-    pub pid: Option<u32>,
-    /// PTY size at creation.
-    pub cols: u16,
-    /// PTY size at creation.
-    pub rows: u16,
-    /// Row-insert time, ms since epoch; also used as `started_at_ms`.
-    pub created_at_ms: i64,
-}
-
-/// What a startup [`Db::open`] found and fixed, for `main.rs` to log.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RecoverySummary {
-    /// Rows that were `running`/`closing` and are now `lost` /
-    /// `daemon_restart` (docs/01-architecture.md#the-crash-boundary).
-    pub recovered_lost: usize,
-}
 
 /// One `pinned_locations` row: a directory the user asked to keep at the top
 /// of the launcher, independent of whether any session in it still exists
@@ -213,65 +46,10 @@ pub struct PinRow {
 }
 
 enum Command {
-    Insert(NewSessionRow, oneshot::Sender<Result<()>>),
-    MarkClosing {
-        id: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    MarkExited {
-        id: String,
-        exited_at_ms: i64,
-        exit_code: Option<i32>,
-        lost_reason: Option<&'static str>,
-        output_bytes: u64,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    /// Fire-and-forget throttled write (docs/05-persistence.md#when-output_bytes-is-written).
-    NoteOutputBytes {
-        id: String,
-        output_bytes: u64,
-    },
-    /// Fire-and-forget; `resize()` is a rare user action, not hot-path, but
-    /// there is still no reason to make the caller wait on disk for it.
-    NoteSize {
-        id: String,
-        cols: u16,
-        rows: u16,
-    },
-    NoteEvent {
-        id: String,
-        event_type: &'static str,
-        ts_ms: i64,
-    },
-    /// Fire-and-forget, throttled by the caller
-    /// (docs/05-persistence.md#agent-reported-metadata). A `None` field is
-    /// "no value to write", never "clear it".
-    NoteAgentMeta {
-        id: String,
-        title: Option<String>,
-        claude_resume_id: Option<String>,
-    },
-    Delete {
-        id: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Get {
-        id: String,
-        reply: oneshot::Sender<Result<Option<SessionRow>>>,
-    },
-    List {
-        reply: oneshot::Sender<Result<Vec<SessionRow>>>,
-    },
     /// Every passkey-login query, in one variant so this enum grows by a
     /// line rather than fourteen (`auth_store.rs` owns the shape and the
     /// SQL).
     Auth(AuthCommand),
-    /// `exited`/`lost` rows whose `exited_at_ms` is older than the cutoff --
-    /// GC candidates (docs/05-persistence.md#garbage-collection).
-    GcCandidates {
-        older_than_ms: i64,
-        reply: oneshot::Sender<Result<Vec<SessionRow>>>,
-    },
     ListPins {
         reply: oneshot::Sender<Result<Vec<PinRow>>>,
     },
@@ -330,10 +108,13 @@ pub struct Db {
 
 impl Db {
     /// Opens `db_path` (creating it if absent), applies pragmas and
-    /// migrations, runs restart recovery against `sessions_root`, then
-    /// spawns the writer thread and returns a handle plus what recovery
-    /// found (docs/01-architecture.md#startup-sequence).
-    pub fn open(db_path: &Path, sessions_root: &Path) -> Result<(Db, RecoverySummary)> {
+    /// migrations, then spawns the writer thread and returns a handle.
+    ///
+    /// No restart recovery: there are no session rows left to recover.
+    /// Every session lives in anchord, which recovers its own (docs/20).
+    /// The `sessions` table stays in the schema -- migrations never drop
+    /// what an older database holds -- and nothing writes it.
+    pub fn open(db_path: &Path) -> Result<Db> {
         let conn =
             Connection::open(db_path).with_context(|| format!("opening {}", db_path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")
@@ -346,7 +127,6 @@ impl Db {
             .context("setting busy_timeout")?;
 
         run_migrations(&conn).context("running migrations")?;
-        let summary = recover(&conn, sessions_root).context("running restart recovery")?;
 
         let (tx, rx) = mpsc::channel(256);
         std::thread::Builder::new()
@@ -354,29 +134,12 @@ impl Db {
             .spawn(move || writer_loop(&conn, rx))
             .context("spawning db-writer thread")?;
 
-        Ok((Db { tx }, summary))
+        Ok(Db { tx })
     }
 
     #[expect(
         clippy::map_err_ignore,
         reason = "SendError/RecvError carry no diagnostic beyond \"the other end is gone\", which the replacement message already says"
-    )]
-    fn call_blocking<T>(
-        &self,
-        make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
-    ) -> Result<T> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(make(reply_tx))
-            .map_err(|_| anyhow!("db-writer thread is gone"))?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| anyhow!("db-writer thread dropped the reply"))?
-    }
-
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "same as call_blocking: SendError/RecvError add nothing beyond \"the other end is gone\""
     )]
     async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> Command) -> Result<T>
     where
@@ -390,180 +153,6 @@ impl Db {
         reply_rx
             .await
             .map_err(|_| anyhow!("db-writer thread dropped the reply"))?
-    }
-
-    /// Blocking insert -- `SessionManager::create` runs on a blocking-pool
-    /// thread already (`spawn_blocking` in `api.rs`), and this must complete
-    /// before `pty::spawn` so the row exists before the child can produce a
-    /// single byte (docs/01-architecture.md#session-creation-sequence).
-    pub fn insert_session_blocking(&self, row: NewSessionRow) -> Result<()> {
-        self.call_blocking(|reply| Command::Insert(row, reply))
-    }
-
-    /// `running`/`lost` -> `closing`, from `Session::terminate()`. Best
-    /// effort at the call site -- a DB write failing here must not block
-    /// tearing down the PTY.
-    pub fn mark_closing_blocking(&self, id: &str) -> Result<()> {
-        self.call_blocking(|reply| Command::MarkClosing {
-            id: id.to_string(),
-            reply,
-        })
-    }
-
-    /// The one terminal-state write a live `Session` ever makes -- always
-    /// `state='exited'` (docs/05-persistence.md: `lost_reason` can be set
-    /// here too, for `spawn_failed`/`kill_timeout`/`wait_error`, but `state`
-    /// only becomes `'lost'` via restart recovery, never from a live
-    /// process -- see `recover`).
-    pub fn mark_exited_blocking(
-        &self,
-        id: &str,
-        exited_at_ms: i64,
-        exit_code: Option<i32>,
-        lost_reason: Option<&'static str>,
-        output_bytes: u64,
-    ) -> Result<()> {
-        self.call_blocking(|reply| Command::MarkExited {
-            id: id.to_string(),
-            exited_at_ms,
-            exit_code,
-            lost_reason,
-            output_bytes,
-            reply,
-        })
-    }
-
-    /// Blocking counterpart to [`Db::delete_session`], for a caller already
-    /// on a blocking-pool thread.
-    pub fn delete_session_blocking(&self, id: &str) -> Result<()> {
-        self.call_blocking(|reply| Command::Delete {
-            id: id.to_string(),
-            reply,
-        })
-    }
-
-    /// Fire-and-forget: dropped silently (after a `warn!`) if the channel is
-    /// momentarily full rather than ever blocking the caller -- the reader
-    /// thread's own throttle already caps how often this fires
-    /// (docs/05-persistence.md#when-output_bytes-is-written: "at most once
-    /// per second per session").
-    pub fn note_output_bytes(&self, id: &str, output_bytes: u64) {
-        if self
-            .tx
-            .try_send(Command::NoteOutputBytes {
-                id: id.to_string(),
-                output_bytes,
-            })
-            .is_err()
-        {
-            warn!(
-                session_id = id,
-                "db-writer channel full or gone; dropped an output_bytes update"
-            );
-        }
-    }
-
-    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: a resize is
-    /// a user action, not the hot path, but there is still no reason to make
-    /// the caller wait on disk for it.
-    pub fn note_size(&self, id: &str, cols: u16, rows: u16) {
-        if self
-            .tx
-            .try_send(Command::NoteSize {
-                id: id.to_string(),
-                cols,
-                rows,
-            })
-            .is_err()
-        {
-            warn!(
-                session_id = id,
-                "db-writer channel full or gone; dropped a size update"
-            );
-        }
-    }
-
-    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: the
-    /// agent's own OSC-reported title and Claude resume id
-    /// (docs/05-persistence.md#agent-reported-metadata). Callers throttle;
-    /// this is reached from the reader thread's already-throttled branch,
-    /// never per chunk. A `None` field is not written, so a caller that
-    /// only has a title cannot clear a resume id.
-    pub fn note_agent_meta(
-        &self,
-        id: &str,
-        title: Option<String>,
-        claude_resume_id: Option<String>,
-    ) {
-        if self
-            .tx
-            .try_send(Command::NoteAgentMeta {
-                id: id.to_string(),
-                title,
-                claude_resume_id,
-            })
-            .is_err()
-        {
-            warn!(
-                session_id = id,
-                "db-writer channel full or gone; dropped an agent-metadata update"
-            );
-        }
-    }
-
-    /// Fire-and-forget, same shape as [`Db::note_output_bytes`]: records a
-    /// `session_events` row (D3, docs/04-api-protocol.md#get-apiv1sessions).
-    pub fn note_event(&self, id: &str, event_type: &'static str) {
-        if self
-            .tx
-            .try_send(Command::NoteEvent {
-                id: id.to_string(),
-                event_type,
-                ts_ms: now_ms(),
-            })
-            .is_err()
-        {
-            warn!(
-                session_id = id,
-                event_type, "db-writer channel full or gone; dropped an event"
-            );
-        }
-    }
-
-    /// For `api.rs`'s async handlers: a session id not held live by
-    /// `SessionManager` falls back to this for `GET`.
-    pub async fn get_session(&self, id: &str) -> Result<Option<SessionRow>> {
-        self.call(|reply| Command::Get {
-            id: id.to_string(),
-            reply,
-        })
-        .await
-    }
-
-    /// Newest-first is `api.rs`'s job (same convention as
-    /// `SessionManager::list`); this returns every row, unordered.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionRow>> {
-        self.call(|reply| Command::List { reply }).await
-    }
-
-    /// Removes the row outright (`api.rs`'s `?purge=true` path). Async
-    /// counterpart to [`Db::delete_session_blocking`].
-    pub async fn delete_session(&self, id: &str) -> Result<()> {
-        self.call(|reply| Command::Delete {
-            id: id.to_string(),
-            reply,
-        })
-        .await
-    }
-
-    /// Rows GC may reclaim: terminal (`exited`/`lost`) and older than
-    /// `older_than_ms` (docs/05-persistence.md#garbage-collection).
-    pub async fn gc_candidates(&self, older_than_ms: i64) -> Result<Vec<SessionRow>> {
-        self.call(|reply| Command::GcCandidates {
-            older_than_ms,
-            reply,
-        })
-        .await
     }
 
     /// Every pin, newest first (docs/19-locations.md#get-apiv1locationspins).
@@ -922,176 +511,6 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// docs/01-architecture.md#startup-sequence's middle two steps, run once
-/// synchronously before the writer thread starts (nothing else can be
-/// touching the DB yet):
-///
-/// 1. every row still `running`/`closing` -> `lost` / `daemon_restart`,
-///    with a matching `session_events(lost)` row.
-/// 2. each of *those* (and only those -- a row already `exited` had its
-///    final `output_bytes` written atomically by `mark_exited`, so
-///    re-`stat`ing it on every subsequent restart is pure waste) session
-///    directory's `output.vt` length reconciled against the stored
-///    `output_bytes`, **file wins** if larger
-///    (docs/05-persistence.md#restart-recovery: "the file cannot lie about
-///    bytes it holds"; a capped log is the one case the column can be ahead,
-///    and `MAX()` in the `UPDATE` below leaves those alone).
-fn recover(conn: &Connection, sessions_root: &Path) -> Result<RecoverySummary> {
-    let now = now_ms();
-
-    let stale_ids: Vec<String> = {
-        let mut stmt =
-            conn.prepare("SELECT id FROM sessions WHERE state IN ('running', 'closing')")?;
-        let ids = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids
-    };
-
-    conn.execute(
-        "UPDATE sessions SET state = 'lost', lost_reason = 'daemon_restart', exited_at_ms = ?1
-         WHERE state IN ('running', 'closing')",
-        params![now],
-    )?;
-    for id in &stale_ids {
-        conn.execute(
-            "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, 'lost', NULL)",
-            params![id, now],
-        )?;
-    }
-
-    for id in &stale_ids {
-        let log_path = sessions_root.join(id).join("output.vt");
-        let Ok(meta) = std::fs::metadata(&log_path) else {
-            continue;
-        };
-        // Saturating, not truncating: a file over i64::MAX bytes is not a
-        // realistic case to under-record instead of over-record.
-        let recovered_len = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-        conn.execute(
-            "UPDATE sessions SET output_bytes = MAX(output_bytes, ?1) WHERE id = ?2",
-            params![recovered_len, id],
-        )?;
-    }
-
-    Ok(RecoverySummary {
-        recovered_lost: stale_ids.len(),
-    })
-}
-
-fn insert_session(conn: &Connection, row: &NewSessionRow) -> Result<()> {
-    let argv_json = serde_json::to_string(&row.args)?;
-    conn.execute(
-        "INSERT INTO sessions
-            (id, kind, preset, command, argv_json, cwd, state, pid, cols, rows,
-             output_bytes, log_capped_at, created_at_ms, started_at_ms, exited_at_ms,
-             exit_code, lost_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?9, 0, NULL, ?10, ?10, NULL, NULL, NULL)",
-        params![
-            row.id,
-            row.kind,
-            row.preset,
-            row.command,
-            argv_json,
-            row.cwd,
-            row.pid.map(i64::from),
-            i64::from(row.cols),
-            i64::from(row.rows),
-            row.created_at_ms,
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, 'created', NULL)",
-        params![row.id, row.created_at_ms],
-    )?;
-    Ok(())
-}
-
-fn mark_closing(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE sessions SET state = 'closing' WHERE id = ?1 AND state = 'running'",
-        params![id],
-    )?;
-    Ok(())
-}
-
-fn mark_exited(
-    conn: &Connection,
-    id: &str,
-    exited_at_ms: i64,
-    exit_code: Option<i32>,
-    lost_reason: Option<&str>,
-    output_bytes: u64,
-) -> Result<()> {
-    // Saturating, not truncating: a session over i64::MAX bytes of output is
-    // not a realistic case to under-record instead of over-record.
-    let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
-    let updated = conn.execute(
-        "UPDATE sessions
-         SET state = 'exited', exited_at_ms = ?1, exit_code = ?2, lost_reason = ?3, output_bytes = ?4
-         WHERE id = ?5",
-        params![exited_at_ms, exit_code, lost_reason, output_bytes, id],
-    )?;
-    if updated == 0 {
-        // The row is already gone -- a concurrent `?purge=true` (`api.rs`'s
-        // `delete_session`) won the race against this exit landing on the
-        // writer thread. Nothing left to update, and inserting a
-        // `session_events` row for a session that no longer exists would
-        // fail the `foreign_keys=ON` constraint. Not an error: the intended
-        // end state (no row) already holds.
-        return Ok(());
-    }
-    conn.execute(
-        "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, 'exited', NULL)",
-        params![id, exited_at_ms],
-    )?;
-    Ok(())
-}
-
-fn get_session(conn: &Connection, id: &str) -> Result<Option<SessionRow>> {
-    conn.query_row(
-        "SELECT * FROM sessions WHERE id = ?1",
-        params![id],
-        row_from_sql,
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn list_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare("SELECT * FROM sessions")?;
-    let rows = stmt
-        .query_map([], row_from_sql)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-fn delete_session(conn: &Connection, id: &str) -> Result<()> {
-    // `foreign_keys = ON` makes the FK a RESTRICT by default -- deleting a
-    // `sessions` row with `session_events` still pointing at it errors
-    // rather than cascading. The schema doesn't declare `ON DELETE CASCADE`
-    // (docs/05-persistence.md#schema doesn't either), so this deletes the
-    // child rows explicitly, in the same spirit as GC's own
-    // directory-then-row ordering: nothing is left pointing at a session
-    // that no longer exists.
-    conn.execute(
-        "DELETE FROM session_events WHERE session_id = ?1",
-        params![id],
-    )?;
-    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
-    Ok(())
-}
-
-fn gc_candidates(conn: &Connection, older_than_ms: i64) -> Result<Vec<SessionRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM sessions WHERE state IN ('exited', 'lost') AND exited_at_ms IS NOT NULL AND exited_at_ms < ?1",
-    )?;
-    let rows = stmt
-        .query_map(params![older_than_ms], row_from_sql)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 fn list_pins(conn: &Connection) -> Result<Vec<PinRow>> {
     let mut stmt =
         conn.prepare("SELECT path, pinned_at_ms FROM pinned_locations ORDER BY pinned_at_ms DESC")?;
@@ -1157,91 +576,7 @@ fn remove_pin(conn: &Connection, path: &str) -> Result<()> {
 fn writer_loop(conn: &Connection, mut rx: mpsc::Receiver<Command>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            Command::Insert(row, reply) => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(insert_session(conn, &row));
-            }
-            Command::MarkClosing { id, reply } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(mark_closing(conn, &id));
-            }
-            Command::MarkExited {
-                id,
-                exited_at_ms,
-                exit_code,
-                lost_reason,
-                output_bytes,
-                reply,
-            } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(mark_exited(
-                    conn,
-                    &id,
-                    exited_at_ms,
-                    exit_code,
-                    lost_reason,
-                    output_bytes,
-                ));
-            }
-            Command::NoteOutputBytes { id, output_bytes } => {
-                note_output_bytes(conn, &id, output_bytes);
-            }
-            Command::NoteSize { id, cols, rows } => note_size(conn, &id, cols, rows),
-            Command::NoteEvent {
-                id,
-                event_type,
-                ts_ms,
-            } => {
-                note_event(conn, &id, event_type, ts_ms);
-            }
-            Command::NoteAgentMeta {
-                id,
-                title,
-                claude_resume_id,
-            } => {
-                note_agent_meta(conn, &id, title.as_deref(), claude_resume_id.as_deref());
-            }
             Command::Auth(cmd) => crate::auth_store::handle(conn, cmd),
-            Command::Delete { id, reply } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(delete_session(conn, &id));
-            }
-            Command::Get { id, reply } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(get_session(conn, &id));
-            }
-            Command::List { reply } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(list_sessions(conn));
-            }
-            Command::GcCandidates {
-                older_than_ms,
-                reply,
-            } => {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "reply's receiver may already be gone (its caller stopped waiting); the write itself already happened, only the notification is lost"
-                )]
-                let _ = reply.send(gc_candidates(conn, older_than_ms));
-            }
             Command::ListPins { reply } => {
                 #[expect(
                     clippy::let_underscore_must_use,
@@ -1332,62 +667,6 @@ fn forget_anchor_meta(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The fire-and-forget half of [`writer_loop`]: nobody is waiting on a
-/// reply, so a failure is logged and dropped rather than returned. Split
-/// out of the match arms only to keep that loop readable.
-fn note_output_bytes(conn: &Connection, id: &str, output_bytes: u64) {
-    // Saturating, not truncating: see mark_exited's identical cast.
-    let output_bytes = i64::try_from(output_bytes).unwrap_or(i64::MAX);
-    if let Err(e) = conn.execute(
-        "UPDATE sessions SET output_bytes = ?1 WHERE id = ?2",
-        params![output_bytes, id],
-    ) {
-        warn!(session_id = id, error = %e, "persisting output_bytes failed");
-    }
-}
-
-fn note_size(conn: &Connection, id: &str, cols: u16, rows: u16) {
-    if let Err(e) = conn.execute(
-        "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
-        params![i64::from(cols), i64::from(rows), id],
-    ) {
-        warn!(session_id = id, error = %e, "persisting cols/rows failed");
-    }
-}
-
-fn note_event(conn: &Connection, id: &str, event_type: &'static str, ts_ms: i64) {
-    if let Err(e) = conn.execute(
-        "INSERT INTO session_events (session_id, ts_ms, event_type, data_json) VALUES (?1, ?2, ?3, NULL)",
-        params![id, ts_ms, event_type],
-    ) {
-        warn!(session_id = id, event_type, error = %e, "recording session_events row failed");
-    }
-}
-
-/// `COALESCE`, so a call carrying only one of the two leaves the other
-/// alone: the title and the resume link arrive as independent escape
-/// sequences, and a title update must never erase the id the restore path
-/// reads (docs/05-persistence.md#agent-reported-metadata).
-fn note_agent_meta(
-    conn: &Connection,
-    id: &str,
-    title: Option<&str>,
-    claude_resume_id: Option<&str>,
-) {
-    if let Err(e) = conn.execute(
-        "UPDATE sessions SET title = COALESCE(?1, title), claude_resume_id = COALESCE(?2, claude_resume_id) WHERE id = ?3",
-        params![title, claude_resume_id, id],
-    ) {
-        warn!(session_id = id, error = %e, "persisting agent-reported metadata failed");
-    }
-}
-
-/// `<data_dir>/sessions` -- shared by `SessionManager` and this module so
-/// neither hardcodes the join in more than one place.
-pub fn sessions_root(data_dir: &Path) -> PathBuf {
-    data_dir.join("sessions")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,296 +684,10 @@ mod tests {
         dir
     }
 
-    fn new_row(id: &str) -> NewSessionRow {
-        NewSessionRow {
-            id: id.to_string(),
-            kind: "shell".to_string(),
-            preset: None,
-            command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "true".to_string()],
-            cwd: "/tmp".to_string(),
-            pid: Some(4242),
-            cols: 80,
-            rows: 24,
-            created_at_ms: now_ms(),
-        }
-    }
-
-    // The `_blocking` methods panic if called on a Tokio runtime thread by
-    // design (`blocking_send`/`blocking_recv` -- they exist for
-    // `session.rs`'s plain OS threads, never an async handler). Every
-    // `#[tokio::test]` below is itself running on a runtime thread, so
-    // exercising them here goes through `spawn_blocking`, same as
-    // `SessionManager::create` does in `api.rs`.
-    async fn insert(db: &Db, row: NewSessionRow) {
-        let db = db.clone();
-        tokio::task::spawn_blocking(move || db.insert_session_blocking(row))
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    async fn close(db: &Db, id: &str) {
-        let db = db.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || db.mark_closing_blocking(&id))
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    async fn exit(
-        db: &Db,
-        id: &str,
-        exited_at_ms: i64,
-        exit_code: Option<i32>,
-        lost_reason: Option<&'static str>,
-        output_bytes: u64,
-    ) {
-        let db = db.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            db.mark_exited_blocking(&id, exited_at_ms, exit_code, lost_reason, output_bytes)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn insert_then_get_round_trips_argv_json() {
-        let dir = scratch_dir("insert-get");
-        let (db, summary) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        assert_eq!(summary.recovered_lost, 0);
-
-        let row = new_row("s1");
-        insert(&db, row.clone()).await;
-
-        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
-        assert_eq!(fetched.state, "running");
-        assert_eq!(fetched.args, row.args);
-        assert_eq!(fetched.started_at_ms, Some(row.created_at_ms));
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn a_stale_running_row_is_lost_on_the_next_open_file_length_wins() {
-        let dir = scratch_dir("recover");
-        let db_path = dir.join("state.db");
-        let sessions_root = dir.join("sessions");
-
-        {
-            let (db, _) = Db::open(&db_path, &sessions_root).unwrap();
-            insert(&db, new_row("s1")).await;
-        }
-        // Simulate the child having written past the stored `output_bytes`
-        // (0 at insert) before the "crash" -- the file must win.
-        std::fs::create_dir_all(sessions_root.join("s1")).unwrap();
-        std::fs::write(sessions_root.join("s1").join("output.vt"), b"hello world").unwrap();
-
-        let (db, summary) = Db::open(&db_path, &sessions_root).unwrap();
-        assert_eq!(summary.recovered_lost, 1);
-
-        let row = db
-            .get_session("s1")
-            .await
-            .unwrap()
-            .expect("row must survive");
-        assert_eq!(row.state, "lost");
-        assert_eq!(row.lost_reason.as_deref(), Some("daemon_restart"));
-        assert_eq!(row.output_bytes, "hello world".len() as u64);
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn a_capped_log_keeps_the_column_the_file_does_not_rewind_it() {
-        let dir = scratch_dir("capped");
-        let db_path = dir.join("state.db");
-        let sessions_root = dir.join("sessions");
-
-        {
-            let (db, _) = Db::open(&db_path, &sessions_root).unwrap();
-            insert(&db, new_row("s1")).await;
-            // A capped log: the column raced ahead of the file before the
-            // "crash" (the file only holds the first 5 of a logical 1000
-            // bytes already handed out to live clients).
-            close(&db, "s1").await;
-        }
-        std::fs::create_dir_all(sessions_root.join("s1")).unwrap();
-        std::fs::write(sessions_root.join("s1").join("output.vt"), b"12345").unwrap();
-        {
-            // Directly set output_bytes ahead, the way the throttled writer
-            // would have while the log was capped.
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute(
-                "UPDATE sessions SET output_bytes = 1000 WHERE id = 's1'",
-                [],
-            )
-            .unwrap();
-        }
-
-        let (db, _) = Db::open(&db_path, &sessions_root).unwrap();
-        let row = db.get_session("s1").await.unwrap().unwrap();
-        assert_eq!(
-            row.state, "lost",
-            "a stale `closing` row is recovered the same as `running`"
-        );
-        assert_eq!(
-            row.output_bytes, 1000,
-            "the column must not rewind below what clients already hold"
-        );
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn mark_exited_updates_state_and_records_an_event() {
-        let dir = scratch_dir("exit");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        insert(&db, new_row("s1")).await;
-
-        exit(&db, "s1", now_ms(), Some(0), None, 123).await;
-
-        let row = db.get_session("s1").await.unwrap().unwrap();
-        assert_eq!(row.state, "exited");
-        assert_eq!(row.exit_code, Some(0));
-        assert_eq!(row.output_bytes, 123);
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn delete_removes_the_row() {
-        let dir = scratch_dir("delete");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        insert(&db, new_row("s1")).await;
-
-        db.delete_session("s1").await.unwrap();
-
-        assert!(db.get_session("s1").await.unwrap().is_none());
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn gc_candidates_only_returns_old_enough_terminal_rows() {
-        let dir = scratch_dir("gc");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        insert(&db, new_row("old")).await;
-        exit(&db, "old", 1_000, Some(0), None, 0).await;
-        insert(&db, new_row("running")).await;
-        insert(&db, new_row("recent")).await;
-        exit(&db, "recent", now_ms(), Some(0), None, 0).await;
-
-        let candidates = db.gc_candidates(now_ms() - 1_000).await.unwrap();
-        let ids: Vec<&str> = candidates.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["old"]);
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// docs/05-persistence.md#agent-reported-metadata: the two sequences
-    /// arrive independently, so a write carrying one must never clear the
-    /// other.
-    #[tokio::test]
-    async fn agent_meta_writes_never_clear_the_field_they_do_not_carry() {
-        let dir = scratch_dir("agent-meta");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        insert(&db, new_row("s1")).await;
-
-        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
-        assert_eq!(fetched.title, None, "nothing has reported one yet");
-        assert_eq!(fetched.claude_resume_id, None);
-
-        // The banner's link, then a title update with no link in hand.
-        db.note_agent_meta("s1", None, Some("session_ABC".to_string()));
-        db.note_agent_meta("s1", Some("Fix the login bug".to_string()), None);
-
-        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
-        assert_eq!(fetched.title.as_deref(), Some("Fix the login bug"));
-        assert_eq!(
-            fetched.claude_resume_id.as_deref(),
-            Some("session_ABC"),
-            "a title-only write must leave the resume id alone -- it is what the restore path reads"
-        );
-
-        // And the reverse order, on a row that already has both.
-        db.note_agent_meta("s1", Some("Now doing something else".to_string()), None);
-        let fetched = db.get_session("s1").await.unwrap().expect("row must exist");
-        assert_eq!(fetched.claude_resume_id.as_deref(), Some("session_ABC"));
-        assert_eq!(fetched.title.as_deref(), Some("Now doing something else"));
-
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A database written by a build from before the agent-metadata columns
-    /// existed: `user_version` is 1, the two columns are absent, and the
-    /// rows in it must survive the upgrade rather than the daemon failing
-    /// to open its own state (docs/05-persistence.md#migrations).
-    #[tokio::test]
-    async fn a_v1_database_gains_the_agent_meta_columns_on_open() {
-        let dir = scratch_dir("migrate-v1");
-        let db_path = dir.join("state.db");
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(SCHEMA_V1).unwrap();
-            conn.pragma_update(None, "user_version", 1i64).unwrap();
-            conn.execute(
-                "INSERT INTO sessions (id, kind, command, argv_json, cwd, state, cols, rows, created_at_ms)
-                 VALUES ('old1', 'shell', '/bin/sh', '[]', '/tmp', 'exited', 80, 24, 1)",
-                [],
-            )
-            .unwrap();
-        }
-
-        let (db, _) = Db::open(&db_path, &dir.join("sessions")).unwrap();
-        let fetched = db
-            .get_session("old1")
-            .await
-            .unwrap()
-            .expect("the pre-migration row must survive");
-        assert_eq!(fetched.title, None);
-        assert_eq!(fetched.claude_resume_id, None);
-
-        db.note_agent_meta("old1", None, Some("session_XYZ".to_string()));
-        let fetched = db.get_session("old1").await.unwrap().expect("row");
-        assert_eq!(fetched.claude_resume_id.as_deref(), Some("session_XYZ"));
-
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[tokio::test]
     async fn pins_round_trip_newest_first() {
         let dir = scratch_dir("pins-list");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        let db = Db::open(&dir.join("state.db")).unwrap();
 
         db.add_pin("/a", 100, 50).await.unwrap();
         db.add_pin("/b", 200, 50).await.unwrap();
@@ -1718,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn pinning_the_same_path_twice_keeps_the_first_timestamp() {
         let dir = scratch_dir("pins-idempotent");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        let db = Db::open(&dir.join("state.db")).unwrap();
 
         db.add_pin("/a", 100, 50).await.unwrap();
         let outcome = db.add_pin("/a", 999, 50).await.unwrap();
@@ -1742,7 +735,7 @@ mod tests {
     #[tokio::test]
     async fn the_pin_cap_refuses_a_new_path_but_not_an_existing_one() {
         let dir = scratch_dir("pins-cap");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        let db = Db::open(&dir.join("state.db")).unwrap();
 
         db.add_pin("/a", 1, 2).await.unwrap();
         db.add_pin("/b", 2, 2).await.unwrap();
@@ -1772,35 +765,13 @@ mod tests {
     #[tokio::test]
     async fn unpinning_something_that_was_never_pinned_is_not_an_error() {
         let dir = scratch_dir("pins-remove");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
+        let db = Db::open(&dir.join("state.db")).unwrap();
 
         db.remove_pin("/never").await.unwrap();
         db.add_pin("/a", 1, 50).await.unwrap();
         db.remove_pin("/a").await.unwrap();
 
         assert!(db.list_pins().await.unwrap().is_empty());
-
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "best-effort test cleanup; nothing to do if it fails"
-        )]
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The whole point of a pin is to outlive the sessions it came from --
-    /// GC reclaims rows, never this table (docs/19-locations.md#pins).
-    #[tokio::test]
-    async fn gc_and_session_deletes_leave_pins_alone() {
-        let dir = scratch_dir("pins-gc");
-        let (db, _) = Db::open(&dir.join("state.db"), &dir.join("sessions")).unwrap();
-        insert(&db, new_row("s1")).await;
-        db.add_pin("/a", 1, 50).await.unwrap();
-
-        exit(&db, "s1", 10, Some(0), None, 0).await;
-        assert_eq!(db.gc_candidates(i64::MAX).await.unwrap().len(), 1);
-        db.delete_session("s1").await.unwrap();
-
-        assert_eq!(db.list_pins().await.unwrap().len(), 1);
 
         #[expect(
             clippy::let_underscore_must_use,
@@ -1822,7 +793,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2i64).unwrap();
         }
 
-        let (db, _) = Db::open(&db_path, &dir.join("sessions")).unwrap();
+        let db = Db::open(&db_path).unwrap();
         db.add_pin("/a", 1, 50).await.unwrap();
         assert_eq!(db.list_pins().await.unwrap().len(), 1);
 
@@ -1837,9 +808,8 @@ mod tests {
     fn opening_twice_is_idempotent() {
         let dir = scratch_dir("reopen");
         let db_path = dir.join("state.db");
-        let sessions_root = dir.join("sessions");
-        Db::open(&db_path, &sessions_root).unwrap();
-        Db::open(&db_path, &sessions_root).unwrap();
+        Db::open(&db_path).unwrap();
+        Db::open(&db_path).unwrap();
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort test cleanup; nothing to do if it fails"

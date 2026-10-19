@@ -2,10 +2,8 @@
 //!
 //! Teleport's clients keep speaking teleport's protocol
 //! (docs/04-api-protocol.md); this translates it onto anchor's attach
-//! stream. A deliberately separate path from `ws::run`: that loop is the
-//! authoritative one while the extraction is in flight, and threading an
-//! `Option<Session>` through it would put the risk in the code that
-//! currently works rather than in the code that is new.
+//! stream. It is the only stream path: the in-process loop it was written
+//! beside (`ws::run`) went with the in-process layer (docs/20).
 //!
 //! Two leases are in play and they are not the same thing. Teleport's
 //! (`anchor_lease`) decides which *browser* may type, and carries the
