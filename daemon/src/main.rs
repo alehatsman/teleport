@@ -232,7 +232,6 @@ async fn main() -> Result<()> {
     // stays authoritative until teleport's own suite has run green against
     // the anchor path and a release has shipped on it (anchor ROADMAP M5).
     let anchor = if config.use_anchor {
-        refuse_anchor_where_it_cannot_host()?;
         let socket = config.anchor_endpoint()?;
         tracing::info!(socket = %socket.display(), "sessions will run in anchord");
         Some(teleportd::anchor_client::AnchorClient::new(socket))
@@ -565,33 +564,6 @@ async fn shutdown_signal(shutdown_trigger: Arc<tokio::sync::Notify>) {
         () = shutdown_trigger.notified() => {}
     }
     info!("shutdown signal received");
-}
-
-/// Refuses `use_anchor` on a platform where anchord cannot host a session.
-///
-/// Windows, until anchor's M6 lands. The client half compiles and connects
-/// there (`anchor_client`'s transport seam), but an anchord that answers is
-/// not yet an anchord that hosts sessions with the guarantees teleport
-/// relies on -- above all an exit observed exactly once (anchor's
-/// `docs/09-windows.md`, Goal). Refusing rather than ignoring the flag:
-/// `use_anchor` is a promise that sessions outlive the daemon, and silently
-/// running them in-process would break it at the one moment -- an update
-/// restart -- the operator set the flag to survive.
-#[cfg(windows)]
-fn refuse_anchor_where_it_cannot_host() -> Result<()> {
-    anyhow::bail!(
-        "use_anchor is not supported on Windows yet: anchord does not host sessions there until anchor M6 lands (docs/20, Constraint 3)"
-    )
-}
-
-/// Every other platform anchord supports hosts sessions today.
-#[cfg(not(windows))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "one signature on every platform, so the caller does not fork"
-)]
-fn refuse_anchor_where_it_cannot_host() -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

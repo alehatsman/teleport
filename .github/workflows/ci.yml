@@ -133,20 +133,29 @@ jobs:
           repository: alehatsman/anchor
           ref: c755628bdf1515b2d10dab01a149e63a34eee33a
           path: anchor
-      # Unix only, for now. teleport's anchor modules compile on Windows
-      # (the client has a named-pipe arm), but anchord hosts no sessions there
-      # until anchor's M6 transport lands, so every anchor fixture is still
-      # `#![cfg(unix)]` and on Windows there is nothing here to satisfy. When
-      # M6 lands this pin moves to a commit with a Windows anchord and the
-      # `if:` lines go -- not before, or `ci_must_supply_an_anchord_binary`
-      # would be satisfied by a binary that cannot serve the fixtures.
+      # Windows has its own pin: the first anchor commit whose anchord serves
+      # a named pipe (anchor M6 step 4, `457ed11`, branch feat/windows-m6).
+      # Separate so a Windows-only bump cannot move what Unix is tested
+      # against. That commit must be on anchor's remote before this job can
+      # fetch it -- merge order is anchor's M6 first.
+      - name: Check out anchor (pinned, Windows)
+        if: runner.os == 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: alehatsman/anchor
+          ref: 457ed11a2ddfa8518135c8315e072e045d48da5d
+          path: anchor
+      # Both binaries: on Windows a fixture starts anchord as
+      # `anchor --socket <pipe> daemon`, because the pipe name is fixed per
+      # user and `anchord` takes no arguments (tests/support's
+      # `anchord_endpoint::command`). Unix needs only anchord, and building
+      # the CLI there too is cheap insurance against the two drifting.
       - name: Build anchord
-        if: runner.os != 'Windows'
         working-directory: anchor
-        run: cargo build --release --bin anchord
+        run: cargo build --release --bin anchord --bin anchor
       - name: Export ANCHORD_BIN
-        if: runner.os != 'Windows'
-        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord" >> "$GITHUB_ENV"
+        shell: bash
+        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
       - run: cargo build --all-targets
       # --no-fail-fast: one failing test binary used to hide every later one

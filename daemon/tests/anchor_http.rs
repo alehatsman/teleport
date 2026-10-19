@@ -4,8 +4,8 @@
 //! clients already call, answered from a session store in another process.
 //! Gated on `ANCHORD_BIN` for the same reason as `anchor_client.rs` — anchor
 //! is a separate project and this suite cannot assume it is built here.
-
-#![cfg(unix)]
+//! Runs on Windows too, against an anchord serving a named pipe; the
+//! scripts are stated per platform (`support::fixture_shell`).
 
 mod support;
 

@@ -8,8 +8,10 @@
 //! ```sh
 //! ANCHORD_BIN=../anchor/target/debug/anchord cargo test --test anchor_client
 //! ```
-
-#![cfg(unix)]
+//!
+//! On Windows the same, pointing at `anchord.exe`; the fixture starts it as
+//! `anchor daemon --socket <pipe>` from the same directory
+//! (`support::anchord_endpoint::command` says why).
 
 mod support;
 
