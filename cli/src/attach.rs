@@ -236,6 +236,46 @@ fn build_stream_url(
     Ok(url)
 }
 
+/// Build the upgrade request, carry the token in the header, and connect.
+///
+/// # Errors
+/// `ConnectError::Fatal` for an HTTP response the server chose to send --
+/// which carries a status the caller must not retry blindly -- and a plain
+/// error for everything else.
+async fn open_ws(
+    url: &reqwest::Url,
+    token: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ConnectError,
+> {
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("building the WebSocket handshake request")?;
+    // Native clients "have no excuse" not to use the header -- never
+    // `?token=`/`?ticket=` (docs/06-security.md#token-on-the-websocket-upgrade).
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("token is not a valid header value")?,
+    );
+
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((ws, _response)) => Ok(ws),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            let status = resp.status().as_u16();
+            let body = resp
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).trim().to_string())
+                .filter(|s| !s.is_empty());
+            Err(ConnectError::Fatal { status, body })
+        }
+        Err(e) => Err(anyhow::anyhow!("connecting: {e}").into()),
+    }
+}
+
 async fn connect_and_run(
     params: &AttachParams<'_>,
     after: Option<u64>,
@@ -250,31 +290,7 @@ async fn connect_and_run(
         params.client_name,
     )?;
 
-    let mut request = url
-        .as_str()
-        .into_client_request()
-        .context("building the WebSocket handshake request")?;
-    // Native clients "have no excuse" not to use the header -- never
-    // `?token=`/`?ticket=` (docs/06-security.md#token-on-the-websocket-upgrade).
-    request.headers_mut().insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {}", params.conn.token))
-            .context("token is not a valid header value")?,
-    );
-
-    let mut ws = match tokio_tungstenite::connect_async(request).await {
-        Ok((ws, _response)) => ws,
-        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
-            let status = resp.status().as_u16();
-            let body = resp
-                .body()
-                .as_ref()
-                .map(|b| String::from_utf8_lossy(b).trim().to_string())
-                .filter(|s| !s.is_empty());
-            return Err(ConnectError::Fatal { status, body });
-        }
-        Err(e) => return Err(anyhow::anyhow!("connecting: {e}").into()),
-    };
+    let mut ws = open_ws(&url, &params.conn.token).await?;
 
     let mut stdout = tokio::io::stdout();
 

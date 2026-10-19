@@ -556,7 +556,7 @@ impl AnchorAttach {
     /// Sends input to the PTY. Only the lease holder's input is applied;
     /// anchor silently ignores the rest.
     ///
-    /// Split across frames at [`frame::MAX_INBOUND`]. A browser paste is the
+    /// Split across frames at `frame::MAX_INBOUND`. A browser paste is the
     /// one thing a client sends that is not keystroke-sized, and a single
     /// oversized frame would not merely be refused — anchor drops the
     /// connection on the header, taking the whole attach down and killing
