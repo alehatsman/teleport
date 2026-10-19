@@ -244,6 +244,15 @@ count is never zero. Fixed by one *ungated* assertion per binary that goes red
 when `CI` is set without a binary (#108, `5db5fbd`) — the fix had to be something
 that could fail on its own.
 
+Reproduced on purpose on Windows, 2026-10-19, while porting those suites to a
+named-pipe anchord: with the files compiled there and `ANCHORD_BIN` unset,
+`anchor_client` and `anchor_http` reported 22 passed in 0.02s; with `CI=1` the
+ungated assertion turned that red, as designed. Their `#![cfg(unix)]` came off
+only in the same commit that gives CI's Windows job an anchord to point at
+(anchor `457ed11`) — lifting it first would have failed every Windows run for a
+binary nobody could supply, and the tempting "fix" for that is the hole #108
+closed. Against that anchord: 23 tests, 6.9s, all green.
+
 **A comment that cannot fail by being out of date.** `docs/03-pty-layer.md`
 carried "Unresolved blocker (2026-09-04)" for six weeks after W1 was resolved,
 and `pty.rs`'s Windows terminate arm said "Unverified on real Windows" long after

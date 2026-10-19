@@ -97,6 +97,14 @@ Collapsing them is the whole structural edit.
 > is maintained. "Delete `pty.rs`" now means "delete the Unix arms of
 > `pty.rs`", and a reader executing this list literally on a Windows checkout
 > would remove the product.
+>
+> **Un-scoped again, 2026-10-19** — with a condition. Anchor M6 gives Windows an
+> anchord (anchor `457ed11`, on a branch), so the list below is once more a
+> whole-platform list *once that lands and Windows hosts run anchord*. Until
+> both are true, the Unix-only reading above still governs a `main` checkout.
+> `ConptyDsrProbe` and `pty_primitive_windows.rs` are now under test in anchor
+> and may go with the rest — see
+> [Status of Constraint 3](#status-of-constraint-3--2026-10-19).
 
 Whole modules: `pty.rs` (except `login_shell_path`, **and except
 `ConptyDsrProbe` at `:423-520`, which transfers to anchor — see Constraint 3**),
@@ -545,6 +553,87 @@ real Windows host, which means CI's `windows-latest` job. That distinction is
 what `docs/11-mvp-plan.md`'s M4 gate means by "Windows: cross-compile-checked
 only."
 
+#### Status of Constraint 3 — 2026-10-19
+
+**The superseding decision above is itself superseded.** Anchor reopened
+Windows as M6 on 2026-10-19 (anchor `docs/09-windows.md` §7: teleport is to rely
+on anchor on every platform it ships), so "the in-process layer is Windows'
+permanent session path" stopped being true the same day. It is Windows' session
+path *until M6 lands*, and the deletion goes back to being a whole-platform
+deletion at the end of it, not a Unix-only one.
+
+Teleport's half, on `feat/windows-anchor`. Checked rather than assumed, on the
+Windows 11 Pro build 26200 machine that ran W1/S4, with
+`cargo test --no-fail-fast` and `cargo clippy --all-targets -- -D warnings`, and
+in WSL (Ubuntu 24.04) for the Unix side:
+
+- **The transport seam.** `anchor_client` reaches anchord through one private
+  `transport` module: a type-alias pair and a `connect`, one arm per platform —
+  the shape anchor's §3.1 proposes, not a trait. The `cfg(unix)` gate on the four
+  `anchor_*` modules is gone; on Windows they compile, are linted, and their unit
+  tests run.
+- **The client half of anchor's contract** (anchor `docs/04-protocol.md`,
+  "Windows: a named pipe", `0134e38`): the default endpoint is
+  `\\.\pipe\anchor-<SID>` (`Config::anchor_endpoint`; `anchor_socket` keeps its
+  name and on Windows takes a pipe path); the client connects at
+  `SECURITY_IDENTIFICATION` and a test asks a real pipe server what
+  impersonation level it actually got; and before the first byte it requires
+  the pipe's owner to be its own user SID (`winsec::kernel_object_owner`). The
+  owner, not the server's process token: anchor chose that because a
+  non-elevated client cannot open an elevated anchord's token. Both checks were
+  mutation-tested — weakening either turns its test red.
+- **The fixtures.** `anchor_client.rs` and `anchor_http.rs` state every script
+  for both platforms (`support::fixture_shell`; PowerShell on Windows), and each
+  Windows script was run through teleport's own ConPTY path first. What that
+  showed is written at the call sites: conhost emits an OSC 0 of its own naming
+  the program and re-emits OSC 2 as OSC 0; BEL passes through, ahead of the text
+  written before it; **OSC 8 is swallowed**, so the resume-id half of
+  `derived_agent_metadata_survives_a_teleport_restart` is Unix-only, and says
+  why.
+- **A bug the Windows run found, in code that is not Windows code.** The title
+  write-through was leading-edge only, so the last title of a burst never
+  reached SQLite and an exited session came back from a restart with the
+  first. Every Windows session hits it (conhost's own title comes first); a
+  Unix agent that sets its title twice in a second does too. Fixed in
+  `anchor_watch` with a trailing write, and pinned by
+  `the_last_title_of_a_burst_is_the_one_that_survives`, which fails without the
+  fix on both platforms.
+
+- **Against a real Windows anchord.** anchor `457ed11` (step 4, the named-pipe
+  transport) built from a clean export, then
+  `CI=1 ANCHORD_BIN=...\anchord.exe cargo test --no-fail-fast` on Windows:
+  **183 passed, 0 failed** — `anchor_client` 4 in 0.88s, `anchor_http` 19 in
+  6.00s, so they ran rather than skipped; the same command with `ANCHORD_BIN`
+  unset fails `ci_must_supply_an_anchord_binary`. Baseline before any of this,
+  same machine: 144 passed, and the anchor suites did not exist on Windows.
+  End to end, a real `teleportd.exe` with `use_anchor = true` against a real
+  `anchord.exe` on `\\.\pipe\anchor-<SID>`: create a PowerShell agent, shut
+  teleportd down through `/api/v1/shutdown`, start a new one — the session is
+  `running` with the same pid, listed, and its transcript from before the
+  restart is intact. `sessions_survive_restart` is advertised on Windows for
+  the first time.
+- **`use_anchor` is accepted on Windows** as of the same commit. It still
+  defaults off, on every platform; flipping it is the separate decision anchor's
+  ROADMAP lists under "Later, unscheduled".
+
+**What was consumed from anchor, by commit** (branch `feat/windows-m6`):
+`e1c51d0` (step 2, the ConPTY port with `pty_primitive_windows.rs`),
+`80d2e98` (step 3, the ungated tripwire), `0134e38` (the transport contract),
+`457ed11` (step 4, the transport itself). CI's Windows job pins `457ed11`,
+which has to reach anchor's remote before that job can fetch it.
+
+**The transfer half of this constraint is discharged.** `ConptyDsrProbe` and
+`pty_primitive_windows.rs` are under test in anchor (`e1c51d0`: twelve fixtures,
+revert-checked — removing the probe reproduces W1 there), and `80d2e98` makes a
+run that skipped them red. That was the condition [above](#constraint-3-is-three-things-and-one-of-them-is-already-solved--here)
+set for releasing them. They are still in this repo, deliberately: the deletion
+is what removes them, and it has its own preconditions below.
+
+Unchanged by any of this: teleport never starts anchord, on Windows either, so
+Constraint 4 below gains Windows hosts rather than a workaround —
+[08-packaging.md](08-packaging.md#anchord-is-not-teleports-to-start--on-windows-too)
+records the decision and why WSL needs nothing from it.
+
 **Constraint 4 — every host running teleportd must have anchord first.**
 Deleting the in-process layer makes `anchord` mandatory. Fleet audit,
 2026-10-16:
@@ -590,6 +679,12 @@ merge.**
    the `0600` boundary (a scope change for anchor, which has deliberately had no
    auth), and ConPTY support — **the last of which is already solved and must be
    transferred from this repo, not rebuilt.**
+   **Done on branches, 2026-10-19/20, not yet merged:** anchor `feat/windows-m6`
+   through `457ed11` (all three parts, the transfer under test and tripwired),
+   teleport `feat/windows-anchor` (both arms behind one `AnchorClient`, the
+   anchor suites green on Windows against it). See
+   [Status of Constraint 3](#status-of-constraint-3--2026-10-19). Merge order is
+   anchor first, since teleport's Windows CI pins an anchor commit.
 8. **Satisfy Constraint 4** — anchord present on `mac`, `main_pc`, `mini_pc`,
    per-box go-ahead obtained. The dotfiles commit may be prepared ahead of this;
    it may not be applied ahead of it.
@@ -618,14 +713,14 @@ protocol doc. Against an older anchord each is a live bug:
 | `8b47537` | `log` clamps an oversized `max` instead of refusing it, so `get_log`'s paging loop works past 4 MiB. |
 | `00f3eaa` | `terminate`'s reply means the exit is *recorded*, so the `purge` teleport sends next is not refused. |
 | `77dde06` | `resize` travels outbound, so a third-party resize reaches teleport's browsers; the attach reply carries the starting size. |
+| `457ed11` | Windows only: anchord serves `\\.\pipe\anchor-<SID>` with the owner and DACL teleport's client checks. Before it there is no Windows anchord at all. |
 
 Teleport's own half of that audit: input is split at 64 KiB (#97), so a paste
 cannot drop an attach.
 
-**Pending, and blocking step 9:** the Windows transport arm (Constraint 3). When
-it lands it becomes a fourth row here and raises teleport's minimum anchor
-version again — this time on a platform rather than a behaviour. Teleport cannot
-state the version until anchor cuts it.
+The fourth row is a platform rather than a behaviour, and it is a commit on
+anchor's `feat/windows-m6` branch, not yet a release: teleport's Windows
+minimum is "whatever anchor cuts containing `457ed11`".
 
 **Rebuild `ANCHORD_BIN` before reading a red fixture.** Every anchor test
 here runs whatever binary that variable points at, and nothing checks it
