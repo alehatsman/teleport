@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::time::{Duration, Instant};
 
-use crate::anchor_client::{AnchorClient, AnchorFrame};
+use crate::anchor_client::{AnchorAttach, AnchorClient, AnchorFrame, AnchorSession};
 use crate::anchor_lease::{LeaseRegistry, SessionEvent};
 
 /// How often to ping an idle client, matching `ws.rs`.
@@ -66,6 +66,139 @@ enum ClientMessage {
     ReleaseControl,
 }
 
+/// Tell the client its cursor is past the head, and close.
+///
+/// Same frame as the in-process path's (`ws.rs`): `next_offset`, no message,
+/// so a client cannot tell the two apart.
+async fn reject_offset_ahead(socket: &mut WebSocket, next_offset: u64) {
+    send_json(
+        socket,
+        &json!({
+            "type": "error",
+            "code": "offset_ahead",
+            "next_offset": next_offset,
+        }),
+    )
+    .await;
+    drop(socket.send(close(1008, "offset_ahead")).await);
+}
+
+/// The `ready` frame: what the client needs before the first byte of replay.
+async fn send_ready(
+    socket: &mut WebSocket,
+    session_id: &str,
+    from: u64,
+    truncated: bool,
+    session: &AnchorSession,
+    attach: &AnchorAttach,
+    control: bool,
+    leases: &LeaseRegistry,
+) {
+    send_json(
+        socket,
+        &json!({
+            "type": "ready",
+            "session_id": session_id,
+            "replay_from": from,
+            "next_offset": attach.next_offset(),
+            "truncated": truncated,
+            "log_capped_at": session.log_capped_at,
+            // The attach reply's size, not the earlier `get`'s: the attach
+            // is the later observation, and between the two the session may
+            // have been resized by someone else. Falls back to `get` against
+            // an anchord too old to report it in the reply.
+            "cols": attach.size().map_or(session.cols, |(cols, _)| cols),
+            "rows": attach.size().map_or(session.rows, |(_, rows)| rows),
+            "control": control,
+            "controller": leases.controller_name(session_id),
+        }),
+    )
+    .await;
+}
+
+/// Attach through anchord, then claim its lease if teleport granted one and
+/// anchor gave it to an earlier connection.
+///
+/// `None` is "anchord's problem, not the cursor's" — it is down, restarting,
+/// or the session went away mid-upgrade. The in-process path closes these
+/// `1011 internal error` with no frame at all, and a client treats the close
+/// as an ordinary drop and reconnects from where it was.
+async fn attach_through_anchor(
+    anchor: &AnchorClient,
+    session_id: &str,
+    from: u64,
+    control: bool,
+) -> Option<AnchorAttach> {
+    let mut attach = match anchor.attach(session_id, from, control).await {
+        Ok(attach) => attach,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, error = %e, "attaching through anchor");
+            return None;
+        }
+    };
+    // Attach never preempts, which is why this is a separate act.
+    if control && !attach.has_control() {
+        if let Err(e) = attach.claim_control().await {
+            tracing::warn!(session_id = %session_id, error = %e, "claiming anchor's lease failed");
+        }
+    }
+    Some(attach)
+}
+
+/// Tell the client the session is gone, and close.
+///
+/// `session_gone`, not `not_found`: that is the code
+/// docs/04-api-protocol.md#error-codes defines for "id unknown or purged",
+/// and clients match these by value. Reaching here at all is a race —
+/// `upgrade` 404s an unknown id before the upgrade, so this is a session
+/// purged between that check and this one.
+async fn reject_session_gone(socket: &mut WebSocket, e: &impl std::fmt::Display) {
+    send_json(
+        socket,
+        &json!({ "type": "error", "code": "session_gone", "message": e.to_string() }),
+    )
+    .await;
+    drop(socket.send(close(1011, "session not found")).await);
+}
+
+/// Where this client's replay starts, and whether it was shortened.
+///
+/// `None` is "the cursor is past the head", which is the one attach failure
+/// teleport can name itself — and naming it matters: the client drops its
+/// cursor and restarts at the default tail on that code
+/// (web/src/api/stream.ts#onErrorFrame). Reporting it for *every* attach
+/// failure — anchord down, session exited mid-upgrade — threw away a
+/// perfectly good cursor over an error that had nothing to do with it.
+///
+/// Past a cap the log stops while the offset stream keeps advancing (anchor
+/// `docs/02-model.md#the-size-cap`), so a replay starting in that region has
+/// nothing to read and resumes at the head instead of at a file position that
+/// no longer means what the client thinks. Same clamp as `Session::attach`
+/// makes in-process (`session/mod.rs`), with `log_capped_at` standing in for
+/// the readable end — it is where the file stopped.
+fn replay_window(
+    after: Option<u64>,
+    tail: Option<u64>,
+    default_tail: u64,
+    max_replay_bytes: u64,
+    session: &AnchorSession,
+) -> Option<(u64, bool)> {
+    let (from, truncated) = crate::ws::bound_attach(
+        after,
+        tail,
+        default_tail,
+        max_replay_bytes,
+        session.output_bytes,
+    );
+    if from > session.output_bytes {
+        return None;
+    }
+    Some((
+        clamp_past_cap(from, session.output_bytes, session.log_capped_at),
+        truncated,
+    ))
+}
+
 /// Serves one proxied connection until either side ends it.
 #[expect(
     clippy::cognitive_complexity,
@@ -90,60 +223,17 @@ pub async fn run_anchor(proxy: Proxy) {
     let session = match anchor.get(&session_id).await {
         Ok(session) => session,
         Err(e) => {
-            send_json(
-                &mut socket,
-                // `session_gone`, not `not_found`: that is the code
-                // docs/04-api-protocol.md#error-codes defines for "id
-                // unknown or purged", and clients match these by value.
-                // Reaching here at all is a race — `upgrade` 404s an
-                // unknown id before the upgrade, so this is a session
-                // purged between that check and this one.
-                &json!({ "type": "error", "code": "session_gone", "message": e.to_string() }),
-            )
-            .await;
-            drop(socket.send(close(1011, "session not found")).await);
+            reject_session_gone(&mut socket, &e).await;
             return;
         }
     };
 
-    let (from, truncated) = crate::ws::bound_attach(
-        after,
-        tail,
-        default_tail,
-        max_replay_bytes,
-        session.output_bytes,
-    );
-
-    // An `after` past the head is the one attach failure teleport can name
-    // itself, and naming it matters: the client drops its cursor and
-    // restarts at the default tail on this code
-    // (web/src/api/stream.ts#onErrorFrame). Reporting it for *every* attach
-    // failure — anchord down, session exited mid-upgrade — threw away a
-    // perfectly good cursor over an error that had nothing to do with it.
-    // Same frame as the in-process path's (`ws.rs`): `next_offset`, no
-    // message, so a client cannot tell the two apart.
-    if from > session.output_bytes {
-        send_json(
-            &mut socket,
-            &json!({
-                "type": "error",
-                "code": "offset_ahead",
-                "next_offset": session.output_bytes,
-            }),
-        )
-        .await;
-        drop(socket.send(close(1008, "offset_ahead")).await);
+    let Some((from, truncated)) =
+        replay_window(after, tail, default_tail, max_replay_bytes, &session)
+    else {
+        reject_offset_ahead(&mut socket, session.output_bytes).await;
         return;
-    }
-
-    // Past a cap the log stops while the offset stream keeps advancing
-    // (anchor `docs/02-model.md#the-size-cap`), so a replay starting in
-    // that region has nothing to read and resumes at the head instead of at
-    // a file position that no longer means what the client thinks. Same
-    // clamp as `Session::attach` makes in-process (`session/mod.rs`), with
-    // `log_capped_at` standing in for the readable end — it is where the
-    // file stopped.
-    let from = clamp_past_cap(from, session.output_bytes, session.log_capped_at);
+    };
 
     // Teleport's lease first: it decides who may type, and anchor's is
     // claimed to match it below.
@@ -153,50 +243,22 @@ pub async fn run_anchor(proxy: Proxy) {
         None
     };
 
-    let mut attach = match anchor
-        .attach(&session_id, from, control_epoch.is_some())
-        .await
-    {
-        Ok(attach) => attach,
-        // Anything left is anchord's problem, not the cursor's: it is down,
-        // it is restarting, the session went away mid-upgrade. The
-        // in-process path closes these `1011 internal error` with no frame
-        // at all, and a client treats the close as an ordinary drop and
-        // reconnects from where it was.
-        Err(e) => {
-            tracing::warn!(session_id = %session_id, error = %e, "attaching through anchor");
-            drop(socket.send(close(1011, "internal error")).await);
-            return;
-        }
+    let Some(mut attach) =
+        attach_through_anchor(&anchor, &session_id, from, control_epoch.is_some()).await
+    else {
+        drop(socket.send(close(1011, "internal error")).await);
+        return;
     };
 
-    // Teleport granted the lease but anchor gave it to an earlier
-    // connection: claim it, so the client teleport says may type actually
-    // can. Attach never preempts, which is why this is a separate act.
-    if control_epoch.is_some() && !attach.has_control() {
-        if let Err(e) = attach.claim_control().await {
-            tracing::warn!(session_id = %session_id, error = %e, "claiming anchor's lease failed");
-        }
-    }
-
-    send_json(
+    send_ready(
         &mut socket,
-        &json!({
-            "type": "ready",
-            "session_id": session_id,
-            "replay_from": from,
-            "next_offset": attach.next_offset(),
-            "truncated": truncated,
-            "log_capped_at": session.log_capped_at,
-            // The attach reply's size, not the earlier `get`'s: the attach
-            // is the later observation, and between the two the session may
-            // have been resized by someone else. Falls back to `get` against
-            // an anchord too old to report it in the reply.
-            "cols": attach.size().map_or(session.cols, |(cols, _)| cols),
-            "rows": attach.size().map_or(session.rows, |(_, rows)| rows),
-            "control": control_epoch.is_some(),
-            "controller": leases.controller_name(&session_id),
-        }),
+        &session_id,
+        from,
+        truncated,
+        &session,
+        &attach,
+        control_epoch.is_some(),
+        &leases,
     )
     .await;
 
@@ -424,7 +486,7 @@ pub async fn run_anchor(proxy: Proxy) {
 async fn handle_control(
     text: &str,
     leases: &Arc<LeaseRegistry>,
-    attach: &mut crate::anchor_client::AnchorAttach,
+    attach: &mut AnchorAttach,
     session_id: &str,
     client_id: &str,
     client_name: &str,

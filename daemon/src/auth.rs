@@ -432,7 +432,7 @@ impl<T> ChallengeStore<T> {
 
     /// Stores `state` for `rp_id` and returns the id the client echoes back.
     /// Sweeps expired entries first -- the only cleanup this needs, given a
-    /// 60-second TTL. Refuses once [`MAX_CHALLENGES`] live entries remain
+    /// 60-second TTL. Refuses once `MAX_CHALLENGES` live entries remain
     /// *after* that sweep.
     #[expect(
         clippy::map_err_ignore,

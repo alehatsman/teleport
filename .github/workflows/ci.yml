@@ -29,23 +29,72 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  daemon-fmt:
-    name: daemon (fmt)
+
+  # One gate, not two: `provision apply tasks/ci.yml` is what a developer runs
+  # before a push and what runs here, so the two cannot drift. It supersedes
+  # the four jobs that used to stand here -- daemon-fmt, cli-fmt, daemon-audit
+  # and cli-audit -- since it runs fmt itself and `cargo deny check
+  # advisories` is a superset of `cargo audit`.
+  #
+  # The matrix jobs below stay. The gate runs on Linux; build, test and clippy
+  # on macOS and Windows reach the `#[cfg(...)]` paths a Linux run never
+  # compiles.
+  daemon-gate:
+    name: daemon (gate)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: daemon
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --check
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            daemon -> target
+            anchor -> target
 
-  # A `target_os` gate on a test is a platform quietly losing coverage, and
-  # this repo has shipped two whose stated reasons did not survive being run
-  # (#25/#32, #36). Cheap, no toolchain needed, so it runs on its own rather
-  # than behind a build.
+      # Same pinned anchor checkout as the matrix job below, for the same
+      # reason: the gate runs the suite, the anchor fixtures are gated on
+      # `ANCHORD_BIN`, and `ci_must_supply_an_anchord_binary` fails under CI
+      # when it is unset (#108).
+      - name: Check out anchor (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: alehatsman/anchor
+          ref: c755628bdf1515b2d10dab01a149e63a34eee33a
+          path: anchor
+      - name: Build anchord
+        working-directory: anchor
+        run: cargo build --release --bin anchord
+      - name: Export ANCHORD_BIN
+        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord" >> "$GITHUB_ENV"
+
+      - name: Install provision
+        run: cargo install --locked --git https://github.com/alehatsman/provision.git
+      # Checks out rust-quality at the pin in tasks/tools.yml and installs
+      # nextest, deny and machete.
+      - name: Install the gate's tools
+        run: provision apply tasks/tools.yml
+      - name: Gate
+        run: provision apply tasks/ci.yml
+
+  cli-gate:
+    name: cli (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli -> target
+      - name: Install provision
+        run: cargo install --locked --git https://github.com/alehatsman/provision.git
+      - name: Install the gate's tools
+        run: provision apply tasks/tools.yml
+      - name: Gate
+        run: provision apply tasks/ci.yml
   test-gates:
     name: daemon (target_os gates)
     runs-on: ubuntu-latest
@@ -115,32 +164,6 @@ jobs:
       # time until this flag showed the true, bounded scope in a single run).
       - run: cargo test --no-fail-fast
       - run: cargo clippy --all-targets -- -D warnings
-
-  daemon-audit:
-    name: daemon (audit)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: daemon
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-audit
-      - run: cargo audit
-
-  cli-fmt:
-    name: cli (fmt)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cli
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
-
   cli:
     name: cli (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -162,19 +185,6 @@ jobs:
       - run: cargo build --all-targets
       - run: cargo test --no-fail-fast
       - run: cargo clippy --all-targets -- -D warnings
-
-  cli-audit:
-    name: cli (audit)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cli
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-audit
-      - run: cargo audit
-
   web:
     name: web
     runs-on: ubuntu-latest

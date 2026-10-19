@@ -13,7 +13,7 @@ steps:
   # them is this one line and nothing else. Both paths were driven against
   # this checkout before the pin came back to the tag.
   - vars:
-      rq_ref: v0.3.0
+      rq_ref: v0.6.0
       rq_dir: "{{ home }}/.cache/provision/tools/rust-quality"
 
   # This step used to be sixty lines of shell, copied here from provision's
