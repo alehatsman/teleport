@@ -22,6 +22,8 @@ pub mod presets;
 pub mod pty;
 pub mod session;
 pub mod web_assets;
+#[cfg(windows)]
+mod winsec;
 pub mod ws;
 pub mod ws_anchor;
 

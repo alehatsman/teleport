@@ -232,15 +232,15 @@ fn unix_anchor_endpoint(
     Some(data.join("anchor/anchor.sock"))
 }
 
-/// Anchor's Windows default. Not yet known: anchor's `docs/09-windows.md`
-/// §3.2 makes the pipe name per-user and leaves the rule to its M6 transport
-/// work, and guessing a name here would point teleport at a pipe anchord
-/// never creates -- or worse, at one someone else did.
+/// Anchor's Windows default: `\\.\pipe\anchor-<SID>`, the string form of the
+/// user SID on this process's token (anchor `docs/04-protocol.md`, decided
+/// in `0134e38`). No environment variable moves it, on either side; a
+/// different pipe is `anchor_socket`'s job, and it takes a full `\\.\pipe\`
+/// path.
 #[cfg(windows)]
 fn default_anchor_endpoint() -> Result<PathBuf> {
-    anyhow::bail!(
-        "anchord's Windows pipe name has no default yet (anchor M6): set anchor_socket in config.toml"
-    )
+    crate::anchor_client::default_pipe()
+        .context("cannot resolve anchord's pipe from this process's user SID")
 }
 
 #[cfg(test)]
