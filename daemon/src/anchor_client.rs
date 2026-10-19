@@ -26,7 +26,291 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use transport::{ReadHalf, WriteHalf};
+
+/// The connection to anchord, one concrete type per platform behind one
+/// pair of names.
+///
+/// **A type alias pair, not a trait**, which is the shape anchor's
+/// `docs/09-windows.md` §3.1 proposes for its own side of the seam. A
+/// `UnixStream` and a `NamedPipeClient` share no trait, but every use in
+/// this file needs only "read", "write" and "drop to cancel", and
+/// `AsyncRead`/`AsyncWrite` already say that. A trait object would buy an
+/// abstraction nothing calls for and cost dynamic dispatch on the attach
+/// path, which carries every byte of terminal output.
+///
+/// Everything platform-specific about reaching anchord lives in here, so
+/// the protocol code above and below it is written once. The wire format
+/// needs nothing from the transport but an ordered byte stream in each
+/// direction ([anchor's `docs/04-protocol.md`]).
+///
+/// Cancellation is the one place the two arms could have differed and do
+/// not. Anchor's own synchronous client needs a different mechanism on
+/// Windows to unblock a read from another thread, because a named pipe has
+/// no `shutdown` (its §4.1). This client is async: a blocked read is a
+/// future, and dropping it cancels the read on either platform, so nothing
+/// here has an `Interrupt` to port.
+mod transport {
+    #[cfg(unix)]
+    pub(super) use self::unix::{connect, ReadHalf, WriteHalf};
+    #[cfg(windows)]
+    pub(super) use self::windows::{connect, default_endpoint, ReadHalf, WriteHalf};
+
+    #[cfg(unix)]
+    mod unix {
+        use std::io;
+        use std::path::Path;
+
+        /// The read half of a connection to anchord.
+        pub(crate) type ReadHalf = tokio::net::unix::OwnedReadHalf;
+        /// The write half of a connection to anchord.
+        pub(crate) type WriteHalf = tokio::net::unix::OwnedWriteHalf;
+
+        /// Connects to the `AF_UNIX` socket at `endpoint`. The socket's
+        /// `0600` mode is the access check; nothing else is (anchor's
+        /// `src/server.rs` module doc).
+        pub(crate) async fn connect(endpoint: &Path) -> io::Result<(ReadHalf, WriteHalf)> {
+            Ok(tokio::net::UnixStream::connect(endpoint)
+                .await?
+                .into_split())
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use std::io;
+        use std::os::windows::io::AsRawHandle;
+        use std::path::Path;
+        use std::time::Duration;
+
+        use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+
+        use crate::winsec;
+
+        /// The read half of a connection to anchord.
+        ///
+        /// `tokio::io::split` rather than an owned split: a named pipe
+        /// client has no `into_split`. The halves share one handle behind a
+        /// lock, which costs nothing here because each connection is driven
+        /// by one task.
+        pub(crate) type ReadHalf = tokio::io::ReadHalf<NamedPipeClient>;
+        /// The write half of a connection to anchord.
+        pub(crate) type WriteHalf = tokio::io::WriteHalf<NamedPipeClient>;
+
+        /// `ERROR_PIPE_BUSY`: every instance is mid-handoff. anchord always
+        /// has a listening instance between connections, so a brief retry
+        /// finds it (anchor `docs/04-protocol.md`).
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "a Win32 error code, 231, compared against `raw_os_error`'s i32"
+        )]
+        const ERROR_PIPE_BUSY: i32 = windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32;
+
+        /// How long a connect waits out `ERROR_PIPE_BUSY` before giving up.
+        /// Bounded, because a server that never creates another instance is
+        /// indistinguishable from a wedged one.
+        const BUSY_BUDGET: Duration = Duration::from_secs(2);
+        const BUSY_RETRY: Duration = Duration::from_millis(10);
+
+        /// Connects to the named pipe at `endpoint`, per anchor's Windows
+        /// transport contract (`docs/04-protocol.md`, "Windows: a named
+        /// pipe", anchor `0134e38`).
+        ///
+        /// At `SECURITY_IDENTIFICATION`, so a server can learn who connected
+        /// but cannot act as them (anchor's `docs/09-windows.md` §4.3). That
+        /// is tokio's `ClientOptions` default, and anchor's contract says to
+        /// leave it alone rather than override it. Leaving a security property
+        /// to a dependency's default is only safe if something would notice
+        /// the default moving: `the_client_connects_at_identification_level`
+        /// is that, asking a real pipe server what level it actually got.
+        ///
+        /// `ERROR_FILE_NOT_FOUND` (no anchord for this user) and
+        /// `ERROR_ACCESS_DENIED` (a pipe at this name that is not ours to
+        /// open) both come back as errors; the second is never read as "not
+        /// running".
+        pub(crate) async fn connect(endpoint: &Path) -> io::Result<(ReadHalf, WriteHalf)> {
+            let deadline = tokio::time::Instant::now() + BUSY_BUDGET;
+            let pipe = loop {
+                match ClientOptions::new().open(endpoint) {
+                    Ok(pipe) => break pipe,
+                    Err(e)
+                        if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(BUSY_RETRY).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            verify_server(&pipe)?;
+            Ok(tokio::io::split(pipe))
+        }
+
+        /// Refuses a pipe someone else created, **before the first byte is
+        /// sent** -- a request sent first would hand that process whatever
+        /// it carries.
+        ///
+        /// The client half of anchor's §4.2, as its contract specifies: the
+        /// pipe's owner, read off the handle just opened, must equal this
+        /// process's user SID. anchord writes its own user SID as the owner
+        /// when it creates the pipe, and only a process running as this user
+        /// -- or one holding a privilege that already owns the machine -- can
+        /// create a pipe owned by them.
+        ///
+        /// The owner rather than the serving process's token: an earlier
+        /// version of this check read the server's token by pid, and anchor
+        /// chose against that because a non-elevated client cannot open an
+        /// elevated anchord's token, so the check would refuse a legitimate
+        /// daemon.
+        ///
+        /// What this does not defend against, stated rather than implied: a
+        /// process running as the *same* user. That one can already read
+        /// anchord's memory, and no pipe check changes that.
+        fn verify_server(pipe: &NamedPipeClient) -> io::Result<()> {
+            let ours = winsec::current_user_sid()?;
+            let owner = winsec::kernel_object_owner(pipe.as_raw_handle())?;
+            same_user(&ours, &owner)
+        }
+
+        /// The comparison itself, apart from the system calls, so the refusal
+        /// is testable without a second account. SIDs have one binary
+        /// encoding, so byte equality is `EqualSid`.
+        pub(super) fn same_user(ours: &[u8], owner: &[u8]) -> io::Result<()> {
+            if ours == owner {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the pipe is owned by another user; refusing to trust it as anchord",
+                ))
+            }
+        }
+
+        /// This user's anchord pipe: `\\.\pipe\anchor-<SID>`, the string form
+        /// of the user SID on this process's token (anchor
+        /// `docs/04-protocol.md`). Per user because the pipe namespace is
+        /// machine-global. No environment variable moves it.
+        pub(crate) fn default_endpoint() -> io::Result<std::path::PathBuf> {
+            let sid = winsec::sid_to_string(&winsec::current_user_sid()?)?;
+            Ok(std::path::PathBuf::from(format!(r"\\.\pipe\anchor-{sid}")))
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use std::os::windows::io::AsRawHandle;
+
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Security::{
+                GetTokenInformation, RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
+                SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY,
+            };
+            use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+            use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+            /// The refusal, without needing a second account to provoke it.
+            #[test]
+            fn a_pipe_owned_by_another_user_is_refused() {
+                let error = super::same_user(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0], &[1, 2, 3])
+                    .expect_err("different SIDs");
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                super::same_user(&[1, 2, 3], &[1, 2, 3]).expect("the same SID");
+            }
+
+            #[test]
+            fn the_default_endpoint_is_this_users_sid_pipe() {
+                let endpoint = super::default_endpoint().expect("resolvable");
+                let text = endpoint.display().to_string();
+                assert!(text.starts_with(r"\\.\pipe\anchor-S-1-"), "{text}");
+            }
+
+            /// What the server sees when it impersonates this client:
+            /// `SecurityIdentification`, never more.
+            ///
+            /// Asked of the kernel rather than of tokio's options, because
+            /// the claim is about what a server *can do*, and the only
+            /// honest witness to that is a server trying.
+            fn impersonation_level(server: HANDLE) -> SECURITY_IMPERSONATION_LEVEL {
+                // SAFETY: `server` is a connected pipe server handle that has
+                // read from its client, which impersonation requires.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let ok = unsafe { ImpersonateNamedPipeClient(server) };
+                assert_ne!(ok, 0, "impersonate: {}", std::io::Error::last_os_error());
+
+                // SAFETY: plain call; the pseudo-handle it returns needs no
+                // closing.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let thread = unsafe { GetCurrentThread() };
+                let mut token: HANDLE = std::ptr::null_mut();
+                // SAFETY: `thread` is valid; `token` is a valid out-pointer.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let opened = unsafe { OpenThreadToken(thread, TOKEN_QUERY, 1, &raw mut token) };
+                let mut level: SECURITY_IMPERSONATION_LEVEL = -1;
+                let mut len = 0_u32;
+                if opened != 0 {
+                    // SAFETY: `token` is a valid token handle and `level` is
+                    // exactly the size the class returns.
+                    #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                    unsafe {
+                        GetTokenInformation(
+                            token,
+                            TokenImpersonationLevel,
+                            (&raw mut level).cast(),
+                            u32::try_from(size_of_val(&level)).unwrap_or(4),
+                            &raw mut len,
+                        );
+                    }
+                    // SAFETY: `token` was opened above and is closed once.
+                    #[expect(unsafe_code, reason = "taking ownership of a Win32 handle")]
+                    drop(unsafe {
+                        <std::os::windows::io::OwnedHandle as std::os::windows::io::FromRawHandle>::from_raw_handle(token)
+                    });
+                }
+                // SAFETY: plain call; this thread is impersonating.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let reverted = unsafe { RevertToSelf() };
+                assert_ne!(reverted, 0, "this thread must stop impersonating");
+                assert_ne!(
+                    opened,
+                    0,
+                    "open thread token: {}",
+                    std::io::Error::last_os_error()
+                );
+                level
+            }
+
+            #[tokio::test(flavor = "current_thread")]
+            async fn the_client_connects_at_identification_level() {
+                let name = format!(r"\\.\pipe\tp-anchor-qos-{}", std::process::id());
+                let mut server =
+                    crate::winsec::owner_only_pipe_server(&name).expect("creating the pipe");
+                let accept = server.connect();
+                let (client, accepted) =
+                    tokio::join!(super::connect(std::path::Path::new(&name)), accept);
+                accepted.expect("accepting");
+                let (_read, mut write) = client.expect("connecting");
+                write.write_all(b"x").await.expect("writing");
+                let mut byte = [0_u8; 1];
+                server.read_exact(&mut byte).await.expect("reading");
+
+                // Synchronous from here: impersonation is per thread, so no
+                // await may come between it and the revert.
+                let level = impersonation_level(server.as_raw_handle());
+                assert_eq!(
+                    level, SecurityIdentification,
+                    "a server must not be able to act as the client"
+                );
+            }
+        }
+    }
+}
+
+/// This user's anchord pipe on Windows, `\\.\pipe\anchor-<SID>` -- anchor's
+/// default, which `config::Config::anchor_endpoint` falls back to.
+#[cfg(windows)]
+pub(crate) fn default_pipe() -> std::io::Result<PathBuf> {
+    transport::default_endpoint()
+}
 
 /// Frame tags, from anchor's `docs/04-protocol.md`.
 mod frame {
@@ -263,10 +547,7 @@ impl AnchorClient {
     /// attach that asks for it while another connection holds it still
     /// succeeds as an observer — check [`AnchorAttach::has_control`].
     pub async fn attach(&self, id: &str, from: u64, control: bool) -> Result<AnchorAttach> {
-        let stream = UnixStream::connect(&self.socket)
-            .await
-            .with_context(|| format!("connecting to {}", self.socket.display()))?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, mut write_half) = self.connect().await?;
         let mut reader = BufReader::new(read_half);
 
         let request = json!({
@@ -303,12 +584,17 @@ impl AnchorClient {
         })
     }
 
+    /// Opens one connection to anchord, already split for reading and
+    /// writing. The only place this file touches the transport.
+    async fn connect(&self) -> Result<(ReadHalf, WriteHalf)> {
+        transport::connect(&self.socket)
+            .await
+            .with_context(|| format!("connecting to {}", self.socket.display()))
+    }
+
     /// One control request on its own connection.
     async fn call(&self, op: &str, body: Value) -> Result<Value> {
-        let stream = UnixStream::connect(&self.socket)
-            .await
-            .with_context(|| format!("connecting to {}", self.socket.display()))?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, mut write_half) = self.connect().await?;
         let mut reader = BufReader::new(read_half);
 
         // Built rather than indexed into: `Value`'s index panics on a
@@ -331,8 +617,8 @@ pub struct AnchorAttach {
     size: Option<(u16, u16)>,
     has_control: bool,
     next_offset: u64,
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    reader: BufReader<ReadHalf>,
+    writer: WriteHalf,
     /// Bytes of the frame currently being read, kept here rather than on
     /// `next_frame`'s stack because `next_frame` is polled inside a
     /// `select!` and is dropped whenever another arm wins. With a local
@@ -602,8 +888,8 @@ const REPLY_AFTER_WRITE_ERROR: std::time::Duration = std::time::Duration::from_s
 ///
 /// No reply means the write error was the truth, and it is what comes back.
 async fn exchange(
-    out: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    out: &mut WriteHalf,
+    reader: &mut BufReader<ReadHalf>,
     body: &Value,
 ) -> Result<Value> {
     let Err(write_error) = write_request(out, body).await else {
@@ -617,14 +903,14 @@ async fn exchange(
     }
 }
 
-async fn write_request(out: &mut tokio::net::unix::OwnedWriteHalf, body: &Value) -> Result<()> {
+async fn write_request(out: &mut WriteHalf, body: &Value) -> Result<()> {
     let mut line = serde_json::to_vec(body).context("encoding a request")?;
     line.push(b'\n');
     out.write_all(&line).await.context("sending a request")?;
     out.flush().await.context("flushing a request")
 }
 
-async fn read_response(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Result<Value> {
+async fn read_response(reader: &mut BufReader<ReadHalf>) -> Result<Value> {
     let mut line = String::new();
     if reader
         .read_line(&mut line)
@@ -660,7 +946,7 @@ fn check_ok(response: &Value) -> Result<()> {
 mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use tokio::net::UnixListener;
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     use super::{AnchorClient, AnchorSpec, BTreeMap, PathBuf};
 
@@ -672,11 +958,10 @@ mod tests {
     /// draining the rest of the line**. That last part is what makes the
     /// client's own write fail with the reply already on the wire, which is
     /// the situation anchor's protocol doc warns clients about.
-    async fn serve_too_large_then_close(listener: UnixListener) {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        let (read_half, mut write_half) = stream.into_split();
+    ///
+    /// Generic over the stream so both transports run the same server.
+    async fn serve_too_large_then_close<S: AsyncRead + AsyncWrite + Unpin>(stream: S) {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = super::BufReader::new(read_half);
         let mut seen = 0_usize;
         let mut buf = vec![0_u8; 64 * 1024];
@@ -698,20 +983,54 @@ mod tests {
         // the client's request still unread.
     }
 
+    /// A fake anchord on a fresh `AF_UNIX` socket, and the socket's path.
+    #[cfg(unix)]
+    fn fake_anchord(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        // Short path on purpose: a unix socket address holds ~104 bytes.
+        let dir = PathBuf::from(format!("/tmp/tp-anchor-{tag}-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("creating the socket dir");
+        let socket = dir.join("anchor.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("binding the fake anchord");
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                serve_too_large_then_close(stream).await;
+            }
+        });
+        (socket, server)
+    }
+
+    /// A fake anchord on a fresh named pipe, and the pipe's name.
+    ///
+    /// Created the way anchord creates its own (anchor `docs/04-protocol.md`):
+    /// first instance or fail, owned by this user, open to this user only --
+    /// so the client's owner check passes for the reason it would against
+    /// the real thing, including on an elevated CI runner whose default
+    /// owner is `Administrators`.
+    #[cfg(windows)]
+    fn fake_anchord(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let name = format!(r"\\.\pipe\tp-anchor-{tag}-{}", std::process::id());
+        let server =
+            crate::winsec::owner_only_pipe_server(&name).expect("creating the fake anchord's pipe");
+        let task = tokio::spawn(async move {
+            if server.connect().await.is_ok() {
+                serve_too_large_then_close(server).await;
+            }
+        });
+        (PathBuf::from(name), task)
+    }
+
     /// A control line past anchor's cap surfaces as the `too_large` anchord
     /// answered with -- a 400 -- rather than as the broken pipe that answer
     /// races.
+    ///
+    /// Runs on both transports, and on Windows it is the first test to put
+    /// bytes through the named-pipe arm: the race it pins is the one most
+    /// likely to differ between them, because it depends on what a write
+    /// into a peer that stopped reading does.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_oversized_control_line_reports_the_reply_not_the_write_error() {
-        // Short path on purpose: a unix socket address holds ~104 bytes.
-        let dir = PathBuf::from(format!("/tmp/tp-anchor-toolarge-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("creating the socket dir");
-        let socket = dir.join("anchor.sock");
-        if socket.exists() {
-            std::fs::remove_file(&socket).expect("clearing a stale socket");
-        }
-        let listener = UnixListener::bind(&socket).expect("binding the fake anchord");
-        let server = tokio::spawn(serve_too_large_then_close(listener));
+        let (endpoint, server) = fake_anchord("toolarge");
 
         // `create` carries the spec, and the spec carries the environment:
         // the one control line teleport can realistically make too big.
@@ -720,21 +1039,24 @@ mod tests {
         let spec = AnchorSpec {
             command: "/bin/sh".to_owned(),
             args: Vec::new(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: std::env::temp_dir(),
             env,
             cols: 80,
             rows: 24,
             login_shell: false,
         };
 
-        let client = AnchorClient::new(&socket);
+        let client = AnchorClient::new(&endpoint);
         let error = client
             .create(&spec, &BTreeMap::new())
             .await
             .expect_err("an oversized control line must not succeed");
 
         server.abort();
-        std::fs::remove_dir_all(&dir).expect("cleaning up the socket dir");
+        #[cfg(unix)]
+        if let Some(dir) = endpoint.parent() {
+            std::fs::remove_dir_all(dir).expect("cleaning up the socket dir");
+        }
 
         let text = error.to_string();
         assert!(
@@ -747,6 +1069,26 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST,
             "`too_large` must reach the client as a 400, not a 500"
+        );
+    }
+
+    /// Nothing listening is an error naming the endpoint, on either
+    /// transport -- never a hang, and never an empty answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_anchord_is_a_connect_error_naming_the_endpoint() {
+        #[cfg(unix)]
+        let endpoint = PathBuf::from(format!("/tmp/tp-anchor-none-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let endpoint = PathBuf::from(format!(r"\\.\pipe\tp-anchor-none-{}", std::process::id()));
+
+        let error = AnchorClient::new(&endpoint)
+            .list(&BTreeMap::new())
+            .await
+            .expect_err("nothing is listening");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&endpoint.display().to_string()),
+            "the error should say where it looked: {text}"
         );
     }
 }

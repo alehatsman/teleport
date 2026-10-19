@@ -175,6 +175,72 @@ impl Config {
             anchor_socket: file.anchor_socket.or(defaults.anchor_socket),
         })
     }
+
+    /// Where `anchord` listens: `anchor_socket` when set, otherwise anchor's
+    /// own default for this platform.
+    ///
+    /// Anchor's resolution, mirrored rather than imported: teleport does not
+    /// depend on the anchor crate (`anchor_client`'s module doc), so this
+    /// follows the rule anchor documents in its `docs/04-protocol.md` and,
+    /// for Windows, its `docs/09-windows.md` §3.2.
+    ///
+    /// The field is still called `anchor_socket` on Windows, where it names
+    /// a pipe (`\\.\pipe\...`) rather than a file: docs/20 keeps the field,
+    /// and an endpoint is a path-shaped string on both platforms, so one
+    /// field with a platform-specific meaning beats two fields where one is
+    /// always ignored.
+    pub fn anchor_endpoint(&self) -> Result<PathBuf> {
+        match &self.anchor_socket {
+            Some(endpoint) => Ok(endpoint.clone()),
+            None => default_anchor_endpoint(),
+        }
+    }
+}
+
+/// Anchor's Unix default: `$XDG_RUNTIME_DIR/anchor.sock`, falling back to
+/// `$XDG_DATA_HOME/anchor/anchor.sock` and then `~/.local/share`. A
+/// variable that is set but empty counts as absent, as it does in anchor.
+#[cfg(unix)]
+fn default_anchor_endpoint() -> Result<PathBuf> {
+    let var = |name| std::env::var_os(name);
+    unix_anchor_endpoint(var("XDG_RUNTIME_DIR"), var("XDG_DATA_HOME"), var("HOME"))
+        .context("cannot resolve anchord's socket: set anchor_socket in config.toml")
+}
+
+/// The pure half of the Unix rule, so it is testable without mutating the
+/// process environment. Compiled everywhere: it is string handling, and a
+/// Windows run checking it costs nothing.
+#[cfg_attr(
+    all(not(unix), not(test)),
+    expect(
+        dead_code,
+        reason = "only the Unix default calls it; tests run it everywhere"
+    )
+)]
+fn unix_anchor_endpoint(
+    runtime_dir: Option<std::ffi::OsString>,
+    data_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let present = |v: Option<std::ffi::OsString>| v.filter(|v| !v.is_empty());
+    if let Some(run) = present(runtime_dir) {
+        return Some(PathBuf::from(run).join("anchor.sock"));
+    }
+    let data = present(data_home)
+        .map(PathBuf::from)
+        .or_else(|| present(home).map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("anchor/anchor.sock"))
+}
+
+/// Anchor's Windows default: `\\.\pipe\anchor-<SID>`, the string form of the
+/// user SID on this process's token (anchor `docs/04-protocol.md`, decided
+/// in `0134e38`). No environment variable moves it, on either side; a
+/// different pipe is `anchor_socket`'s job, and it takes a full `\\.\pipe\`
+/// path.
+#[cfg(windows)]
+fn default_anchor_endpoint() -> Result<PathBuf> {
+    crate::anchor_client::default_pipe()
+        .context("cannot resolve anchord's pipe from this process's user SID")
 }
 
 #[cfg(test)]
@@ -255,5 +321,47 @@ mod tests {
             reason = "best-effort test cleanup; nothing to do if it fails"
         )]
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn os(s: &str) -> std::ffi::OsString {
+        s.into()
+    }
+
+    #[test]
+    fn the_unix_anchor_endpoint_follows_anchors_order() {
+        assert_eq!(
+            unix_anchor_endpoint(Some(os("/run/u")), Some(os("/d")), Some(os("/h"))),
+            Some(PathBuf::from("/run/u/anchor.sock")),
+            "the runtime dir wins"
+        );
+        assert_eq!(
+            unix_anchor_endpoint(None, Some(os("/d")), Some(os("/h"))),
+            Some(PathBuf::from("/d/anchor/anchor.sock"))
+        );
+        assert_eq!(
+            unix_anchor_endpoint(None, None, Some(os("/h"))),
+            Some(PathBuf::from("/h/.local/share/anchor/anchor.sock"))
+        );
+        assert_eq!(unix_anchor_endpoint(None, None, None), None);
+    }
+
+    #[test]
+    fn a_set_but_empty_variable_is_absent_as_in_anchor() {
+        assert_eq!(
+            unix_anchor_endpoint(Some(os("")), Some(os("")), Some(os("/h"))),
+            Some(PathBuf::from("/h/.local/share/anchor/anchor.sock"))
+        );
+    }
+
+    #[test]
+    fn an_explicit_anchor_socket_overrides_the_default() {
+        let cfg = Config {
+            anchor_socket: Some(PathBuf::from("x-endpoint")),
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.anchor_endpoint().expect("explicit"),
+            PathBuf::from("x-endpoint")
+        );
     }
 }

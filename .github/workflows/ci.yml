@@ -133,17 +133,29 @@ jobs:
           repository: alehatsman/anchor
           ref: c755628bdf1515b2d10dab01a149e63a34eee33a
           path: anchor
-      # Unix only: anchord speaks AF_UNIX and has no Windows transport
-      # (anchor#13, deferred not-planned), which is why teleport's own anchor
-      # modules are `#[cfg(unix)]` (#107). Every anchor fixture is
-      # `#![cfg(unix)]` too, so on Windows there is nothing here to satisfy.
+      # Windows has its own pin: the first anchor commit whose anchord serves
+      # a named pipe (anchor M6, all five gates, `972a6df` on feat/windows-m6).
+      # Separate so a Windows-only bump cannot move what Unix is tested
+      # against. That commit must be on anchor's remote before this job can
+      # fetch it -- merge order is anchor's M6 first.
+      - name: Check out anchor (pinned, Windows)
+        if: runner.os == 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: alehatsman/anchor
+          ref: 972a6df41898b06b2c331e8ca337adbf892922eb
+          path: anchor
+      # Both binaries: on Windows a fixture starts anchord as
+      # `anchor --socket <pipe> daemon`, because the pipe name is fixed per
+      # user and `anchord` takes no arguments (tests/support's
+      # `anchord_endpoint::command`). Unix needs only anchord, and building
+      # the CLI there too is cheap insurance against the two drifting.
       - name: Build anchord
-        if: runner.os != 'Windows'
         working-directory: anchor
-        run: cargo build --release --bin anchord
+        run: cargo build --release --bin anchord --bin anchor
       - name: Export ANCHORD_BIN
-        if: runner.os != 'Windows'
-        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord" >> "$GITHUB_ENV"
+        shell: bash
+        run: echo "ANCHORD_BIN=$GITHUB_WORKSPACE/anchor/target/release/anchord${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
       - run: cargo build --all-targets
       # --no-fail-fast: one failing test binary used to hide every later one

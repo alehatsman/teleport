@@ -8,14 +8,19 @@
 //! ```sh
 //! ANCHORD_BIN=../anchor/target/debug/anchord cargo test --test anchor_client
 //! ```
+//!
+//! On Windows the same, pointing at `anchord.exe`; the fixture starts it as
+//! `anchor daemon --socket <pipe>` from the same directory
+//! (`support::anchord_endpoint::command` says why).
 
-#![cfg(unix)]
+mod support;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
+use support::{anchord_endpoint, fixture_shell};
 use teleportd::anchor_client::{AnchorClient, AnchorFrame, AnchorSpec};
 
 /// `None` when `ANCHORD_BIN` is unset, which skips every test here.
@@ -45,33 +50,38 @@ fn ci_must_supply_an_anchord_binary() {
     }
 }
 
-/// Short path: a unix socket path is capped near 104 bytes.
+/// One anchord per test, in its own directory and on its own endpoint.
 struct Daemon {
     child: Child,
     dir: PathBuf,
+    endpoint: PathBuf,
 }
 
 impl Daemon {
     fn start(tag: &str) -> Self {
-        let dir = PathBuf::from(format!("/tmp/tp-anchor-{}-{tag}", std::process::id()));
+        let tag = format!("{}-{tag}", std::process::id());
+        let dir = anchord_endpoint::scratch_root().join(format!("tp-anchor-{tag}"));
         #[expect(
             clippy::let_underscore_must_use,
             reason = "best-effort teardown; nothing to do if it fails"
         )]
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("run")).expect("creating the data dir");
+        let endpoint = anchord_endpoint::endpoint_in(&dir, &tag);
         let bin = anchord_bin().expect("checked by the caller");
-        let child = Command::new(bin)
-            .env("XDG_DATA_HOME", &dir)
-            .env("XDG_RUNTIME_DIR", dir.join("run"))
+        let child = anchord_endpoint::command(&bin, &dir, &endpoint)
             .env("ANCHOR_LOG", "warn")
             .spawn()
             .expect("spawning anchord");
-        Self { child, dir }
+        Self {
+            child,
+            dir,
+            endpoint,
+        }
     }
 
     fn socket(&self) -> PathBuf {
-        self.dir.join("run/anchor.sock")
+        self.endpoint.clone()
     }
 }
 
@@ -98,8 +108,8 @@ async fn ready(client: &AnchorClient) {
 
 fn spec(script: &str) -> AnchorSpec {
     AnchorSpec {
-        command: "/bin/sh".to_owned(),
-        args: vec!["-c".to_owned(), script.to_owned()],
+        command: fixture_shell::PROGRAM.to_owned(),
+        args: fixture_shell::args(script),
         cwd: std::env::temp_dir(),
         env: BTreeMap::new(),
         cols: 80,
@@ -127,7 +137,10 @@ async fn control_ops_round_trip_against_a_real_anchord() {
 
     let id = client
         .create(
-            &spec("stty raw -echo; echo hello-teleport; sleep 30"),
+            &spec(fixture_shell::pick(
+                "stty raw -echo; echo hello-teleport; sleep 30",
+                "Write-Output hello-teleport; Start-Sleep 30",
+            )),
             &labels(&[("teleport.kind", "shell")]),
         )
         .await
@@ -135,7 +148,7 @@ async fn control_ops_round_trip_against_a_real_anchord() {
 
     let session = client.get(&id).await.expect("get");
     assert_eq!(session.state, "running");
-    assert_eq!(session.command, "/bin/sh");
+    assert_eq!(session.command, fixture_shell::PROGRAM);
     assert_eq!(
         session.labels.get("teleport.kind").map(String::as_str),
         Some("shell")
@@ -204,7 +217,11 @@ async fn attach_replays_then_streams_and_reports_the_exit() {
 
     let id = client
         .create(
-            &spec("stty raw -echo; echo ready-for-input; cat; exit 3"),
+            &spec(fixture_shell::pick(
+                "stty raw -echo; echo ready-for-input; cat; exit 3",
+                // `cat`, by hand: echo each line back until input ends.
+                "Write-Output ready-for-input; while ($null -ne ($l = [Console]::ReadLine())) { Write-Output $l }; exit 3",
+            )),
             &BTreeMap::new(),
         )
         .await
@@ -231,7 +248,7 @@ async fn attach_replays_then_streams_and_reports_the_exit() {
 
     // Input reaches the PTY and comes back through the same stream.
     attach
-        .send_input(b"echo round-trip\n")
+        .send_input(fixture_shell::pick("echo round-trip\n", "echo round-trip\r").as_bytes())
         .await
         .expect("send_input");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -279,7 +296,13 @@ async fn an_observer_attaches_without_taking_the_lease() {
     ready(&client).await;
 
     let id = client
-        .create(&spec("stty raw -echo; echo up; sleep 30"), &BTreeMap::new())
+        .create(
+            &spec(fixture_shell::pick(
+                "stty raw -echo; echo up; sleep 30",
+                "Write-Output up; Start-Sleep 30",
+            )),
+            &BTreeMap::new(),
+        )
         .await
         .expect("create");
 
