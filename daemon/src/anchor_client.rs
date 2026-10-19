@@ -83,6 +83,7 @@ mod transport {
         use std::time::Duration;
 
         use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+        use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
 
         /// The read half of a connection to anchord.
         ///
@@ -94,15 +95,14 @@ mod transport {
         /// The write half of a connection to anchord.
         pub(crate) type WriteHalf = tokio::io::WriteHalf<NamedPipeClient>;
 
-        /// `SECURITY_IDENTIFICATION` from `winnt.h`: `SecurityIdentification
-        /// << 16`. Spelled out rather than imported because it is the one
-        /// constant this arm needs and the value is fixed ABI.
-        const SECURITY_IDENTIFICATION: u32 = 1 << 16;
-
         /// `ERROR_PIPE_BUSY`: every instance of the pipe is connected. The
         /// server has not yet created the next one, so a retry soon will
         /// usually find it.
-        const ERROR_PIPE_BUSY: i32 = 231;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "a Win32 error code, 231, compared against `raw_os_error`'s i32"
+        )]
+        const ERROR_PIPE_BUSY: i32 = windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32;
 
         /// How long a connect waits out `ERROR_PIPE_BUSY` before giving up.
         /// Bounded, because a server that never creates another instance is
@@ -136,7 +136,278 @@ mod transport {
                     Err(e) => return Err(e),
                 }
             };
+            verify_server(&pipe)?;
             Ok(tokio::io::split(pipe))
+        }
+
+        /// Refuses a pipe served by a process running as someone else.
+        ///
+        /// The client half of anchor's §4.2. A named pipe is a machine-global
+        /// name, so another local user can create it first and serve
+        /// teleport in anchord's place -- receiving spawn requests and every
+        /// byte of session output. anchord's own defence is
+        /// `FILE_FLAG_FIRST_PIPE_INSTANCE` plus an owner-only DACL; this is
+        /// the mirror, because a client that trusts any server under the
+        /// right name has no defence at all against the one that got there
+        /// first.
+        ///
+        /// Checked against the **serving process's token user**, not against
+        /// the pipe object's owner or DACL. Those are anchor's to choose and
+        /// an elevated anchord's default owner is `Administrators`, not the
+        /// user; the token user is the same SID either way, and it is the
+        /// property the DACL model rests on -- anchord runs as the user it
+        /// serves (anchor's `docs/07-lifecycle.md`, login-scoped).
+        ///
+        /// What this does not defend against, stated rather than implied: a
+        /// process running as the *same* user. That one can already read
+        /// anchord's memory, and no pipe check changes that.
+        fn verify_server(pipe: &NamedPipeClient) -> io::Result<()> {
+            let ours = sid::of_current_process()?;
+            let theirs = sid::of_pipe_server(pipe)?;
+            same_user(&ours, &theirs)
+        }
+
+        /// The comparison itself, apart from the system calls, so the refusal
+        /// is testable without a second account. SIDs have one binary
+        /// encoding, so byte equality is `EqualSid`.
+        pub(super) fn same_user(ours: &[u8], theirs: &[u8]) -> io::Result<()> {
+            if ours == theirs {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the pipe is served by a process running as another user; refusing to trust it as anchord",
+                ))
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use std::os::windows::io::AsRawHandle;
+
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::windows::named_pipe::ServerOptions;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Security::{
+                GetTokenInformation, RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
+                SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY,
+            };
+            use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+            use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+            /// The refusal, without needing a second account to provoke it.
+            #[test]
+            fn a_server_running_as_another_user_is_refused() {
+                let error = super::same_user(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0], &[1, 2, 3])
+                    .expect_err("different SIDs");
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                super::same_user(&[1, 2, 3], &[1, 2, 3]).expect("the same SID");
+            }
+
+            /// The serving process here is this one, so verification must
+            /// pass against a real pipe -- the positive half of the check,
+            /// through the real system calls.
+            #[test]
+            fn this_process_is_its_own_user() {
+                let a = super::sid::of_current_process().expect("our SID");
+                let b = super::sid::of_current_process().expect("our SID again");
+                assert_eq!(a, b);
+                assert!(a.len() >= 8, "a SID is at least 8 bytes: {a:?}");
+            }
+
+            /// What the server sees when it impersonates this client:
+            /// `SecurityIdentification`, never more.
+            ///
+            /// Asked of the kernel rather than of tokio's options, because
+            /// the claim is about what a server *can do*, and the only
+            /// honest witness to that is a server trying.
+            fn impersonation_level(server: HANDLE) -> SECURITY_IMPERSONATION_LEVEL {
+                // SAFETY: `server` is a connected pipe server handle that has
+                // read from its client, which impersonation requires.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let ok = unsafe { ImpersonateNamedPipeClient(server) };
+                assert_ne!(ok, 0, "impersonate: {}", std::io::Error::last_os_error());
+
+                // SAFETY: plain call; the pseudo-handle it returns needs no
+                // closing.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let thread = unsafe { GetCurrentThread() };
+                let mut token: HANDLE = std::ptr::null_mut();
+                // SAFETY: `thread` is valid; `token` is a valid out-pointer.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let opened = unsafe { OpenThreadToken(thread, TOKEN_QUERY, 1, &raw mut token) };
+                let mut level: SECURITY_IMPERSONATION_LEVEL = -1;
+                let mut len = 0_u32;
+                if opened != 0 {
+                    // SAFETY: `token` is a valid token handle and `level` is
+                    // exactly the size the class returns.
+                    #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                    unsafe {
+                        GetTokenInformation(
+                            token,
+                            TokenImpersonationLevel,
+                            (&raw mut level).cast(),
+                            u32::try_from(size_of_val(&level)).unwrap_or(4),
+                            &raw mut len,
+                        );
+                    }
+                    // SAFETY: `token` was opened above and is closed once.
+                    #[expect(unsafe_code, reason = "taking ownership of a Win32 handle")]
+                    drop(unsafe {
+                        <std::os::windows::io::OwnedHandle as std::os::windows::io::FromRawHandle>::from_raw_handle(token)
+                    });
+                }
+                // SAFETY: plain call; this thread is impersonating.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let reverted = unsafe { RevertToSelf() };
+                assert_ne!(reverted, 0, "this thread must stop impersonating");
+                assert_ne!(
+                    opened,
+                    0,
+                    "open thread token: {}",
+                    std::io::Error::last_os_error()
+                );
+                level
+            }
+
+            #[tokio::test(flavor = "current_thread")]
+            async fn the_client_connects_at_identification_level() {
+                let name = format!(r"\\.\pipe\tp-anchor-qos-{}", std::process::id());
+                let mut server = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&name)
+                    .expect("creating the pipe");
+                let accept = server.connect();
+                let (client, accepted) =
+                    tokio::join!(super::connect(std::path::Path::new(&name)), accept);
+                accepted.expect("accepting");
+                let (_read, mut write) = client.expect("connecting");
+                write.write_all(b"x").await.expect("writing");
+                let mut byte = [0_u8; 1];
+                server.read_exact(&mut byte).await.expect("reading");
+
+                // Synchronous from here: impersonation is per thread, so no
+                // await may come between it and the revert.
+                let level = impersonation_level(server.as_raw_handle());
+                assert_eq!(
+                    level, SecurityIdentification,
+                    "a server must not be able to act as the client"
+                );
+            }
+        }
+
+        /// Reading the user SID out of a process token. The only `unsafe` in
+        /// the anchor client, confined here.
+        mod sid {
+            use std::io;
+            use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+            use tokio::net::windows::named_pipe::NamedPipeClient;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Security::{
+                GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+            };
+            use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+            };
+
+            /// This process's user SID.
+            pub(super) fn of_current_process() -> io::Result<Vec<u8>> {
+                // SAFETY: `GetCurrentProcess` takes nothing and returns a
+                // pseudo-handle that needs no closing.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let process = unsafe { GetCurrentProcess() };
+                of_process(process)
+            }
+
+            /// The user SID of the process serving `pipe`'s other end.
+            ///
+            /// By pid, which is the one identity a client end can ask for.
+            /// The pid could in principle be reused between this call and
+            /// the next, by a process that would then have to belong to the
+            /// same user to pass -- a race that only ever fails closed.
+            pub(super) fn of_pipe_server(pipe: &NamedPipeClient) -> io::Result<Vec<u8>> {
+                let mut pid = 0_u32;
+                // SAFETY: the handle is `pipe`'s and outlives the call; `pid`
+                // is a valid out-pointer.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let ok = unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &raw mut pid) };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: plain call; a null result is checked below.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+                if raw.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `raw` is a fresh, owned process handle.
+                #[expect(unsafe_code, reason = "taking ownership of a Win32 handle")]
+                let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+                of_process(process.as_raw_handle())
+            }
+
+            /// The user SID on `process`'s primary token, as bytes.
+            fn of_process(process: HANDLE) -> io::Result<Vec<u8>> {
+                let mut raw: HANDLE = std::ptr::null_mut();
+                // SAFETY: `process` is a valid handle for the duration of the
+                // call; `raw` is a valid out-pointer.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut raw) };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `raw` is a fresh, owned token handle.
+                #[expect(unsafe_code, reason = "taking ownership of a Win32 handle")]
+                let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+
+                // Sized by asking: the first call fails and reports the
+                // length. `u64` storage keeps the buffer aligned for
+                // `TOKEN_USER`, which holds a pointer.
+                let mut len = 0_u32;
+                // SAFETY: a null buffer of length 0 is the documented way to
+                // query the size; `len` is a valid out-pointer.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                unsafe {
+                    GetTokenInformation(
+                        token.as_raw_handle(),
+                        TokenUser,
+                        std::ptr::null_mut(),
+                        0,
+                        &raw mut len,
+                    );
+                }
+                let words = (len as usize).div_ceil(8).max(1);
+                let mut buf = vec![0_u64; words];
+                // SAFETY: `buf` holds at least `len` bytes and is 8-aligned.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let ok = unsafe {
+                    GetTokenInformation(
+                        token.as_raw_handle(),
+                        TokenUser,
+                        buf.as_mut_ptr().cast(),
+                        len,
+                        &raw mut len,
+                    )
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: the call succeeded, so `buf` starts with an
+                // initialised, suitably aligned `TOKEN_USER`.
+                #[expect(unsafe_code, reason = "reading a Win32 out-structure")]
+                let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+                let sid = user.User.Sid;
+                // SAFETY: `sid` points at a valid SID inside `buf`.
+                #[expect(unsafe_code, reason = "Win32 call; no safe wrapper")]
+                let sid_len = unsafe { GetLengthSid(sid) } as usize;
+                // SAFETY: `GetLengthSid` says `sid_len` bytes at `sid` are the
+                // SID, and they live in `buf`, alive for this whole function.
+                #[expect(unsafe_code, reason = "reading a Win32 out-structure")]
+                let bytes = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), sid_len) };
+                Ok(bytes.to_vec())
+            }
         }
     }
 }

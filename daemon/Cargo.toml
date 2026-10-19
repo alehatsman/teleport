@@ -77,6 +77,19 @@ embedded-web = ["dep:rust-embed", "dep:mime_guess"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The anchor client's named-pipe arm: checking who serves the pipe before
+# trusting it (anchor docs/09-windows.md §4.2), which tokio does not expose.
+# Already in the tree at this version via tokio/mio, so it adds features, not
+# a crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # M4 protocol tests drive `api.rs` in-process (no real socket needed) and
 # `ws.rs` over a real one. `tower`'s `ServiceExt::oneshot` (a real
