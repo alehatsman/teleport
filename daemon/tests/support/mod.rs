@@ -412,6 +412,13 @@ pub(crate) mod anchord_endpoint {
 
     /// Points a to-be-spawned anchord at `dir` for its data and `endpoint`
     /// for its listener.
+    #[cfg_attr(
+        unix,
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only the Windows arm can fail, until anchord has a pipe override"
+        )
+    )]
     pub(crate) fn point_at(
         command: &mut std::process::Command,
         dir: &Path,
