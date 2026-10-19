@@ -151,6 +151,41 @@ Windows have no headless equivalent: a boot-time launch there needs a LaunchDaem
 an elevated/unattended Task Scheduler trigger, both of which cross the privilege line
 above, so those two stay login-scoped and reachable only from the tray.
 
+### anchord is not teleport's to start — on Windows too
+
+Decided 2026-10-19, while giving the anchor client a Windows transport
+(`feat/windows-anchor`), because Windows is where the temptation is strongest:
+anchor's own autostart story there is unsolved and may end in "none" (anchor
+`docs/09-windows.md` §4.7), and the desktop shell already knows how to start a
+detached process that outlives it (`daemon::spawn_detached`).
+
+**Teleport does not launch, supervise or restart `anchord` on any platform.**
+Not the daemon, not the CLI, not the desktop shell. Anchor's
+`docs/07-lifecycle.md` states the rule — *no client ever spawns anchord* — and
+the reason is the one this whole section turns on: a daemon started by a client
+lives on the client's clock. If the shell started `anchord.exe`, its lifetime
+would follow the shell's installs, updates and uninstalls, and the
+updates-must-not-kill-sessions argument above, which depends on anchord
+outliving every teleport update, would rest on teleport's own good behaviour
+rather than on a process teleport cannot touch. What starts anchord on Windows
+is anchor's step 5, or the user.
+
+What teleport does instead is what it does on Unix: resolve the endpoint
+(`Config::anchor_endpoint` — on Windows `\\.\pipe\anchor-<SID>`, anchor's rule),
+connect lazily, and report an anchord it cannot reach as an outage, not as an
+empty list (`503 backend_unavailable`, `/health`'s `anchor_reachable: false`).
+Making sure anchord is present on a host stays [20's Constraint
+4](20-retiring-the-in-process-pty.md#ordering): a dependency with a human in it.
+
+**WSL needs nothing from this.** A `teleportd` running inside WSL is a Linux
+host: it reaches a Linux `anchord` in the same distro over `AF_UNIX`, exactly as
+on any other Linux box. A WSL `teleportd` reaching a *Windows* `anchord` was
+considered and is not needed: the sessions it would host are Windows processes
+with Windows paths, a WSL2 Linux process cannot open `\\.\pipe\` without a relay
+(npiperelay and the like), and a relay would sit outside the owner check and
+DACL the pipe's whole security model rests on. The same holds the other way
+round. Nothing in these docs asks for either, so neither is built.
+
 ## Build pipeline
 
 ```text
