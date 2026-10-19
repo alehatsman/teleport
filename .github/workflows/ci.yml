@@ -30,17 +30,21 @@ concurrency:
 
 jobs:
 
-  # One gate, not two: `provision apply tasks/ci.yml` is what a developer runs
-  # before a push and what runs here, so the two cannot drift. It supersedes
-  # the four jobs that used to stand here -- daemon-fmt, cli-fmt, daemon-audit
-  # and cli-audit -- since it runs fmt itself and `cargo deny check
-  # advisories` is a superset of `cargo audit`.
+  # One gate, not two -- and one JOB, not two. `tasks/ci.yml` gates both
+  # crates in a single file (daemon with feature_args: "", then cli), so a
+  # job per crate ran the whole thing twice and the cli one did it without
+  # the anchord fixture the daemon's suite needs. It is the same command a
+  # developer runs before a push, so the two cannot drift.
+  #
+  # Supersedes daemon-fmt, cli-fmt, daemon-audit and cli-audit: the gate runs
+  # fmt itself, and `cargo deny check advisories` is a superset of
+  # `cargo audit`.
   #
   # The matrix jobs below stay. The gate runs on Linux; build, test and clippy
   # on macOS and Windows reach the `#[cfg(...)]` paths a Linux run never
   # compiles.
-  daemon-gate:
-    name: daemon (gate)
+  gate:
+    name: gate (daemon + cli)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +55,7 @@ jobs:
         with:
           workspaces: |
             daemon -> target
+            cli -> target
             anchor -> target
 
       # Same pinned anchor checkout as the matrix job below, for the same
@@ -78,23 +83,6 @@ jobs:
       - name: Gate
         run: provision apply tasks/ci.yml
 
-  cli-gate:
-    name: cli (gate)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: cli -> target
-      - name: Install provision
-        run: cargo install --locked --git https://github.com/alehatsman/provision.git
-      - name: Install the gate's tools
-        run: provision apply tasks/tools.yml
-      - name: Gate
-        run: provision apply tasks/ci.yml
   test-gates:
     name: daemon (target_os gates)
     runs-on: ubuntu-latest
