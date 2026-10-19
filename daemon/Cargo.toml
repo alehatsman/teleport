@@ -28,7 +28,6 @@ tokio              = { version = "1", features = ["rt-multi-thread", "macros", "
 axum               = { version = "0.8", features = ["ws"] }
 tower              = { version = "0.5", features = ["util"] }
 tower-http         = { version = "0.6", features = ["fs", "trace", "set-header"] }
-portable-pty       = "0.9"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
@@ -40,9 +39,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid               = "1"
 clap               = { version = "4", features = ["derive"] }
 directories        = "5"
-# `session.rs`'s locks never poison on panic-while-held -- a std::sync::Mutex
-# would take down every future call for that session (only that session, but
-# still) if anything ever panicked under one. Small, boring, no unsafe of its
+# Teleport's locks (`anchor_lease`, `anchor_watch`, `auth`) never poison on panic-while-held -- a std::sync::Mutex
+# would take down every future call through that lock if anything ever panicked
+# under one. Small, boring, no unsafe of its
 # own; MVP-wide review pass, 2026-09-05.
 parking_lot        = "0.12"
 # Not in docs/02-stack-decisions.md's pinned list; added to satisfy the "256 bits

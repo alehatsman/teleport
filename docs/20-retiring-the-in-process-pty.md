@@ -695,6 +695,40 @@ merge.**
 9. **Then delete**, in the order the seam collapses: config, `main.rs`,
    `api.rs`, `ws.rs`, then the modules. Keep the residue listed in
    [What stays](#what-stays).
+   **Prepared, 2026-10-20, on `feat/retire-in-process-pty`** (on top of
+   `feat/windows-anchor`), three commits in the order above: the seam, then
+   the session modules / `log.rs` / persistence's session half, then `pty.rs`
+   with `ConptyDsrProbe` and `pty_primitive_windows.rs` on their own so the
+   transfer can be held back alone. **Not merged, and not to be until step 8
+   holds** — it is the irreversible step, and it makes anchord mandatory on
+   every host including Windows ones. Checked: Windows 11 build 26200 against
+   anchord `972a6df`, `CI=1`, 150 passed, 0 failed; Linux (WSL) 209 passed, 0
+   failed against both the Unix CI pin `c755628` and `972a6df`; clippy
+   `-D warnings`, fmt and rustdoc clean on both. What it decided along the way,
+   so nobody has to rediscover it from the diff:
+   - **Old config keys still load.** `use_anchor`, `retain_days` and the two
+     log caps are accepted and ignored, pinned by a test — every host that
+     flipped the flag has a `config.toml` naming it. That also closes gap 11:
+     the log caps are deleted, being anchord's to apply.
+   - **The GC task goes** (open question below): it collected rows nothing
+     creates. The expired-login sweep that rode it has its own timer.
+   - **`Db::open` loses restart recovery.** The `sessions` and
+     `session_events` tables stay in the schema, written by nothing.
+   - **Gap 9 is fixed, not inherited:** an exited session reports no
+     `idle_since_ms`.
+   - **Tests.** The seven "vanish" files went as listed. Of the "rewrite"
+     list, `http_api.rs` and `ws_protocol.rs` now run against anchord through
+     `tests/support` unchanged; `attention_signals.rs`,
+     `osc_title_and_resume.rs`, `reconnect_storm.rs` and `pty_login_shell.rs`
+     turned out never to touch the anchor path at all — they drove
+     `SessionManager` directly, so they passed under `TELEPORT_TEST_ANCHOR`
+     for the reason this doc's "pass on both paths for different reasons"
+     warns about. Their assertions were checked one by one: bell, title and
+     resume id are in `anchor_http.rs`, idle is ported as unit tests, the
+     unrelated-link case is `osc.rs`'s, and the fan-out storm and login-shell
+     wrapping are anchord's subjects now. They were deleted, not rewritten.
+   - `tests/support` boots every daemon on the shared anchord from
+     `ANCHORD_BIN`; without it, anything that touches a session fails loudly.
 
 Steps 1–3 were worth doing regardless of whether the delete ever happens — they
 were bugs in the path teleport is moving to, and all three are now closed. What
@@ -742,20 +776,28 @@ validates it either way.
 ## Open questions
 
 - **Gap 11**: do `log_warn_bytes` / `log_max_bytes` get deleted, or
-  re-documented as anchord's to apply?
+  re-documented as anchord's to apply? **Answered on
+  `feat/retire-in-process-pty`: deleted** (still parsed, ignored).
 - **Gap 7**: is `delivered_to` or the authoritative offset the right
   `final_offset`? The anchor path's answer may be the better one, in which
   case the in-process path was wrong and this is a fix, not a regression.
 - Does the GC task (`main.rs:453`) have any role once anchord owns session
-  lifetime, or does it go with `recover()`?
+  lifetime, or does it go with `recover()`? **Answered: it goes, with
+  `recover()`**; the login sweep it carried has its own timer.
 - **Constraint 3**: what shape does the transport seam take? Teleport passes
   `anchor_socket` as a filesystem path today (`main.rs:576`); a named pipe is
   addressed differently, so either the config field becomes transport-agnostic
+  — **answered 2026-10-19: one field, platform meaning; a type-alias seam,
+  not a trait** (see Status of Constraint 3) —
   or each platform gets its own. Anchor's design decides; teleport conforms.
 - **Constraint 3**: is anchor's wire framing already transport-agnostic, or does
   it assume stream semantics a named pipe will not give it unchanged?
+  **Answered: agnostic.** Anchor's contract says the wire protocol is byte for
+  byte identical, and teleport's `too_large` write-error race test passes over
+  a real named pipe unchanged.
 - **Constraint 4**: should teleportd refuse to start when it cannot reach
   anchord, once anchord is mandatory? Today the client connects lazily, which is
   what turns a missing anchord into "healthy but useless" rather than a loud
   failure. Lazy connect is right while the in-process path exists and arguably
-  wrong after it goes.
+  wrong after it goes. **Still open**: the deletion branch keeps lazy connect,
+  and reports an absent anchord per request (`503`, `anchor_reachable: false`).

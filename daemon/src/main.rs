@@ -2,7 +2,7 @@
 //!
 //! M0 bound a listener and generated identity/token with no HTTP routes.
 //! **M4** adds the routes: loads `config.toml`/`presets.toml`, builds the
-//! `SessionManager` and `AppState`, and mounts `api.rs`'s router
+//! `AppState`, and mounts `api.rs`'s router
 //! (docs/11-mvp-plan.md#m4--http--websocket-api).
 
 use std::fs;
@@ -19,8 +19,6 @@ use tracing::{info, warn};
 
 use teleportd::api::{build_router, AppState};
 use teleportd::auth::{OriginPolicy, TicketStore};
-use teleportd::log::LogLimits;
-use teleportd::session::{SessionManager, IDLE_SWEEP_INTERVAL_MS, IDLE_THRESHOLD_MS};
 use teleportd::web_assets::WebAssets;
 use teleportd::{config, now_ms, presets};
 
@@ -136,19 +134,9 @@ async fn main() -> Result<()> {
     let config = config::Config::load(&data_dir)?;
     let presets = presets::load_or_create(&data_dir)?;
 
-    let sessions_root = data_dir.join("sessions");
-    // docs/01-architecture.md#startup-sequence: open SQLite, run migrations,
-    // mark stale sessions lost, reconcile output_bytes -- all before binding,
-    // so nothing can attach to a session the daemon hasn't finished
-    // recovering yet.
-    let (db, recovery) =
-        teleportd::persistence::Db::open(&data_dir.join("state.db"), &sessions_root)?;
-    if recovery.recovered_lost > 0 {
-        warn!(
-            count = recovery.recovered_lost,
-            "sessions recovered as lost after a restart"
-        );
-    }
+    // Opened before binding, so a migration failure stops startup before
+    // anything can be served from a half-upgraded store.
+    let db = teleportd::persistence::Db::open(&data_dir.join("state.db"))?;
 
     let listener = bind_with_fallback(cli.listen).await?;
     let bound_addr = listener
@@ -165,20 +153,7 @@ async fn main() -> Result<()> {
         println!("http://{}:{}", url_host, bound_addr.port());
     }
 
-    let log_limits = LogLimits {
-        warn_bytes: config.log_warn_bytes,
-        max_bytes: config.log_max_bytes,
-        ..LogLimits::default()
-    };
-    let sessions = SessionManager::with_limits(sessions_root.clone(), log_limits)
-        .with_max_sessions(config.max_sessions)
-        .with_db(db.clone());
-    spawn_gc_task(
-        db.clone(),
-        sessions_root,
-        config.retain_days,
-        sessions.live_handle(),
-    );
+    spawn_auth_sweep_task(db.clone());
     // The Vite dev origin is only ever legitimate against a debug build of
     // this binary itself (docs/06-security.md#browser-origin-defense).
     let origin_policy = OriginPolicy::new(
@@ -227,32 +202,24 @@ async fn main() -> Result<()> {
     // below, which otherwise only listens for Ctrl+C / SIGTERM.
     let shutdown_trigger = Arc::new(tokio::sync::Notify::new());
 
-    // Both paths are complete now: REST and WebSocket attach both reach
-    // anchord when this is on. It still defaults off — the in-process layer
-    // stays authoritative until teleport's own suite has run green against
-    // the anchor path and a release has shipped on it (anchor ROADMAP M5).
-    let anchor = if config.use_anchor {
-        let socket = config.anchor_endpoint()?;
-        tracing::info!(socket = %socket.display(), "sessions will run in anchord");
-        Some(teleportd::anchor_client::AnchorClient::new(socket))
-    } else {
-        None
-    };
+    // Every session lives in anchord; teleport spawns no PTY of its own
+    // (docs/20). Connecting is lazy, so an anchord that is not running yet
+    // is an outage the API reports per request, not a refusal to start.
+    let socket = config.anchor_endpoint()?;
+    tracing::info!(socket = %socket.display(), "sessions run in anchord");
+    let anchor = teleportd::anchor_client::AnchorClient::new(socket);
 
     // Follows every session teleport owns, so the fields the UI shows stay
     // truthful for sessions nobody currently has open.
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
-    if let Some(client) = &anchor {
-        teleportd::anchor_watch::spawn_supervisor(
-            client.clone(),
-            Arc::clone(&watch),
-            config.anchor_owner.clone(),
-            Some(db.clone()),
-        );
-    }
+    teleportd::anchor_watch::spawn_supervisor(
+        anchor.clone(),
+        Arc::clone(&watch),
+        config.anchor_owner.clone(),
+        Some(db.clone()),
+    );
 
     let state = Arc::new(AppState {
-        sessions,
         anchor,
         watch,
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
@@ -270,7 +237,6 @@ async fn main() -> Result<()> {
         bound_port: bound_addr.port(),
         passkeys,
     });
-    spawn_idle_sweep_task(Arc::clone(&state));
     let app = build_router(state);
 
     let serve_result = axum::serve(listener, app)
@@ -379,53 +345,19 @@ fn remove_port_file(data_dir: &Path) -> Result<()> {
     }
 }
 
-/// Runs once at startup and then every 6 hours for the life of the process
-/// (docs/05-persistence.md#garbage-collection): every `exited`/`lost` row
-/// whose `exited_at_ms` is older than `retain_days` has its directory
-/// deleted, then its row -- directory first, so a crash mid-GC leaves a row
-/// with no log rather than a log with no row. Detached (`tokio::spawn`, not
-/// awaited) -- GC is background housekeeping, not on any request path.
-/// D3 (docs/04-api-protocol.md#get-apiv1sessions): the
-/// only trigger for "output went quiet" is time passing with nothing
-/// happening, so unlike every other `session_events` write this one needs a
-/// clock, not a callback. Same shape as `spawn_gc_task` below.
-fn spawn_idle_sweep_task(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(IDLE_SWEEP_INTERVAL_MS));
-        loop {
-            interval.tick().await;
-            let now = now_ms();
-            for session in state.sessions.list() {
-                session.tick_idle(now, IDLE_THRESHOLD_MS);
-                // The trailing half of the OSC metadata write
-                // (docs/05-persistence.md#agent-reported-metadata): the
-                // reader thread writes the first change straight out and
-                // defers the rest, and a session that goes quiet right
-                // after its banner has no further output to carry them.
-                // Free to ride this tick -- it already walks every live
-                // session on a clock, for the same "only time can tell you
-                // nothing happened" reason.
-                session.flush_agent_meta(now);
-            }
-        }
-    });
-}
-
-fn spawn_gc_task(
-    db: teleportd::persistence::Db,
-    sessions_root: PathBuf,
-    retain_days: u64,
-    live: teleportd::session::LiveSessions,
-) {
+/// Expired login sessions, swept every 6 hours for the life of the process
+/// (docs/17-passkey-login.md#session-lifetime). They are already unusable --
+/// expiry is enforced in the lookup query -- so this is housekeeping, not
+/// enforcement.
+///
+/// Its own timer since the in-process layer went: it used to ride the
+/// session GC pass, and that pass had nothing left to collect once anchord
+/// owned every session's row and log (docs/20, seam site 4).
+fn spawn_auth_sweep_task(db: teleportd::persistence::Db) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_hours(6));
         loop {
             interval.tick().await;
-            run_gc_pass(&db, &sessions_root, retain_days, &live).await;
-            // Expired login sessions ride the same pass rather than a
-            // second timer (docs/17-passkey-login.md#session-lifetime).
-            // They are already unusable -- expiry is enforced in the lookup
-            // query -- so this is housekeeping, not enforcement.
             match db.sweep_expired_auth_sessions(now_ms()).await {
                 Ok(0) => {}
                 Ok(n) => info!(count = n, "swept expired login sessions"),
@@ -433,71 +365,6 @@ fn spawn_gc_task(
             }
         }
     });
-}
-
-/// Retention is capped to ~100 years -- `retain_days as i64 * a_day_in_ms`
-/// would otherwise wrap `i64` for a large enough `u64` config value (which
-/// an operator setting a huge number to mean "keep forever" could plausibly
-/// write), landing `cutoff_ms` in the *future* and making every exited/lost
-/// row an immediate GC candidate. There is no "retain forever" setting;
-/// the config doc should point operators at a large-but-finite number
-/// instead.
-const MAX_RETAIN_DAYS: u64 = 365 * 100;
-
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "one GC pass, several independent cleanup steps (rows, directories, live-session sweep) that each need their own error handling; splitting them out is a deliberate follow-up"
-)]
-async fn run_gc_pass(
-    db: &teleportd::persistence::Db,
-    sessions_root: &Path,
-    retain_days: u64,
-    live: &teleportd::session::LiveSessions,
-) {
-    let retain_days = i64::try_from(retain_days.min(MAX_RETAIN_DAYS))
-        .expect("MAX_RETAIN_DAYS (36,500) bounds this to a tiny number");
-    let cutoff_ms = now_ms() - retain_days * 24 * 60 * 60 * 1000;
-    let candidates = match db.gc_candidates(cutoff_ms).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "listing GC candidates failed");
-            return;
-        }
-    };
-    for row in candidates {
-        // `SessionManager` still holds this id live (an `exited` row not
-        // yet `?purge=true`'d) -- `api.rs`'s `find_session` checks that map
-        // first, so every request for it is still served from there, never
-        // this row. Deleting the directory now would break `/log` while
-        // `GET` keeps returning 200. Skip; retried next pass, and it drops
-        // out once the id is actually purged.
-        if live.contains(&row.id) {
-            continue;
-        }
-        let dir = sessions_root.join(&row.id);
-        // `remove_dir_all` is blocking I/O; off the async worker thread so
-        // a large or slow-to-delete directory can't stall other work on it
-        // (live PTY reads, WS frame delivery) for the duration.
-        let remove_result = {
-            let dir = dir.clone();
-            tokio::task::spawn_blocking(move || fs::remove_dir_all(&dir)).await
-        };
-        match remove_result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) if e.kind() == io::ErrorKind::NotFound => {}
-            Ok(Err(e)) => {
-                warn!(session_id = %row.id, error = %e, "GC: removing session directory failed");
-                continue; // row stays -- retried next pass, never deleted without its directory gone first.
-            }
-            Err(e) => {
-                warn!(session_id = %row.id, error = %e, "GC: directory-removal task panicked");
-                continue;
-            }
-        }
-        if let Err(e) = db.delete_session(&row.id).await {
-            warn!(session_id = %row.id, error = %e, "GC: deleting session row failed");
-        }
-    }
 }
 
 /// The host to print in the startup URL. A loopback bind prints `localhost`,

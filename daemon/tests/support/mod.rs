@@ -9,16 +9,12 @@
 //! promoting this to a dev-dependency), but the *source* -- and the
 //! assertions baked into it -- is written once.
 //!
-//! Two unrelated groups of consumers share this file rather than each
-//! getting their own: [`catch_up`] for `session_replay.rs`/
-//! `session_catchup.rs`/`session_backpressure.rs` (drives a `Replay` to the
-//! live boundary against an in-process `SessionManager`, no HTTP involved),
-//! and everything below it for `http_api.rs`/`ws_protocol.rs`
-//! (docs/10-testing.md#3-protocol-tests -- boots a real daemon on a loopback
-//! port). Each consumer only needs some of what's here (`catch_up` never
-//! touches HTTP; `http_api.rs` never opens a WebSocket; `ws_protocol.rs`
-//! never inspects `base_url`), and each is compiled as its own separate test
-//! binary -- hence the blanket `dead_code` allow rather than per-item ones.
+//! It boots a real daemon on a loopback port (docs/10-testing.md#3-protocol-tests)
+//! whose sessions live in one `anchord` per test binary, started from
+//! `ANCHORD_BIN`. There is no other session path to boot: the in-process PTY
+//! layer is gone (docs/20). Each consumer uses a different subset, and each
+//! is compiled as its own test binary -- hence the blanket `dead_code` allow
+//! rather than per-item ones.
 #![allow(
     dead_code,
     reason = "each test binary uses a different subset of this shared support module"
@@ -32,147 +28,9 @@ use teleportd::api::AppState;
 use teleportd::auth::{OriginPolicy, TicketStore};
 use teleportd::config::Config;
 use teleportd::device::Device;
-use teleportd::session::{Attach, Replay, ReplayStep, SessionManager};
 use teleportd::web_assets::WebAssets;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-
-/// Generous upper bound on rounds any fixture using [`catch_up`] should ever
-/// need. The "never converges" failure mode has its own deterministic
-/// coverage in session.rs's unit tests; this exists only so a real
-/// regression here hangs a test loudly and boundedly instead of forever.
-const MAX_TEST_ROUNDS: u32 = 1024;
-
-/// Drives a `Replay` to the live boundary the way M4's WS loop will: write
-/// each catch-up round out before asking for the next
-/// (docs/04-api-protocol.md#catch-up--register-late-not-early). `round_delay`
-/// paces each round -- `Duration::ZERO` for "as fast as possible" (most
-/// fixtures, where a `Vec` client always outruns the producer), nonzero to
-/// simulate a slow client's network round-trip
-/// (`session_catchup.rs`'s D1 gate, which needs the producer to gain ground
-/// on a genuinely slow consumer, not just an unrealistically instant one).
-///
-/// Returns every replayed byte (catch-up rounds and the final stretch
-/// together), the live handover, and how many bounded rounds it took.
-/// Rounds are asserted contiguous with each other; the join onto
-/// `Attach::replay_from` is the caller's to check, because a cap can
-/// legitimately move it forward. `attach.caught_up` is asserted here too --
-/// every caller of this helper drives a client that outruns the producer, so
-/// a catch-up that gives up and clamps means the fixture stopped testing
-/// what it says it tests, not a real assertion about the product.
-pub(crate) async fn catch_up(replay: Replay, round_delay: Duration) -> (Vec<u8>, Attach, u32) {
-    let mut acc = Vec::new();
-    let mut next = replay.replay_from;
-    let mut rounds = 0u32;
-    let mut step = replay.next_round().expect("first catch-up round");
-    loop {
-        match step {
-            ReplayStep::History {
-                offset,
-                bytes,
-                replay,
-            } => {
-                assert_eq!(offset, next, "catch-up rounds must be contiguous");
-                next = offset + bytes.len() as u64;
-                acc.extend_from_slice(&bytes);
-                rounds += 1;
-                assert!(
-                    rounds <= MAX_TEST_ROUNDS,
-                    "catch-up did not converge within {MAX_TEST_ROUNDS} rounds"
-                );
-                tokio::time::sleep(round_delay).await; // the "network"
-                step = replay.written(bytes).expect("catch-up round");
-            }
-            ReplayStep::Live(attach) => {
-                assert!(
-                    attach.caught_up,
-                    "a client that always outruns the producer must converge"
-                );
-                acc.extend_from_slice(&attach.replay);
-                return (acc, attach, rounds);
-            }
-        }
-    }
-}
-
-/// Like [`catch_up`], but for a caller that expects some of its concurrent
-/// clients to lose the race against the producer -- N4's reconnect-storm
-/// fixture, where `STORM_SIZE` clients all attach at once against an
-/// unbounded `yes` and some are expected to hit the same
-/// stalled/total-round clamp D1's own fixture in `session_catchup.rs`
-/// exercises deliberately. Always paced at `Duration::ZERO`: a storm client
-/// is modeling "reconnect as fast as possible," not a slow network.
-pub(crate) fn catch_up_allow_clamp(replay: Replay) -> (Vec<u8>, Attach, u32) {
-    let mut acc = Vec::new();
-    let mut next = replay.replay_from;
-    let mut rounds = 0u32;
-    let mut step = replay.next_round().expect("first catch-up round");
-    loop {
-        match step {
-            ReplayStep::History {
-                offset,
-                bytes,
-                replay,
-            } => {
-                assert_eq!(offset, next, "catch-up rounds must be contiguous");
-                next = offset + bytes.len() as u64;
-                acc.extend_from_slice(&bytes);
-                rounds += 1;
-                assert!(
-                    rounds <= MAX_TEST_ROUNDS,
-                    "catch-up did not converge within {MAX_TEST_ROUNDS} rounds"
-                );
-                step = replay.written(bytes).expect("catch-up round");
-            }
-            ReplayStep::Live(attach) => {
-                acc.extend_from_slice(&attach.replay);
-                return (acc, attach, rounds);
-            }
-        }
-    }
-}
-
-/// Waits until a session's producer has reached `target`, failing only when
-/// it **stops**.
-///
-/// This is a precondition, not an assertion: a fixture that needs a 12 MiB
-/// backlog before it can begin is not testing how fast the machine produces
-/// one. A fixed total deadline turns it into exactly that measurement — the
-/// whole family (#68, #102, #103, #104) went red together on a loaded box
-/// while every byte was still arriving, correctly, a little slower.
-///
-/// So patience is spent on *stalling*, not on elapsed time: any progress
-/// resets the budget, and only an unbroken streak of samples with the offset
-/// unmoved fails. A wedged producer still fails inside `STALL_BUDGET`; a slow
-/// one finishes and the fixture goes on to test what it says it tests. Slow
-/// is not stuck — anchor's rule, which their own `terminate` fixture earned
-/// the hard way.
-pub(crate) async fn await_offset(session: &teleportd::session::Session, target: u64, what: &str) {
-    /// How often to look.
-    const SAMPLE: Duration = Duration::from_millis(50);
-    /// Consecutive unmoved samples that count as stopped: ~10s of silence.
-    const STALL_BUDGET: u32 = 200;
-
-    let mut last = 0;
-    let mut stalled = 0u32;
-    loop {
-        let now = session.next_offset();
-        if now >= target {
-            return;
-        }
-        if now == last {
-            stalled += 1;
-            assert!(
-                stalled < STALL_BUDGET,
-                "{what}: the producer stopped at {now}/{target} and stayed there"
-            );
-        } else {
-            stalled = 0;
-            last = now;
-        }
-        tokio::time::sleep(SAMPLE).await;
-    }
-}
 
 pub(crate) const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -256,10 +114,11 @@ pub(crate) struct Anchord {
 }
 
 impl Anchord {
-    /// `None` unless `TELEPORT_TEST_ANCHOR` and `ANCHORD_BIN` are both set.
+    /// `None` unless `ANCHORD_BIN` is set. Every fixture that creates a
+    /// session then fails loudly against an unreachable endpoint rather than
+    /// passing by not running (#108): anchord is a requirement, not an option.
     fn start_if_requested() -> Option<Self> {
-        std::env::var_os("TELEPORT_TEST_ANCHOR")?;
-        let raw = std::env::var_os("ANCHORD_BIN").expect("TELEPORT_TEST_ANCHOR needs ANCHORD_BIN");
+        let raw = std::env::var_os("ANCHORD_BIN")?;
         let bin = PathBuf::from(&raw);
         assert!(bin.is_file(), "ANCHORD_BIN is set to {raw:?}, not a file");
 
@@ -471,17 +330,6 @@ impl Drop for Daemon {
     }
 }
 
-fn sessions_root(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "teleportd-protocol-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before 1970")
-            .as_nanos()
-    ))
-}
-
 /// Boots a real daemon (real `TcpListener`, real `axum::serve`) on an
 /// ephemeral loopback port with the given config, for tests that need an
 /// actual WebSocket connection rather than an in-process request. Dropping
@@ -495,8 +343,7 @@ pub(crate) async fn spawn(config: Config) -> Daemon {
 /// docs/19-locations.md#pins). Its files land under `dir`, which the caller
 /// owns and cleans up.
 pub(crate) async fn spawn_with_db(config: Config, dir: &Path) -> Daemon {
-    let (db, _) = teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
-        .expect("open test db");
+    let db = teleportd::persistence::Db::open(&dir.join("state.db")).expect("open test db");
     spawn_with_web_dist(config, None, Some(db)).await
 }
 
@@ -549,28 +396,31 @@ async fn spawn_inner(
     // unique owner per fixture is exactly the isolation the product already
     // gives two real tools sharing a daemon.
     let anchor = match (anchor, shared_anchord_socket()) {
-        (Some(client), _) => Some(client),
+        (Some(client), _) => client,
         (None, Some(socket)) => {
             wipe_shared_daemon(socket.as_path()).await;
             config.anchor_owner = format!("test-{}", next_owner_id());
-            Some(teleportd::anchor_client::AnchorClient::new(socket))
+            teleportd::anchor_client::AnchorClient::new(socket)
         }
-        (None, None) => None,
+        // No ANCHORD_BIN: an endpoint nothing listens on. Fixtures that never
+        // touch a session (static assets, shutdown, health) still run; any
+        // that do get the 503 an absent anchord deserves.
+        (None, None) => teleportd::anchor_client::AnchorClient::new(anchord_endpoint::endpoint_in(
+            &anchord_endpoint::scratch_root().join("tp-no-anchord"),
+            "no-anchord",
+        )),
     };
 
     // Fixtures get the supervisor too, so the anchor path they exercise is
     // the one that ships rather than a quieter variant of it.
     let watch = Arc::new(teleportd::anchor_watch::WatchRegistry::new());
-    if let Some(client) = &anchor {
-        teleportd::anchor_watch::spawn_supervisor(
-            client.clone(),
-            Arc::clone(&watch),
-            config.anchor_owner.clone(),
-            db.clone(),
-        );
-    }
+    teleportd::anchor_watch::spawn_supervisor(
+        anchor.clone(),
+        Arc::clone(&watch),
+        config.anchor_owner.clone(),
+        db.clone(),
+    );
 
-    let sessions = SessionManager::new(sessions_root("ws")).with_max_sessions(config.max_sessions);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -586,9 +436,6 @@ async fn spawn_inner(
     let config_origins = config.allowed_origins.clone();
     let config_hosts = config.allowed_hosts.clone();
     let state = Arc::new(AppState {
-        sessions,
-        // `None` for the in-process path, which is what most fixtures
-        // drive; `Some` routes sessions to a real anchord.
         anchor,
         watch: Arc::clone(&watch),
         leases: Arc::new(teleportd::anchor_lease::LeaseRegistry::new()),
@@ -635,78 +482,42 @@ pub(crate) fn default_config() -> Config {
     Config::default()
 }
 
-/// Creates a `shell`-kind `/bin/sh` session directly through the
-/// `SessionManager` (bypassing HTTP) -- the fastest way for a WS-focused
-/// test to get a session id to attach to.
-/// A session's authoritative output offset, from whichever backend holds
-/// it.
-///
-/// Reaching into `state.sessions` asserts the same thing but only on the
-/// in-process path; a test that does so is pinned to an implementation
-/// rather than to the protocol it means to check.
+/// A session's authoritative output offset, as anchord reports it.
 pub(crate) async fn session_offset(daemon: &Daemon, id: teleportd::session::SessionId) -> u64 {
-    match &daemon.state.anchor {
-        Some(anchor) => {
-            anchor
-                .get(&id.to_string())
-                .await
-                .expect("anchord knows the session")
-                .output_bytes
-        }
-        None => daemon
-            .state
-            .sessions
-            .get(id)
-            .expect("session still listed")
-            .next_offset(),
-    }
+    daemon
+        .state
+        .anchor
+        .get(&id.to_string())
+        .await
+        .expect("anchord knows the session")
+        .output_bytes
 }
 
-/// Creates a session in whichever backend this daemon uses.
-///
-/// Routing by backend matters: creating in the in-process manager while the
-/// daemon serves from anchord gives a session the API cannot see, and every
-/// test that then attaches gets `not_found` — which looks like a protocol
-/// bug and is really a fixture talking to the wrong store.
+/// Creates a `/bin/sh` session straight in anchord (bypassing HTTP) -- the
+/// fastest way for a WS-focused test to get a session id to attach to.
 pub(crate) async fn create_shell_session(
     daemon: &Daemon,
     args: &[String],
 ) -> teleportd::session::SessionId {
     let cwd = std::env::temp_dir();
-    if let Some(anchor) = &daemon.state.anchor {
-        let id = anchor
-            .create(
-                &teleportd::anchor_client::AnchorSpec {
-                    command: "/bin/sh".to_string(),
-                    args: args.to_vec(),
-                    cwd,
-                    env: std::collections::BTreeMap::new(),
-                    cols: 80,
-                    rows: 24,
-                    login_shell: false,
-                },
-                &std::collections::BTreeMap::new(),
-            )
-            .await
-            .expect("create session in anchord");
-        return id.parse().expect("anchord returns a ULID");
-    }
-
-    let spec = teleportd::pty::SpawnSpec {
-        program: "/bin/sh",
-        args,
-        cwd: &cwd,
-        env: &[],
-        cols: 80,
-        rows: 24,
-        login_shell: false,
-    };
-    let session = daemon
+    let id = daemon
         .state
-        .sessions
-        .create(&spec, "shell", None)
-        .expect("create session");
-    session.id
+        .anchor
+        .create(
+            &teleportd::anchor_client::AnchorSpec {
+                command: "/bin/sh".to_string(),
+                args: args.to_vec(),
+                cwd,
+                env: std::collections::BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                login_shell: false,
+            },
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .expect("create session in anchord");
+    id.parse().expect("anchord returns a ULID")
 }
 
 /// The shell an anchor fixture spawns its scripts in, per platform.

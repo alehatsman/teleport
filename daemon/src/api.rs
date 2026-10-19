@@ -32,11 +32,9 @@ use crate::anchor_bridge;
 use crate::auth::{self, AuthError, OriginPolicy, Principal};
 use crate::config::Config;
 use crate::device::Device;
-use crate::log::LogReader;
 use crate::persistence;
 use crate::presets::Preset;
-use crate::pty::SpawnSpec;
-use crate::session::{CreateError, SessionId, SessionManager, SessionState};
+use crate::session::{CreateError, SessionId};
 use crate::web_assets::WebAssets;
 
 /// Shared state for every handler and the WS upgrade. One instance, built
@@ -45,26 +43,16 @@ use crate::web_assets::WebAssets;
 /// behind an `Arc` for the life of the process.
 #[derive(Debug)]
 pub struct AppState {
-    /// Every live session.
-    pub sessions: SessionManager,
-    /// Set when `config.use_anchor` is on: sessions live in an external
-    /// `anchord` rather than this process.
-    ///
-    /// `None` is the authoritative path today. Both exist on purpose during
-    /// the extraction — see anchor's `ROADMAP.md` M4, which flips the
-    /// default only once this suite passes against the anchor path.
-    pub anchor: Option<crate::anchor_client::AnchorClient>,
-    /// What teleport has derived from anchor-hosted sessions' output —
-    /// title, resume id, bell, idleness. Empty on the in-process path,
-    /// where the PTY reader derives them as it goes.
+    /// The `anchord` every session lives in. There is no other session
+    /// path: teleport spawns no PTY of its own (docs/20).
+    pub anchor: crate::anchor_client::AnchorClient,
+    /// What teleport has derived from its sessions' output -- title, resume
+    /// id, bell, idleness.
     pub watch: Arc<crate::anchor_watch::WatchRegistry>,
-    /// Control leases for anchor-hosted sessions. Unused on the in-process
-    /// path, where the lease lives on each `Session`.
+    /// Control leases: which browser may type into which session.
     pub leases: Arc<crate::anchor_lease::LeaseRegistry>,
-    /// `None` in most test fixtures (docs/11-mvp-plan.md#m7); a session id
-    /// that `sessions.get` doesn't know about falls back to this for `GET`
-    /// and `/log` -- a `lost`/`exited` row from before this process started
-    /// (persistence.rs's module doc explains why those aren't `Session`s).
+    /// Auth sessions, passkeys, pins and anchor-derived titles. `None` in
+    /// most test fixtures (docs/11-mvp-plan.md#m7).
     pub db: Option<persistence::Db>,
     /// The daemon's own effective configuration.
     pub config: Config,
@@ -161,21 +149,16 @@ pub enum ApiError {
     /// The credential itself was missing or invalid -- `401`/`403`
     /// (see [`AuthError`]).
     Auth(AuthError),
-    /// No such session, live or historical -- `404`.
+    /// No such session -- `404`.
     NotFound,
-    /// A session id that's a valid, known row, but whose log GC has already
-    /// deleted (docs/05-persistence.md#garbage-collection: directory first,
-    /// row second) -- distinct from `NotFound`, which means no such id was
-    /// ever known at all.
-    Gone,
     /// The request itself was malformed -- `400`.
     BadRequest(String),
-    /// A `historical_row` lookup failed for a reason that isn't "no such
-    /// row" -- the db-writer thread is gone, or a real SQLite I/O error.
-    /// Kept distinct from `NotFound` so a persistence outage doesn't read as
-    /// an ordinary unknown id on monitoring built on this route's 404 rate.
+    /// Something failed that is neither the caller's fault nor a known
+    /// session's absence -- `500`. Kept distinct from `NotFound` so an
+    /// outage doesn't read as an ordinary unknown id on monitoring built on
+    /// a route's 404 rate.
     Internal(String),
-    /// `SessionManager::create` refused the request -- see [`CreateError`]
+    /// The create was refused -- see [`CreateError`]
     /// for the status-code mapping.
     Create(CreateError),
     /// The pin cap is reached and the request would add one more -- `429`
@@ -223,11 +206,6 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "session not found".to_string(),
-            ),
-            ApiError::Gone => (
-                StatusCode::GONE,
-                "gone",
-                "session log no longer available (garbage collected)".to_string(),
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", msg),
@@ -318,7 +296,7 @@ const CSP_DIRECTIVES: &[&str] = &[
 ];
 
 /// Wires every `/api/v1/*` route (and the WS upgrade) onto `state`. The one
-/// router `main.rs` serves and `tests/support` boots for in-process tests.
+/// router `main.rs` serves and `tests/support` boots for its fixtures.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/api/v1/health", get(health))
@@ -575,11 +553,9 @@ const SESSIONS_SURVIVE_RESTART: &str = "sessions_survive_restart";
 /// flag that usually produces one: the capability is a promise about where
 /// sessions are right now, and a promise read from intent rather than from
 /// fact is the kind that gets broken.
-fn capabilities(state: &AppState) -> Vec<&'static str> {
+fn capabilities() -> Vec<&'static str> {
     let mut caps = CAPABILITIES.to_vec();
-    if state.anchor.is_some() {
-        caps.push(SESSIONS_SURVIVE_RESTART);
-    }
+    caps.push(SESSIONS_SURVIVE_RESTART);
     caps
 }
 
@@ -601,7 +577,7 @@ async fn health(
         "status": "ok",
         "version": state.version,
         "api_versions": API_VERSIONS,
-        "capabilities": capabilities(&state),
+        "capabilities": capabilities(),
     });
     #[expect(
         clippy::indexing_slicing,
@@ -632,39 +608,29 @@ async fn health(
         body["ui_version"] = state.web.ui_version().into();
         body["pid"] = std::process::id().into();
         body["uptime_ms"] = (state.started_at.elapsed().as_millis() as u64).into();
-        // Counted wherever the sessions actually live. Reporting the
-        // in-process manager's count on the anchor path would report zero
-        // while sessions run, which is worse than not reporting it:
-        // health is what a supervisor decides to restart on.
-        body["sessions_running"] = match &state.anchor {
+        // Counted in anchord, where the sessions live; health is what a
+        // supervisor decides to restart on.
+        body["sessions_running"] = match state
+            .anchor
+            .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
+            .await
+        {
             // An unreachable anchord is reported as unknown, never as
             // zero. The updater reads this field together with
             // `sessions_survive_restart` to decide whether it may restart
             // under load; a zero here would be a confident claim that
             // there is nothing to lose, made at the exact moment the
             // daemon holding it cannot be asked.
-            Some(anchor) => match anchor
-                .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
-                .await
-            {
-                Ok(sessions) => sessions
-                    .iter()
-                    .filter(|s| s.state == "running")
-                    .count()
-                    .into(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "counting anchord's sessions for health failed");
-                    body["anchor_reachable"] = false.into();
-                    serde_json::Value::Null
-                }
-            },
-            None => state
-                .sessions
-                .list()
+            Ok(sessions) => sessions
                 .iter()
-                .filter(|s| s.state() == SessionState::Running)
+                .filter(|s| s.state == "running")
                 .count()
                 .into(),
+            Err(e) => {
+                tracing::warn!(error = %e, "counting anchord's sessions for health failed");
+                body["anchor_reachable"] = false.into();
+                serde_json::Value::Null
+            }
         };
     }
     Json(body)
@@ -698,8 +664,8 @@ struct CreateSessionResponse {
 /// `POST /api/v1/sessions` (docs/04-api-protocol.md#post-apiv1sessions).
 /// Merges preset defaults under explicit fields, validates `cols`/`rows`
 /// (`400` if out of range -- request-shape validation, distinct from the
-/// `422`s [`SessionManager::create`] itself raises for an unresolvable
-/// executable or `cwd`), then spawns.
+/// `422`s anchord raises for an unresolvable executable or `cwd`), then
+/// spawns in anchord.
 async fn create_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -736,83 +702,67 @@ async fn create_session(
     // request rather than a fork/exec here. Teleport's own `kind`/`preset`
     // travel as labels -- anchor has no column for them and should not grow
     // one (`anchor_bridge`).
-    if let Some(anchor) = &state.anchor {
-        // max_sessions is teleport's policy, so teleport enforces it.
-        // anchord has a cap of its own but it is a different daemon's
-        // setting, and leaving this unchecked would silently drop a limit
-        // docs/06-security.md#process-spawning treats as load-bearing.
-        //
-        // Counted, not reserved: two creates racing can both pass. The
-        // in-process path reserves a slot because it can; across a socket
-        // that would need a reservation protocol for a cap whose job is
-        // stopping runaway loops, not arbitrating a photo finish.
-        let live = anchor
-            .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?
-            .into_iter()
-            .filter(|s| s.state == "running" || s.state == "closing")
-            .count();
-        if live >= state.config.max_sessions {
-            return Err(ApiError::Create(CreateError::MaxSessions(
-                state.config.max_sessions,
-            )));
-        }
-
-        let labels =
-            anchor_bridge::labels_for(&state.config.anchor_owner, &kind, preset_id.as_deref());
-        let spec = anchor_bridge::spec_for(command, args, cwd, env, cols, rows, login_shell);
-        let id = anchor
-            .create(&spec, &labels)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        let session = anchor
-            .get(&id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        return Ok((
-            StatusCode::CREATED,
-            Json(CreateSessionResponse {
-                id: session.id,
-                state: state_str(&session.state),
-                pid: session.pid,
-                output_offset: session.output_bytes,
-            }),
-        ));
+    let anchor = &state.anchor;
+    // max_sessions is teleport's policy, so teleport enforces it.
+    // anchord has a cap of its own but it is a different daemon's
+    // setting, and leaving this unchecked would silently drop a limit
+    // docs/06-security.md#process-spawning treats as load-bearing.
+    //
+    // Counted, not reserved: two creates racing can both pass. Reserving
+    // across a socket would need a reservation protocol for a cap whose
+    // job is stopping runaway loops, not arbitrating a photo finish.
+    let live = anchor
+        .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?
+        .into_iter()
+        .filter(|s| s.state == "running" || s.state == "closing")
+        .count();
+    if live >= state.config.max_sessions {
+        return Err(ApiError::Create(CreateError::MaxSessions(
+            state.config.max_sessions,
+        )));
     }
 
-    // `SessionManager::create` does blocking filesystem work (validating
-    // `cwd`, a `$PATH` scan to resolve the executable) and an OS-level
-    // fork/exec -- run it on the blocking pool so a slow/contended
-    // filesystem or spawn doesn't stall this worker thread's other
-    // in-flight requests (M4 review: this used to run inline on the async
-    // handler). `SpawnSpec` borrows `command`/`args`/`cwd`/`env`, so it's
-    // built inside the closure rather than moved in already constructed.
-    // `state` isn't needed again after this, so it moves in whole.
-    let session = tokio::task::spawn_blocking(move || {
-        let spec = SpawnSpec {
-            program: &command,
-            args: &args,
-            cwd: &cwd,
-            env: &env,
-            cols,
-            rows,
-            login_shell,
-        };
-        state.sessions.create(&spec, kind, preset_id)
-    })
-    .await
-    .map_err(|e| ApiError::Create(CreateError::Spawn(e.into())))??;
-
+    let labels = anchor_bridge::labels_for(&state.config.anchor_owner, &kind, preset_id.as_deref());
+    let spec = anchor_bridge::spec_for(command, args, cwd, env, cols, rows, login_shell);
+    let id = anchor
+        .create(&spec, &labels)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    let session = anchor
+        .get(&id)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
-            id: session.id.to_string(),
-            state: session.state().as_str(),
-            pid: session.pid(),
-            output_offset: session.next_offset(),
+            id: session.id,
+            state: state_str(&session.state),
+            pid: session.pid,
+            output_offset: session.output_bytes,
         }),
     ))
+}
+
+/// When a session went quiet, if it is running and has been quiet for the
+/// threshold. `None` for any other state.
+///
+/// The state guard is gap 9's fix (docs/20): the in-process path only ever
+/// reported idleness for a running session, and the anchor path's derived
+/// timestamp has no notion of state, so an exited session kept reporting
+/// the idle time it had when it died. An exited session is not idle, it is
+/// over -- and a UI badging it "idle" invites someone to go and look at
+/// nothing.
+fn idle_since(
+    state: &str,
+    derived: Option<&crate::anchor_watch::Derived>,
+    now_ms: i64,
+) -> Option<i64> {
+    if state != "running" {
+        return None;
+    }
+    derived.and_then(|d| d.idle_since_ms(now_ms))
 }
 
 /// Anchor reports state as a string; teleport's response field is a
@@ -912,7 +862,7 @@ impl SessionView {
             controller: leases.controller_name(&s.id),
             subscribers: leases.subscriber_count(&s.id),
             last_bell_ms: derived.and_then(|d| d.last_bell_ms),
-            idle_since_ms: derived.and_then(|d| d.idle_since_ms(crate::now_ms())),
+            idle_since_ms: idle_since(&s.state, derived, crate::now_ms()),
             title: derived.and_then(|d| d.title.clone()),
             // The label first, the watcher second. The label is authoritative
             // and needs no watcher to have seen the session -- which is the
@@ -925,141 +875,41 @@ impl SessionView {
                 .or_else(|| derived.and_then(|d| d.claude_resume_id.clone())),
         }
     }
-
-    fn from(session: &crate::session::Session) -> Self {
-        let (cols, rows) = session.size();
-        SessionView {
-            id: session.id.to_string(),
-            kind: session.meta.kind.clone(),
-            preset: session.meta.preset.clone(),
-            command: session.meta.command.clone(),
-            args: session.meta.args.clone(),
-            cwd: session.meta.cwd.display().to_string(),
-            state: session.state().as_str().to_string(),
-            pid: session.pid(),
-            cols,
-            rows,
-            output_bytes: session.next_offset(),
-            created_at_ms: session.created_at_ms(),
-            started_at_ms: session.started_at_ms(),
-            exited_at_ms: session.exited_at_ms(),
-            exit_code: session.exit_code(),
-            lost_reason: session.lost_reason().map(|r| r.as_str().to_string()),
-            controller: session.controller_name(),
-            subscribers: session.subscriber_count(),
-            last_bell_ms: session.last_bell_ms(),
-            idle_since_ms: session.idle_since_ms(),
-            title: session.title(),
-            claude_resume_id: session.claude_resume_id(),
-        }
-    }
-
-    /// A DB-only historical row -- no live `Session` behind it, so
-    /// `controller`/`subscribers` are always the "nobody's here" values
-    /// (docs/05-persistence.md; persistence.rs's module doc on why a
-    /// recovered row is never a `Session`). Same reasoning for
-    /// `last_bell_ms`/`idle_since_ms`: attention signals are "does this
-    /// running session need you," which a closed session never does.
-    /// `title`/`claude_resume_id` *are* persisted, and come straight off
-    /// the row (docs/05-persistence.md#agent-reported-metadata) -- a
-    /// resume id is only ever useful once the session that had it is gone,
-    /// and the usual way it goes is the daemon restarting under it, so
-    /// live-only made the field null in exactly its own use case.
-    fn from_row(row: &persistence::SessionRow) -> Self {
-        SessionView {
-            id: row.id.clone(),
-            kind: row.kind.clone(),
-            preset: row.preset.clone(),
-            command: row.command.clone(),
-            args: row.args.clone(),
-            cwd: row.cwd.clone(),
-            state: row.state.clone(),
-            pid: row.pid,
-            cols: row.cols,
-            rows: row.rows,
-            output_bytes: row.output_bytes,
-            created_at_ms: row.created_at_ms,
-            started_at_ms: row.started_at_ms,
-            exited_at_ms: row.exited_at_ms,
-            exit_code: row.exit_code,
-            lost_reason: row.lost_reason.clone(),
-            controller: None,
-            subscribers: 0,
-            last_bell_ms: None,
-            idle_since_ms: None,
-            title: row.title.clone(),
-            claude_resume_id: row.claude_resume_id.clone(),
-        }
-    }
 }
 
 /// `GET /api/v1/sessions` (docs/04-api-protocol.md#get-apiv1sessions).
-/// Sorted newest-first; `env` never appears (it is never stored on
-/// [`crate::session::Session`] in the first place --
-/// docs/06-security.md#secrets-and-environment).
-///
-/// Merges live sessions (this process, from `SessionManager`) with rows
-/// SQLite knows about that this process never spawned -- a `lost`/`exited`
-/// session from before the last restart. A live entry always wins on a
-/// duplicate id: it's fresher (`controller`/`subscribers` a DB row can't
-/// have), and a live session's own row can itself be stale for up to a
-/// second (docs/05-persistence.md#when-output_bytes-is-written).
+/// Sorted newest-first; `env` never appears (anchord does not echo a spec's
+/// environment back -- docs/06-security.md#secrets-and-environment).
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // On the anchor path anchord is the source of truth, and its own list
-    // already folds live sessions over stored rows. Teleport's SQLite rows
-    // are deliberately not merged in: they describe sessions from the
-    // in-process era that no longer exist anywhere, and showing entries a
-    // client cannot open is worse than not showing them.
-    if let Some(anchor) = &state.anchor {
-        // Never an empty list on failure. A client cannot tell that from
-        // "you have no sessions", and on this path that difference is the
-        // difference between a visible outage and silently vanished work.
-        let sessions = anchor
-            .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
-            .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "listing sessions from anchord failed");
-                ApiError::BackendUnavailable(format!("cannot reach anchord: {e}"))
-            })?;
-        let mut views: Vec<SessionView> = sessions
-            .into_iter()
-            .map(|s| {
-                let derived = state.watch.get(&s.id);
-                SessionView::from_anchor(
-                    &anchor_bridge::BridgedSession::new(s),
-                    derived.as_ref(),
-                    &state.leases,
-                )
-            })
-            .collect();
-        views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
-        return Ok(Json(serde_json::json!({ "sessions": views })));
-    }
-
-    let live = state.sessions.list();
-    let live_ids: std::collections::HashSet<SessionId> = live.iter().map(|s| s.id).collect();
-    let mut views: Vec<SessionView> = live.iter().map(|s| SessionView::from(s)).collect();
-
-    if let Some(db) = &state.db {
-        match db.list_sessions().await {
-            Ok(rows) => {
-                for row in &rows {
-                    let is_live = row
-                        .id
-                        .parse::<SessionId>()
-                        .is_ok_and(|id| live_ids.contains(&id));
-                    if !is_live {
-                        views.push(SessionView::from_row(row));
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "listing historical sessions from SQLite failed"),
-        }
-    }
-
+    // anchord is the source of truth, and its own list already folds live
+    // sessions over stored rows. Teleport's old `sessions` rows are not
+    // merged in: they describe sessions from the in-process era that no
+    // longer exist anywhere.
+    // Never an empty list on failure. A client cannot tell that from
+    // "you have no sessions", and on this path that difference is the
+    // difference between a visible outage and silently vanished work.
+    let sessions = state
+        .anchor
+        .list(&anchor_bridge::owned_by(&state.config.anchor_owner))
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "listing sessions from anchord failed");
+            ApiError::BackendUnavailable(format!("cannot reach anchord: {e}"))
+        })?;
+    let mut views: Vec<SessionView> = sessions
+        .into_iter()
+        .map(|s| {
+            let derived = state.watch.get(&s.id);
+            SessionView::from_anchor(
+                &anchor_bridge::BridgedSession::new(s),
+                derived.as_ref(),
+                &state.leases,
+            )
+        })
+        .collect();
     views.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
     Ok(Json(serde_json::json!({ "sessions": views })))
 }
@@ -1069,43 +919,17 @@ async fn get_session(
     _principal: Principal,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(anchor) = &state.anchor {
-        let session = anchor
-            .get(&id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        let derived = state.watch.get(&session.id);
-        return Ok(Json(SessionView::from_anchor(
-            &anchor_bridge::BridgedSession::new(session),
-            derived.as_ref(),
-            &state.leases,
-        )));
-    }
-    if let Ok(session) = find_session(&state, &id) {
-        return Ok(Json(SessionView::from(&session)));
-    }
-    let row = historical_row(&state, &id).await?;
-    Ok(Json(SessionView::from_row(&row)))
-}
-
-/// The DB-fallback half of `get_session`/`get_log`/`delete_session`: a
-/// session id that isn't live falls back to SQLite; `404` if nothing knows
-/// about it (`db: None` included -- same as before M7, and a malformed id
-/// can't be a row by construction), `500` if the lookup itself failed (the
-/// db-writer thread is gone, or a genuine SQLite I/O error) -- that case
-/// must not read as an ordinary unknown id on monitoring built on this
-/// route's 404 rate.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a malformed id and an unknown id share the same 404 by design (docs/04-api-protocol.md#error-codes); the parse error has nothing more specific to add"
-)]
-async fn historical_row(state: &AppState, id: &str) -> Result<persistence::SessionRow, ApiError> {
-    let _: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
-    let db = state.db.as_ref().ok_or(ApiError::NotFound)?;
-    db.get_session(id)
+    let session = state
+        .anchor
+        .get(&id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    let derived = state.watch.get(&session.id);
+    Ok(Json(SessionView::from_anchor(
+        &anchor_bridge::BridgedSession::new(session),
+        derived.as_ref(),
+        &state.leases,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1119,22 +943,11 @@ struct DeleteQuery {
 /// up to ~7s, and this handler returns `202` immediately, same as the spec's
 /// "clients watch the WS `exit` frame or poll `GET`."
 ///
-/// `?purge=true` on an already-`exited` session skips the termination
-/// machine and deletes outright; on a still-running one it terminates first,
-/// waits for `exited`, then deletes the directory, the SQLite row and the
-/// in-memory entry -- directory first, row second, matching the collector's
-/// own ordering (docs/05-persistence.md#garbage-collection).
-///
-/// A session id that isn't live but has a historical row (a `lost`/`exited`
-/// session from before this process started) can still be purged the same
-/// way, minus the termination step -- there is nothing running to terminate.
-/// Without `?purge=true` on such a row there is nothing to do either: it is
-/// already in a terminal state, so this is a no-op `202`, the same shape
-/// `terminate()`'s own idempotency gives a live already-`exited` session.
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "four real outcomes (historical/live x purge/no-purge), each with its own error handling; splitting them out is a deliberate follow-up, not a change to make alongside a lint sweep on a deletion path"
-)]
+/// `?purge=true` terminates first, then forgets the session everywhere:
+/// anchord's row and log, teleport's lease and watch entries, and the
+/// derived title in SQLite. Anchor refuses to purge a running session, and
+/// its `terminate` reply means the exit is recorded (anchor `00f3eaa`), so
+/// the two calls in order are the whole protocol.
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -1146,101 +959,35 @@ async fn delete_session(
 
     // anchord owns the session, its row and its log, so both halves are
     // control requests. Terminate is idempotent there, and purge refuses a
-    // session that is still running — so purge terminates first and waits,
-    // which is what the in-process path below does too.
-    if let Some(anchor) = &state.anchor {
-        anchor
-            .terminate(&id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        if !q.purge {
-            return Ok(StatusCode::ACCEPTED);
-        }
-        anchor
-            .purge(&id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        // Both registries, not just the watch one: the lease registry holds a
-        // `Lease` and a `broadcast::Sender` per session, and a purge is the
-        // one point where teleport knows a session id will never be used
-        // again. Forgetting one and not the other leaked the pair for the
-        // life of the process.
-        state.watch.forget(&id);
-        state.leases.forget(&id);
-        if let Some(db) = &state.db {
-            // A purge forgets the session everywhere, so its derived title
-            // goes too -- otherwise the row outlives the session it
-            // describes and nothing would ever clean it up.
-            if let Err(e) = db.forget_anchor_meta(&id).await {
-                tracing::warn!(session_id = %id, error = %e, "forgetting anchor metadata failed");
-            }
-        }
-        return Ok(StatusCode::NO_CONTENT);
-    }
-
-    let Ok(session) = find_session(&state, &id) else {
-        let row = historical_row(&state, &id).await?;
-        if q.purge {
-            let log_dir = state.sessions.root().join(&row.id);
-            if let Err(e) =
-                tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
-            {
-                tracing::warn!(session_id = %row.id, error = %e, "removing session directory task panicked");
-            }
-            if let Some(db) = &state.db {
-                if let Err(e) = db.delete_session(&row.id).await {
-                    tracing::warn!(session_id = %row.id, error = %e, "deleting historical session row failed");
-                }
-            }
-            return Ok(StatusCode::NO_CONTENT);
-        }
+    // session that is still running -- so purge terminates first.
+    let anchor = &state.anchor;
+    anchor
+        .terminate(&id)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    if !q.purge {
         return Ok(StatusCode::ACCEPTED);
-    };
-
-    if q.purge {
-        if session.state() != SessionState::Exited {
-            // `terminate()` can block for the whole graceful-shutdown window
-            // (up to ~7s, docs/03-pty-layer.md#termination) -- spawn_blocking
-            // keeps that off this worker thread, same as the non-purge path
-            // below (M4 review: this used to run inline, and purge needs the
-            // result before it can safely delete the directory).
-            let terminate_session = Arc::clone(&session);
-            match tokio::task::spawn_blocking(move || terminate_session.terminate()).await {
-                Ok(Err(e)) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) failed");
-                }
-                Ok(Ok(())) => {}
-                Err(e) => {
-                    tracing::warn!(session_id = %session.id, error = %e, "terminate (purge) task panicked");
-                }
-            }
-            session.exited().await;
-        }
-        let log_dir = session
-            .log_path()
-            .parent()
-            .map_or_else(|| session.log_path(), std::path::Path::to_path_buf);
-        // `remove_dir_all` is blocking fs work too.
-        if let Err(e) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(log_dir)).await
-        {
-            tracing::warn!(session_id = %session.id, error = %e, "removing session directory task panicked");
-        }
-        if let Some(db) = &state.db {
-            if let Err(e) = db.delete_session(&session.id.to_string()).await {
-                tracing::warn!(session_id = %session.id, error = %e, "deleting session row failed");
-            }
-        }
-        state.sessions.purge(session.id);
-        return Ok(StatusCode::NO_CONTENT);
     }
-
-    let terminate_session = Arc::clone(&session);
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = terminate_session.terminate() {
-            tracing::warn!(session_id = %terminate_session.id, error = %e, "terminate failed");
+    anchor
+        .purge(&id)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    // Both registries, not just the watch one: the lease registry holds a
+    // `Lease` and a `broadcast::Sender` per session, and a purge is the
+    // one point where teleport knows a session id will never be used
+    // again. Forgetting one and not the other leaked the pair for the
+    // life of the process.
+    state.watch.forget(&id);
+    state.leases.forget(&id);
+    if let Some(db) = &state.db {
+        // A purge forgets the session everywhere, so its derived title
+        // goes too -- otherwise the row outlives the session it
+        // describes and nothing would ever clean it up.
+        if let Err(e) = db.forget_anchor_meta(&id).await {
+            tracing::warn!(session_id = %id, error = %e, "forgetting anchor metadata failed");
         }
-    });
-    Ok(StatusCode::ACCEPTED)
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /api/v1/sessions/{id}/log` (docs/04-api-protocol.md#get-apiv1sessionsidlog).
@@ -1265,77 +1012,39 @@ async fn get_log(
     // anchord owns the log, so the range is read over the socket. Its `log`
     // op caps one response at 4 MiB whatever is asked for, so a wider range
     // is assembled from several — the same bytes, just not in one reply.
-    if let Some(anchor) = &state.anchor {
-        let session = anchor
-            .get(&id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        let end = session.output_bytes;
-        let (from, to) = requested_range(&q, &headers, end);
-
-        let mut bytes = Vec::new();
-        let mut cursor = from;
-        while cursor < to {
-            let range = anchor
-                .log(&id, cursor, to - cursor)
-                .await
-                .map_err(|e| anchor_bridge::api_error(&e))?;
-            if range.bytes.is_empty() {
-                // Short of the requested end: the log is capped there, or
-                // the file is shorter than the row claims. Either way there
-                // is nothing more to send, and stopping beats looping.
-                break;
-            }
-            cursor += range.bytes.len() as u64;
-            bytes.extend_from_slice(&range.bytes);
-        }
-        return Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes));
-    }
-
-    let (end, mut reader) = if let Ok(session) = find_session(&state, &id) {
-        (
-            session.next_offset(),
-            session
-                .log_reader()
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?,
-        )
-    } else {
-        // A `lost`/`exited` session from before this process started --
-        // "historical log remains available" (docs/04-api-protocol.md's
-        // restart sequence diagram). No `Session`/`Fanout` behind it, so
-        // this opens `output.vt` directly rather than through one
-        // (persistence.rs's module doc explains why there is no `Session`
-        // to go through).
-        let row = historical_row(&state, &id).await?;
-        let path = state.sessions.root().join(&row.id).join("output.vt");
-        let reader = LogReader::open(&path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                // The row is still there but GC already deleted the
-                // directory (docs/05-persistence.md#garbage-collection:
-                // directory first, row second) -- a request landing in that
-                // window finds a row that's real but a log that's gone.
-                ApiError::Gone
-            } else {
-                ApiError::BadRequest(e.to_string())
-            }
-        })?;
-        (row.output_bytes, reader)
-    };
-
+    let anchor = &state.anchor;
+    let session = anchor
+        .get(&id)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    let end = session.output_bytes;
     let (from, to) = requested_range(&q, &headers, end);
 
-    let bytes = reader
-        .read_range(from, to)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
+    let mut bytes = Vec::new();
+    let mut cursor = from;
+    while cursor < to {
+        let range = anchor
+            .log(&id, cursor, to - cursor)
+            .await
+            .map_err(|e| anchor_bridge::api_error(&e))?;
+        if range.bytes.is_empty() {
+            // Short of the requested end: the log is capped there, or
+            // the file is shorter than the row claims. Either way there
+            // is nothing more to send, and stopping beats looping.
+            break;
+        }
+        cursor += range.bytes.len() as u64;
+        bytes.extend_from_slice(&range.bytes);
+    }
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
 }
 
 /// Which byte range this request asks for: explicit query parameters, then
 /// a `Range` header, then the whole log. Clamped to what exists.
 ///
-/// Shared by the in-process and anchor paths so the two cannot drift on
-/// something a client would notice.
+/// Shared with nothing any more -- it was the one piece the in-process and
+/// anchor paths had in common -- and kept separate because it is the part
+/// a client can observe and a unit test can pin.
 fn requested_range(q: &LogQuery, headers: &HeaderMap, end: u64) -> (u64, u64) {
     let (from, to) = if q.from.is_some() || q.to.is_some() {
         (q.from.unwrap_or(0), q.to.unwrap_or(end))
@@ -1648,8 +1357,8 @@ struct WsTicketResponse {
 /// way, `Authorization` header or plain `?token=` -- for a short-lived,
 /// single-use ticket scoped to one session, so the long-lived credential
 /// never has to ride in a `stream.ts` reconnect URL. Requires the session to
-/// exist for the same reason `find_session` is used everywhere else: no
-/// point handing out a ticket for a session id nobody could ever attach to.
+/// exist: no point handing out a ticket for a session id nobody could ever
+/// attach to.
 async fn create_ws_ticket(
     State(state): State<Arc<AppState>>,
     _principal: Principal,
@@ -1657,10 +1366,6 @@ async fn create_ws_ticket(
     Json(req): Json<WsTicketRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_origin(&state, &headers)?;
-    // Resolved against whichever backend owns sessions. Going straight to
-    // `find_session` would consult the in-process map, which is empty on the
-    // anchor path -- so every ticket 404'd for sessions that exist, and
-    // clients fell back to the `?token=` URL this route exists to avoid.
     let id = resolve_ticket_session(&state, &req.session_id).await?;
     let ticket = state
         .ws_tickets
@@ -1675,44 +1380,67 @@ async fn create_ws_ticket(
 /// The session a ws-ticket is being asked for, if it exists.
 ///
 /// A ticket is scoped to one session, so the session has to exist -- there is
-/// no point handing out a ticket for an id nobody could attach to. Which
-/// backend answers that depends on the path, exactly as it does for
-/// `get_session`.
-///
-/// Only a live session counts, on either path: the ticket's whole purpose is
-/// the `/stream` upgrade, and an exited session that is only a SQLite row
-/// cannot be attached to. That is why this does not fall back to
-/// `historical_row` the way `get_session` does.
+/// no point handing out a ticket for an id nobody could attach to. anchord
+/// is asked, the same as `get_session` asks it.
 #[expect(
     clippy::map_err_ignore,
-    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
+    reason = "a malformed id and an unknown id share the same 404 (docs/04-api-protocol.md#error-codes)"
 )]
 async fn resolve_ticket_session(state: &AppState, id: &str) -> Result<SessionId, ApiError> {
-    if let Some(anchor) = &state.anchor {
-        // The id still has to parse: the ticket store is keyed by
-        // `SessionId`, and both id spaces are ULIDs.
-        let parsed: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
-        anchor
-            .get(id)
-            .await
-            .map_err(|e| anchor_bridge::api_error(&e))?;
-        return Ok(parsed);
-    }
-    find_session(state, id).map(|session| session.id)
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "same as historical_row: a malformed id and an unknown id share the same 404"
-)]
-fn find_session(state: &AppState, id: &str) -> Result<Arc<crate::session::Session>, ApiError> {
-    let id: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
-    state.sessions.get(id).ok_or(ApiError::NotFound)
+    // The id still has to parse: the ticket store is keyed by `SessionId`,
+    // and anchord's ids are ULIDs.
+    let parsed: SessionId = id.parse().map_err(|_| ApiError::NotFound)?;
+    state
+        .anchor
+        .get(id)
+        .await
+        .map_err(|e| anchor_bridge::api_error(&e))?;
+    Ok(parsed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet_since(last_output_ms: i64) -> crate::anchor_watch::Derived {
+        crate::anchor_watch::Derived {
+            last_output_ms,
+            ..Default::default()
+        }
+    }
+
+    /// Ported from the in-process `attention_signals.rs`, which drove
+    /// `Session::tick_idle`: idle is set once output has been quiet for the
+    /// threshold, and not before.
+    #[test]
+    fn a_running_session_is_idle_only_after_the_threshold() {
+        let derived = quiet_since(1_000);
+        assert_eq!(idle_since("running", Some(&derived), 1_000 + 29_999), None);
+        assert_eq!(
+            idle_since("running", Some(&derived), 1_000 + 30_000),
+            Some(1_000),
+            "reported as when it went quiet, not when it crossed"
+        );
+    }
+
+    /// The other half of that file, and the half the anchor path got wrong
+    /// (docs/20, gap 9): once a session has exited it is never idle.
+    #[test]
+    fn an_exited_session_is_never_idle() {
+        let derived = quiet_since(1_000);
+        for state in ["exited", "lost", "closing"] {
+            assert_eq!(
+                idle_since(state, Some(&derived), 1_000_000),
+                None,
+                "{state}"
+            );
+        }
+        assert_eq!(
+            idle_since("running", None, 1_000_000),
+            None,
+            "nothing seen yet"
+        );
+    }
 
     fn preset_with_args(args: &[&str]) -> Preset {
         Preset {

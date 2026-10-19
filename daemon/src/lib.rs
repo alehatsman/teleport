@@ -16,7 +16,6 @@ pub mod config;
 pub mod device;
 #[cfg(feature = "embedded-web")]
 pub mod embedded_web;
-pub mod log;
 pub mod persistence;
 pub mod presets;
 pub mod pty;
@@ -28,7 +27,7 @@ pub mod ws;
 pub mod ws_anchor;
 
 /// Milliseconds since the Unix epoch -- the shape of every `*_at_ms` field
-/// across `session.rs`/`persistence.rs`/`main.rs` and the matching SQLite
+/// across `api.rs`/`persistence.rs`/`main.rs` and the matching SQLite
 /// columns (docs/05-persistence.md#schema). One definition so a future fix
 /// to its clock-skew handling can't land in some call sites and not others.
 #[expect(

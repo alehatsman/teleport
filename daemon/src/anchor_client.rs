@@ -1,10 +1,8 @@
 //! A client for `anchord`'s control socket.
 //!
-//! This is the first half of running teleport's session layer on anchor
-//! (anchor's `ROADMAP.md` M4, and its `docs/06-teleport-seam.md` for why the
-//! seam sits here rather than under `SessionManager`). Nothing in teleport
-//! uses it yet: the in-process path stays authoritative until the switch
-//! lands behind a flag, default off.
+//! Every teleport session lives in anchord, and this is how teleport reaches
+//! it (anchor's `docs/06-teleport-seam.md` for why the seam sits at the
+//! session layer).
 //!
 //! **Written against anchor's published protocol, not its crate.** Depending
 //! on the `anchor` crate would couple the two release cycles, which is the

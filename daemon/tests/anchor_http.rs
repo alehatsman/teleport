@@ -216,14 +216,7 @@ async fn post_sessions_spawns_in_anchord_not_in_process() {
     assert_eq!(body["state"], "running");
     assert!(body["pid"].as_u64().is_some());
 
-    // The session is in anchord, not in this process: teleport's own
-    // in-process manager never saw it.
-    assert!(
-        daemon.state.sessions.list().is_empty(),
-        "the in-process manager must hold nothing on the anchor path"
-    );
-
-    // And anchord really has it, carrying teleport's metadata as labels.
+    // anchord really has it, carrying teleport's metadata as labels.
     let client = teleportd::anchor_client::AnchorClient::new(anchord.socket());
     let session = client.get(&id).await.expect("anchord knows the session");
     assert_eq!(session.state, "running");
@@ -1013,9 +1006,7 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     )]
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("creating the state dir");
-    let (db, _guard) =
-        teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
-            .expect("open test db");
+    let db = teleportd::persistence::Db::open(&dir.join("state.db")).expect("open test db");
 
     // Whether the resume link can reach the log at all. Not on Windows:
     // conhost swallows OSC 8 rather than relaying it -- written, and absent
@@ -1144,9 +1135,7 @@ async fn the_last_title_of_a_burst_is_the_one_that_survives() {
     )]
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("creating the state dir");
-    let (db, _guard) =
-        teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
-            .expect("open test db");
+    let db = teleportd::persistence::Db::open(&dir.join("state.db")).expect("open test db");
 
     let before =
         support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
