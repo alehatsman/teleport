@@ -12,7 +12,14 @@ version = 2
 yanked = "deny"
 # Add entries as `"RUSTSEC-0000-0000"` with a comment naming the ticket that
 # tracks removal. An ignore without an expiry plan is a permanent hole.
-ignore = []
+ignore = [
+  # RUSTSEC-2023-0071 (Marvin, rsa 0.9.10) via webauthn-rs -> crypto-glue. Accepted 2026-10-19.
+  # Not reachable: teleportd holds no RSA private key; webauthn only runs RSA *verification*
+  # (webauthn-rs-core crypto.rs RS256VerifyingKey), and attestation is off (conveyance None,
+  # ca_list None). Re-check on any webauthn-rs bump or if attestation is enabled.
+  # Tracking: #125, upstream RustCrypto/RSA#626.
+  "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"   # informational; the fix is often upstream
