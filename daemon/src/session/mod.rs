@@ -6,7 +6,7 @@
 //! - [`SessionId`], which the WS-ticket store is keyed by (`auth.rs`).
 //! - [`CreateError`], which shapes a refused create into its HTTP status,
 //!   whichever daemon did the refusing (`anchor_bridge::api_error`).
-//! - [`osc`], the incremental OSC 0/2/8 scanner `anchor_watch` derives titles
+//! - `osc`, the incremental OSC 0/2/8 scanner `anchor_watch` derives titles
 //!   and resume ids with.
 //!
 //! Everything else that lived here -- `Session`, `SessionManager`, the
