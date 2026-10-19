@@ -64,6 +64,9 @@ pub struct Derived {
     /// When the title was last written through to SQLite. Throttling state,
     /// not something the API serves.
     pub title_persisted_ms: i64,
+    /// The title last written through to SQLite, so the trailing write
+    /// knows whether the throttle swallowed a newer one.
+    pub title_persisted: Option<String>,
     /// One past the last byte this session's watcher has scanned.
     ///
     /// A watcher dropped for falling behind is restarted by the supervisor,
@@ -243,6 +246,7 @@ fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String,
                                     d.title = Some(title.clone());
                                     if persist {
                                         d.title_persisted_ms = now;
+                                        d.title_persisted = Some(title.clone());
                                     }
                                 });
                                 if persist {
@@ -287,6 +291,29 @@ fn spawn_watcher(anchor: AnchorClient, registry: Arc<WatchRegistry>, id: String,
                 // starts a fresh watcher if the session is still running.
                 Ok(Some(AnchorFrame::Exit { .. }) | None) | Err(_) => break,
                 Ok(Some(_)) => {}
+            }
+        }
+
+        // The trailing edge of the throttle. Leading-edge alone drops the last
+        // title of any burst, and an *exited* session -- the one case that
+        // reads the stored copy rather than re-deriving it -- keeps whatever
+        // the throttle let through instead of what the agent said last.
+        // Found on Windows, where conhost always emits a title of its own
+        // naming the program first, so an agent's real title inside the
+        // same second was never stored and a restarted teleport showed
+        // `C:\WINDOWS\...\powershell.exe` for every exited session. Unix
+        // has it too, for any agent that sets its title twice in a second.
+        if let (Some(db), Some(derived)) = (&db, registry.get(&id)) {
+            if let Some(title) = derived
+                .title
+                .filter(|t| derived.title_persisted.as_ref() != Some(t))
+            {
+                match db.note_anchor_title(&id, &title).await {
+                    Ok(()) => registry.update(&id, |d| d.title_persisted = Some(title)),
+                    Err(e) => {
+                        tracing::warn!(session_id = %id, error = %e, "persisting the last title failed");
+                    }
+                }
             }
         }
 

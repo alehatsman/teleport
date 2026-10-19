@@ -1121,6 +1121,89 @@ async fn derived_agent_metadata_survives_a_teleport_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The title an exited session keeps across a restart is the **last** one it
+/// set, even when it set two inside the persistence throttle's second.
+///
+/// The write-through was leading-edge only, so the second title of a burst
+/// lived in memory and nowhere else. Found running this suite on Windows,
+/// where conhost emits a title of its own before the agent's and every
+/// exited session came back titled with the program's path; reproduced here
+/// on both platforms by setting two titles back to back.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_title_of_a_burst_is_the_one_that_survives() {
+    if anchord_bin().is_none() {
+        eprintln!("skipping: ANCHORD_BIN is not set");
+        return;
+    }
+    let anchord = Anchord::start("lasttitle");
+    anchord.ready().await;
+    let dir = anchord_endpoint::scratch_root().join(format!("tp-lasttitle-{}", std::process::id()));
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort cleanup of a previous run"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("creating the state dir");
+    let (db, _guard) =
+        teleportd::persistence::Db::open(&dir.join("state.db"), &dir.join("sessions"))
+            .expect("open test db");
+
+    let before =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+    let id = create(
+        &before,
+        fixture_shell::pick(
+            "stty raw -echo; printf '\\033]0;first-guess\\007'; printf '\\033]0;the-last-word\\007'; sleep 2",
+            "[Console]::Write([char]27 + ']0;first-guess' + [char]7); [Console]::Write([char]27 + ']0;the-last-word' + [char]7); Start-Sleep 2",
+        ),
+        "agent",
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, view) = get_json(&before, &format!("/api/v1/sessions/{id}")).await;
+        if view["state"] == "exited" && view["title"] == "the-last-word" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first teleport never saw it exit titled: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The trailing write happens as the watcher ends, after the exit frame;
+    // a teleport dropped in the same instant can still race it, which is a
+    // different and narrower window than the one this test is about.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(before);
+
+    let after =
+        support::spawn_on_anchor(Config::default(), Some(db.clone()), anchord.socket()).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let view = loop {
+        let (_, view) = get_json(&after, &format!("/api/v1/sessions/{id}")).await;
+        if !view["title"].is_null() {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no title after the restart: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        view["title"], "the-last-word",
+        "a restarted teleport must show the last title, not the first: {view}"
+    );
+
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "best-effort teardown of the test's state dir"
+    )]
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A `create` whose control line is past anchor's 1 MiB cap comes back a
 /// 400 naming `too_large`, not a 500.
 ///
