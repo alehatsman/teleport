@@ -26,7 +26,120 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use transport::{ReadHalf, WriteHalf};
+
+/// The connection to anchord, one concrete type per platform behind one
+/// pair of names.
+///
+/// **A type alias pair, not a trait**, which is the shape anchor's
+/// `docs/09-windows.md` §3.1 proposes for its own side of the seam. A
+/// `UnixStream` and a `NamedPipeClient` share no trait, but every use in
+/// this file needs only "read", "write" and "drop to cancel", and
+/// `AsyncRead`/`AsyncWrite` already say that. A trait object would buy an
+/// abstraction nothing calls for and cost dynamic dispatch on the attach
+/// path, which carries every byte of terminal output.
+///
+/// Everything platform-specific about reaching anchord lives in here, so
+/// the protocol code above and below it is written once. The wire format
+/// needs nothing from the transport but an ordered byte stream in each
+/// direction ([anchor's `docs/04-protocol.md`]).
+///
+/// Cancellation is the one place the two arms could have differed and do
+/// not. Anchor's own synchronous client needs a different mechanism on
+/// Windows to unblock a read from another thread, because a named pipe has
+/// no `shutdown` (its §4.1). This client is async: a blocked read is a
+/// future, and dropping it cancels the read on either platform, so nothing
+/// here has an `Interrupt` to port.
+mod transport {
+    #[cfg(unix)]
+    pub(super) use self::unix::{connect, ReadHalf, WriteHalf};
+    #[cfg(windows)]
+    pub(super) use self::windows::{connect, ReadHalf, WriteHalf};
+
+    #[cfg(unix)]
+    mod unix {
+        use std::io;
+        use std::path::Path;
+
+        /// The read half of a connection to anchord.
+        pub(crate) type ReadHalf = tokio::net::unix::OwnedReadHalf;
+        /// The write half of a connection to anchord.
+        pub(crate) type WriteHalf = tokio::net::unix::OwnedWriteHalf;
+
+        /// Connects to the `AF_UNIX` socket at `endpoint`. The socket's
+        /// `0600` mode is the access check; nothing else is (anchor's
+        /// `src/server.rs` module doc).
+        pub(crate) async fn connect(endpoint: &Path) -> io::Result<(ReadHalf, WriteHalf)> {
+            Ok(tokio::net::UnixStream::connect(endpoint)
+                .await?
+                .into_split())
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use std::io;
+        use std::path::Path;
+        use std::time::Duration;
+
+        use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+
+        /// The read half of a connection to anchord.
+        ///
+        /// `tokio::io::split` rather than an owned split: a named pipe
+        /// client has no `into_split`. The halves share one handle behind a
+        /// lock, which costs nothing here because each connection is driven
+        /// by one task.
+        pub(crate) type ReadHalf = tokio::io::ReadHalf<NamedPipeClient>;
+        /// The write half of a connection to anchord.
+        pub(crate) type WriteHalf = tokio::io::WriteHalf<NamedPipeClient>;
+
+        /// `SECURITY_IDENTIFICATION` from `winnt.h`: `SecurityIdentification
+        /// << 16`. Spelled out rather than imported because it is the one
+        /// constant this arm needs and the value is fixed ABI.
+        const SECURITY_IDENTIFICATION: u32 = 1 << 16;
+
+        /// `ERROR_PIPE_BUSY`: every instance of the pipe is connected. The
+        /// server has not yet created the next one, so a retry soon will
+        /// usually find it.
+        const ERROR_PIPE_BUSY: i32 = 231;
+
+        /// How long a connect waits out `ERROR_PIPE_BUSY` before giving up.
+        /// Bounded, because a server that never creates another instance is
+        /// indistinguishable from a wedged one.
+        const BUSY_BUDGET: Duration = Duration::from_secs(2);
+        const BUSY_RETRY: Duration = Duration::from_millis(10);
+
+        /// Connects to the named pipe at `endpoint`.
+        ///
+        /// At `SECURITY_IDENTIFICATION`, set explicitly rather than inherited
+        /// from tokio's default, because it is a security property this
+        /// client promises and a dependency's default is not a promise. A
+        /// named-pipe server can impersonate whoever connects; at this level
+        /// it can learn who connected but cannot act as them, so a squatted
+        /// or compromised server gets no more than an identity (anchor's
+        /// `docs/09-windows.md` §4.3).
+        pub(crate) async fn connect(endpoint: &Path) -> io::Result<(ReadHalf, WriteHalf)> {
+            let deadline = tokio::time::Instant::now() + BUSY_BUDGET;
+            let pipe = loop {
+                match ClientOptions::new()
+                    .security_qos_flags(SECURITY_IDENTIFICATION)
+                    .open(endpoint)
+                {
+                    Ok(pipe) => break pipe,
+                    Err(e)
+                        if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(BUSY_RETRY).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            Ok(tokio::io::split(pipe))
+        }
+    }
+}
 
 /// Frame tags, from anchor's `docs/04-protocol.md`.
 mod frame {
@@ -263,10 +376,7 @@ impl AnchorClient {
     /// attach that asks for it while another connection holds it still
     /// succeeds as an observer — check [`AnchorAttach::has_control`].
     pub async fn attach(&self, id: &str, from: u64, control: bool) -> Result<AnchorAttach> {
-        let stream = UnixStream::connect(&self.socket)
-            .await
-            .with_context(|| format!("connecting to {}", self.socket.display()))?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, mut write_half) = self.connect().await?;
         let mut reader = BufReader::new(read_half);
 
         let request = json!({
@@ -303,12 +413,17 @@ impl AnchorClient {
         })
     }
 
+    /// Opens one connection to anchord, already split for reading and
+    /// writing. The only place this file touches the transport.
+    async fn connect(&self) -> Result<(ReadHalf, WriteHalf)> {
+        transport::connect(&self.socket)
+            .await
+            .with_context(|| format!("connecting to {}", self.socket.display()))
+    }
+
     /// One control request on its own connection.
     async fn call(&self, op: &str, body: Value) -> Result<Value> {
-        let stream = UnixStream::connect(&self.socket)
-            .await
-            .with_context(|| format!("connecting to {}", self.socket.display()))?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, mut write_half) = self.connect().await?;
         let mut reader = BufReader::new(read_half);
 
         // Built rather than indexed into: `Value`'s index panics on a
@@ -331,8 +446,8 @@ pub struct AnchorAttach {
     size: Option<(u16, u16)>,
     has_control: bool,
     next_offset: u64,
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    reader: BufReader<ReadHalf>,
+    writer: WriteHalf,
     /// Bytes of the frame currently being read, kept here rather than on
     /// `next_frame`'s stack because `next_frame` is polled inside a
     /// `select!` and is dropped whenever another arm wins. With a local
@@ -602,8 +717,8 @@ const REPLY_AFTER_WRITE_ERROR: std::time::Duration = std::time::Duration::from_s
 ///
 /// No reply means the write error was the truth, and it is what comes back.
 async fn exchange(
-    out: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    out: &mut WriteHalf,
+    reader: &mut BufReader<ReadHalf>,
     body: &Value,
 ) -> Result<Value> {
     let Err(write_error) = write_request(out, body).await else {
@@ -617,14 +732,14 @@ async fn exchange(
     }
 }
 
-async fn write_request(out: &mut tokio::net::unix::OwnedWriteHalf, body: &Value) -> Result<()> {
+async fn write_request(out: &mut WriteHalf, body: &Value) -> Result<()> {
     let mut line = serde_json::to_vec(body).context("encoding a request")?;
     line.push(b'\n');
     out.write_all(&line).await.context("sending a request")?;
     out.flush().await.context("flushing a request")
 }
 
-async fn read_response(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Result<Value> {
+async fn read_response(reader: &mut BufReader<ReadHalf>) -> Result<Value> {
     let mut line = String::new();
     if reader
         .read_line(&mut line)
@@ -660,7 +775,7 @@ fn check_ok(response: &Value) -> Result<()> {
 mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use tokio::net::UnixListener;
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     use super::{AnchorClient, AnchorSpec, BTreeMap, PathBuf};
 
@@ -672,11 +787,10 @@ mod tests {
     /// draining the rest of the line**. That last part is what makes the
     /// client's own write fail with the reply already on the wire, which is
     /// the situation anchor's protocol doc warns clients about.
-    async fn serve_too_large_then_close(listener: UnixListener) {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        let (read_half, mut write_half) = stream.into_split();
+    ///
+    /// Generic over the stream so both transports run the same server.
+    async fn serve_too_large_then_close<S: AsyncRead + AsyncWrite + Unpin>(stream: S) {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = super::BufReader::new(read_half);
         let mut seen = 0_usize;
         let mut buf = vec![0_u8; 64 * 1024];
@@ -698,20 +812,56 @@ mod tests {
         // the client's request still unread.
     }
 
+    /// A fake anchord on a fresh `AF_UNIX` socket, and the socket's path.
+    #[cfg(unix)]
+    fn fake_anchord(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        // Short path on purpose: a unix socket address holds ~104 bytes.
+        let dir = PathBuf::from(format!("/tmp/tp-anchor-{tag}-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("creating the socket dir");
+        let socket = dir.join("anchor.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("binding the fake anchord");
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                serve_too_large_then_close(stream).await;
+            }
+        });
+        (socket, server)
+    }
+
+    /// A fake anchord on a fresh named pipe, and the pipe's name.
+    ///
+    /// `first_pipe_instance`, as anchor's own server must (its
+    /// `docs/09-windows.md` §4.2): a name already taken is a failure here,
+    /// not a pipe to share with whoever took it.
+    #[cfg(windows)]
+    fn fake_anchord(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let name = format!(r"\\.\pipe\tp-anchor-{tag}-{}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("creating the fake anchord's pipe");
+        let task = tokio::spawn(async move {
+            if server.connect().await.is_ok() {
+                serve_too_large_then_close(server).await;
+            }
+        });
+        (PathBuf::from(name), task)
+    }
+
     /// A control line past anchor's cap surfaces as the `too_large` anchord
     /// answered with -- a 400 -- rather than as the broken pipe that answer
     /// races.
+    ///
+    /// Runs on both transports, and on Windows it is the first test to put
+    /// bytes through the named-pipe arm: the race it pins is the one most
+    /// likely to differ between them, because it depends on what a write
+    /// into a peer that stopped reading does.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_oversized_control_line_reports_the_reply_not_the_write_error() {
-        // Short path on purpose: a unix socket address holds ~104 bytes.
-        let dir = PathBuf::from(format!("/tmp/tp-anchor-toolarge-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("creating the socket dir");
-        let socket = dir.join("anchor.sock");
-        if socket.exists() {
-            std::fs::remove_file(&socket).expect("clearing a stale socket");
-        }
-        let listener = UnixListener::bind(&socket).expect("binding the fake anchord");
-        let server = tokio::spawn(serve_too_large_then_close(listener));
+        let (endpoint, server) = fake_anchord("toolarge");
 
         // `create` carries the spec, and the spec carries the environment:
         // the one control line teleport can realistically make too big.
@@ -720,21 +870,24 @@ mod tests {
         let spec = AnchorSpec {
             command: "/bin/sh".to_owned(),
             args: Vec::new(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: std::env::temp_dir(),
             env,
             cols: 80,
             rows: 24,
             login_shell: false,
         };
 
-        let client = AnchorClient::new(&socket);
+        let client = AnchorClient::new(&endpoint);
         let error = client
             .create(&spec, &BTreeMap::new())
             .await
             .expect_err("an oversized control line must not succeed");
 
         server.abort();
-        std::fs::remove_dir_all(&dir).expect("cleaning up the socket dir");
+        #[cfg(unix)]
+        if let Some(dir) = endpoint.parent() {
+            std::fs::remove_dir_all(dir).expect("cleaning up the socket dir");
+        }
 
         let text = error.to_string();
         assert!(
@@ -747,6 +900,26 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST,
             "`too_large` must reach the client as a 400, not a 500"
+        );
+    }
+
+    /// Nothing listening is an error naming the endpoint, on either
+    /// transport -- never a hang, and never an empty answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_anchord_is_a_connect_error_naming_the_endpoint() {
+        #[cfg(unix)]
+        let endpoint = PathBuf::from(format!("/tmp/tp-anchor-none-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let endpoint = PathBuf::from(format!(r"\\.\pipe\tp-anchor-none-{}", std::process::id()));
+
+        let error = AnchorClient::new(&endpoint)
+            .list(&BTreeMap::new())
+            .await
+            .expect_err("nothing is listening");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&endpoint.display().to_string()),
+            "the error should say where it looked: {text}"
         );
     }
 }
