@@ -134,7 +134,7 @@ jobs:
           ref: c755628bdf1515b2d10dab01a149e63a34eee33a
           path: anchor
       # Windows has its own pin: the first anchor commit whose anchord serves
-      # a named pipe (anchor M6 step 4, `457ed11`, branch feat/windows-m6).
+      # a named pipe (anchor M6, all five gates, `972a6df` on feat/windows-m6).
       # Separate so a Windows-only bump cannot move what Unix is tested
       # against. That commit must be on anchor's remote before this job can
       # fetch it -- merge order is anchor's M6 first.
@@ -143,7 +143,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: alehatsman/anchor
-          ref: 457ed11a2ddfa8518135c8315e072e045d48da5d
+          ref: 972a6df41898b06b2c331e8ca337adbf892922eb
           path: anchor
       # Both binaries: on Windows a fixture starts anchord as
       # `anchor --socket <pipe> daemon`, because the pipe name is fixed per

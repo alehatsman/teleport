@@ -99,7 +99,7 @@ Collapsing them is the whole structural edit.
 > would remove the product.
 >
 > **Un-scoped again, 2026-10-19** — with a condition. Anchor M6 gives Windows an
-> anchord (anchor `457ed11`, on a branch), so the list below is once more a
+> anchord (anchor `972a6df`, on a branch), so the list below is once more a
 > whole-platform list *once that lands and Windows hosts run anchord*. Until
 > both are true, the Unix-only reading above still governs a `main` checkout.
 > `ConptyDsrProbe` and `pty_primitive_windows.rs` are now under test in anchor
@@ -612,6 +612,9 @@ in WSL (Ubuntu 24.04) for the Unix side:
   `running` with the same pid, listed, and its transcript from before the
   restart is intact. `sessions_survive_restart` is advertised on Windows for
   the first time.
+  Re-run on anchor's final M6 head, `972a6df`, 2026-10-20, after the QoS
+  override was dropped to match the contract: 183 passed, 0 failed
+  (`anchor_http` 19 in 5.19s), and the same end-to-end restart survived.
 - **`use_anchor` is accepted on Windows** as of the same commit. It still
   defaults off, on every platform; flipping it is the separate decision anchor's
   ROADMAP lists under "Later, unscheduled".
@@ -619,8 +622,9 @@ in WSL (Ubuntu 24.04) for the Unix side:
 **What was consumed from anchor, by commit** (branch `feat/windows-m6`):
 `e1c51d0` (step 2, the ConPTY port with `pty_primitive_windows.rs`),
 `80d2e98` (step 3, the ungated tripwire), `0134e38` (the transport contract),
-`457ed11` (step 4, the transport itself). CI's Windows job pins `457ed11`,
-which has to reach anchor's remote before that job can fetch it.
+`457ed11` (step 4, the transport itself), `972a6df` (M6 complete: step 5,
+the per-user scheduled task, and the record). CI's Windows job pins
+`972a6df`, which has to reach anchor's remote before that job can fetch it.
 
 **The transfer half of this constraint is discharged.** `ConptyDsrProbe` and
 `pty_primitive_windows.rs` are under test in anchor (`e1c51d0`: twelve fixtures,
@@ -680,7 +684,7 @@ merge.**
    auth), and ConPTY support — **the last of which is already solved and must be
    transferred from this repo, not rebuilt.**
    **Done on branches, 2026-10-19/20, not yet merged:** anchor `feat/windows-m6`
-   through `457ed11` (all three parts, the transfer under test and tripwired),
+   through `972a6df` (all three parts, the transfer under test and tripwired),
    teleport `feat/windows-anchor` (both arms behind one `AnchorClient`, the
    anchor suites green on Windows against it). See
    [Status of Constraint 3](#status-of-constraint-3--2026-10-19). Merge order is

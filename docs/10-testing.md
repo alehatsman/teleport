@@ -249,7 +249,7 @@ named-pipe anchord: with the files compiled there and `ANCHORD_BIN` unset,
 `anchor_client` and `anchor_http` reported 22 passed in 0.02s; with `CI=1` the
 ungated assertion turned that red, as designed. Their `#![cfg(unix)]` came off
 only in the same commit that gives CI's Windows job an anchord to point at
-(anchor `457ed11`) — lifting it first would have failed every Windows run for a
+(anchor `457ed11`, now pinned at `972a6df`) — lifting it first would have failed every Windows run for a
 binary nobody could supply, and the tempting "fix" for that is the hole #108
 closed. Against that anchord: 23 tests, 6.9s, all green.
 

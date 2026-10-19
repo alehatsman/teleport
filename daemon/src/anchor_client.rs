@@ -84,7 +84,6 @@ mod transport {
         use std::time::Duration;
 
         use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-        use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
 
         use crate::winsec;
 
@@ -119,11 +118,11 @@ mod transport {
         ///
         /// At `SECURITY_IDENTIFICATION`, so a server can learn who connected
         /// but cannot act as them (anchor's `docs/09-windows.md` §4.3). That
-        /// is tokio's default and the contract says not to change it; it is
-        /// passed explicitly anyway, with the identical value, because it is
-        /// a promise this client makes and a dependency's default is not a
-        /// promise. `the_client_connects_at_identification_level` pins it
-        /// by asking a real server what it got.
+        /// is tokio's `ClientOptions` default, and anchor's contract says to
+        /// leave it alone rather than override it. Leaving a security property
+        /// to a dependency's default is only safe if something would notice
+        /// the default moving: `the_client_connects_at_identification_level`
+        /// is that, asking a real pipe server what level it actually got.
         ///
         /// `ERROR_FILE_NOT_FOUND` (no anchord for this user) and
         /// `ERROR_ACCESS_DENIED` (a pipe at this name that is not ours to
@@ -132,10 +131,7 @@ mod transport {
         pub(crate) async fn connect(endpoint: &Path) -> io::Result<(ReadHalf, WriteHalf)> {
             let deadline = tokio::time::Instant::now() + BUSY_BUDGET;
             let pipe = loop {
-                match ClientOptions::new()
-                    .security_qos_flags(SECURITY_IDENTIFICATION)
-                    .open(endpoint)
-                {
+                match ClientOptions::new().open(endpoint) {
                     Ok(pipe) => break pipe,
                     Err(e)
                         if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
