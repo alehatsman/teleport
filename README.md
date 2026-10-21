@@ -1,5 +1,9 @@
 # teleport
 
+[![ci](https://github.com/alehatsman/teleport/actions/workflows/ci.yml/badge.svg)](https://github.com/alehatsman/teleport/actions/workflows/ci.yml)
+
+![A terminal held inside a glowing portal ring, with a phone and a browser window tethered to it and a third client dissolving into particles, beside the words "teleport - persistent sessions, disposable clients"](docs/hero.png)
+
 A local, headless terminal/session daemon with disposable clients. `teleportd` owns
 every PTY and child process (shell, Codex, Claude, whatever); your browser, phone, or
 desktop shell just attach and detach. Closing a tab never kills the agent running
